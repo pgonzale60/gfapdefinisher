@@ -604,6 +604,7 @@ def test_create_junction_record_repeat_entry():
 
 def test_top_level_package_exports():
     import gfapdefinisher as g
+    import gfapdefinisher.quirks as gq
 
     assert hasattr(g, "EndStateRecord")
     assert hasattr(g, "JunctionRecord")
@@ -613,5 +614,129 @@ def test_top_level_package_exports():
     assert hasattr(g, "IntervalQuirk")
     assert hasattr(g, "DEFAULT_POLICY")
     assert hasattr(g, "Policy")
-    assert hasattr(g, "create_junction_record") is False or hasattr(g, "create_junction_record")
     assert g.DEFAULT_POLICY is not None
+    # Factory and serdes exported in quirks module namespace and __all__
+    assert hasattr(gq, "create_junction_record")
+    assert "create_junction_record" in gq.__all__
+    assert "emit_end_states_tsv" in gq.__all__
+    assert "parse_end_states_tsv" in gq.__all__
+    assert "emit_junctions_tsv" in gq.__all__
+    assert "parse_junctions_tsv" in gq.__all__
+
+
+def test_end_states_tsv_special_characters_and_comments():
+    """Verify TSV SerDe safely roundtrips fields with special characters, quotes, tabs, and ignores comments/extra columns."""
+    rec = EndStateRecord(
+        feature_id="end_complete:IV:3p",
+        chrom="IV",
+        side="3p",
+        state=EndState.END_COMPLETE,
+        somatic_port="utg010+",
+        germline_port="utg020-",
+        shared_port=None,
+        core_coverage_bp_median=64.5,
+        somatic_depth_ratio=1.02,
+        germline_depth_ratio=0.18,
+        resolved=True,
+        notes='Special note with "quotes", \t tab, and \n newline',
+    )
+    tsv = emit_end_states_tsv([rec])
+    parsed = parse_end_states_tsv(tsv)
+    assert len(parsed) == 1
+    assert parsed[0] == rec
+
+    # TSV with comment lines and extra columns
+    tsv_with_extra = (
+        "# Commentary header\n"
+        "feature_id\tchrom\tside\tstate\tsomatic_port\tgermline_port\tshared_port\t"
+        "core_coverage_bp_median\tsomatic_depth_ratio\tgermline_depth_ratio\tresolved\tnotes\textra_col\n"
+        "# Another comment\n"
+        "end_complete:IV:3p\tIV\t3p\tend_complete\tutg010+\tutg020-\t\t64.5\t1.02\t0.18\tTrue\tClean note\tbonus\n"
+    )
+    parsed_extra = parse_end_states_tsv(tsv_with_extra)
+    assert len(parsed_extra) == 1
+    assert parsed_extra[0].feature_id == "end_complete:IV:3p"
+    assert parsed_extra[0].notes == "Clean note"
+
+
+def test_junctions_tsv_special_characters_and_comments():
+    """Verify JunctionRecord TSV SerDe roundtrips special characters and safely ignores comments and extra columns."""
+    rec = JunctionRecord(
+        feature_id="pde_terminal:IV:3p",
+        chrom="IV",
+        side="3p",
+        junction_class=JunctionClass.PDE_TERMINAL,
+        stem_port="utg010+",
+        somatic_terminus_port="utg011+",
+        germline_continuation_port="utg012-",
+        break_index=1,
+        core_depth_ratio=0.18,
+        read_count=24,
+        confidence_tier="CONFIDENT",
+        notes='Complex note: "diminution"\twith\ttabs\nand newlines',
+    )
+    tsv = emit_junctions_tsv([rec])
+    parsed = parse_junctions_tsv(tsv)
+    assert len(parsed) == 1
+    assert parsed[0] == rec
+
+    tsv_extra = (
+        "# Header note\n"
+        "feature_id\tchrom\tside\tjunction_class\tstem_port\tsomatic_terminus_port\t"
+        "germline_continuation_port\tbreak_index\tcore_depth_ratio\tread_count\tconfidence_tier\tnotes\tunrecognized\n"
+        "pde_terminal:IV:3p\tIV\t3p\tpde_terminal\tutg010+\tutg011+\tutg012-\t1\t0.18\t24\tCONFIDENT\tnotes\textra_val\n"
+    )
+    parsed_extra = parse_junctions_tsv(tsv_extra)
+    assert len(parsed_extra) == 1
+    assert parsed_extra[0].feature_id == "pde_terminal:IV:3p"
+
+
+def test_nonexistent_tsv_raises_filenotfound():
+    """Verify parse functions raise FileNotFoundError when passed nonexistent file paths."""
+    with pytest.raises(FileNotFoundError):
+        parse_end_states_tsv("nonexistent_end_states.tsv")
+
+    with pytest.raises(FileNotFoundError):
+        parse_junctions_tsv("nonexistent_junctions.tsv")
+
+
+def test_junction_record_break_index_validation():
+    """Verify JunctionRecord enforces break_index >= 1."""
+    with pytest.raises(ValueError, match="Break index must be at least 1"):
+        JunctionRecord(
+            feature_id="pde_terminal:I:5p",
+            chrom="I",
+            side="5p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="utg001+",
+            break_index=0,
+        )
+
+    with pytest.raises(ValueError, match="Break index must be at least 1"):
+        JunctionRecord(
+            feature_id="pde_terminal:I:5p",
+            chrom="I",
+            side="5p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="utg001+",
+            break_index=-2,
+        )
+
+
+def test_create_junction_record_core_depth_ratio_precedence():
+    """Verify create_junction_record correctly extracts core_depth_ratio from PdeJunctionCall."""
+    call = PdeJunctionCall(
+        port=SegmentPort("utg000009l", Strand.MINUS),
+        is_pde_junction=True,
+        somatic_port=SegmentPort("utg000211l", Strand.MINUS),
+        germline_port=SegmentPort("utg000069l", Strand.FORWARD),
+        core_depth_ratio=0.155,
+        depth_ratio=0.0,
+    )
+    rec = create_junction_record(
+        call=call,
+        chrom="I",
+        side="5p",
+        junction_class=JunctionClass.PDE_TERMINAL,
+    )
+    assert rec.core_depth_ratio == 0.155
