@@ -421,3 +421,84 @@ def test_benchmark_df5120_resolution_iv_and_v():
     assert res_v.end_state_record.resolved is False
     assert res_v.quirk_record.spanning_read_count == 0
     assert res_v.quirk_record.representative_sequence_selected is False
+
+
+def test_collect_spanning_reads_generator_input():
+    """Verify generator of PAF lines is fully consumed without dropping initial records."""
+    engine = OntBridgingEngine()
+    lines = [
+        _make_paf_line("read_ok", 15000, 1000, 2500, "+", "LEFT", 5000, 3400, 4900),
+        _make_paf_line("read_ok", 15000, 4000, 5500, "+", "RIGHT", 5000, 50, 1550),
+    ]
+
+    # Generator input
+    gen = (line for line in lines)
+    spanning = engine.collect_spanning_reads(gen, "LEFT", "RIGHT")
+    assert len(spanning) == 1
+    assert spanning[0].qname == "read_ok"
+
+
+def test_mixed_strand_port_bridging():
+    """Verify bridging when ports have mixed orientations (e.g. utg000126l- distal cap)."""
+    engine = OntBridgingEngine()
+
+    p_left = SegmentPort("LEFT", Strand.FORWARD)  # Exit at tlen (5000)
+    p_right = SegmentPort("RIGHT", Strand.REVERSE)  # Entry at tlen (5000)
+
+    # Forward walk: matches LEFT on +, RIGHT on -
+    lines_fwd = [
+        _make_paf_line("r_fwd", 15000, 1000, 2500, "+", "LEFT", 5000, 3500, 5000),
+        _make_paf_line("r_fwd", 15000, 4000, 5500, "-", "RIGHT", 5000, 3500, 5000),
+    ]
+    spanning_fwd = engine.collect_spanning_reads(lines_fwd, p_left, p_right)
+    assert len(spanning_fwd) == 1
+    assert spanning_fwd[0].strand == "+"
+    assert spanning_fwd[0].gap_length == 1500
+
+    # Reverse walk: matches RIGHT on +, LEFT on -
+    lines_rev = [
+        _make_paf_line("r_rev", 15000, 1000, 2500, "+", "RIGHT", 5000, 3500, 5000),
+        _make_paf_line("r_rev", 15000, 4000, 5500, "-", "LEFT", 5000, 3500, 5000),
+    ]
+    spanning_rev = engine.collect_spanning_reads(lines_rev, p_left, p_right)
+    assert len(spanning_rev) == 1
+    assert spanning_rev[0].strand == "-"
+    assert spanning_rev[0].gap_length == 1500
+
+
+def test_resolve_satellite_gap_sequence_population_and_index():
+    """Verify representative_read.sequence is populated and custom gap_index is recorded."""
+    engine = OntBridgingEngine()
+
+    paf_lines = [
+        _make_paf_line("r1", 10000, 1000, 2500, "+", "L", 5000, 3500, 5000),
+        _make_paf_line("r1", 10000, 3500, 5000, "+", "R", 5000, 0, 1500),
+        _make_paf_line("r2", 10000, 1000, 2500, "+", "L", 5000, 3500, 5000),
+        _make_paf_line("r2", 10000, 3500, 5000, "+", "R", 5000, 0, 1500),
+    ]
+    reads_seqs = {
+        "r1": "A" * 2500 + "G" * 1000 + "T" * 6500,
+        "r2": "A" * 2500 + "G" * 1000 + "T" * 6500,
+    }
+
+    # Pass pre-collected spanning reads without sequence, then pass sequences to resolve_satellite_gap
+    spanning_without_seq = engine.collect_spanning_reads(paf_lines, "L", "R")
+    assert spanning_without_seq[0].sequence is None
+
+    res = engine.resolve_satellite_gap(
+        chrom="IV",
+        side="3p",
+        left_port="L",
+        right_port="R",
+        gap_index=2,
+        spanning_reads=spanning_without_seq,
+        reads_sequences=reads_seqs,
+        somatic_depth_ratio=0.98,
+    )
+
+    assert res.state == EndState.END_COMPLETE
+    assert res.quirk_record.feature_id == "sat_gap_variable:IV:3p:2"
+    assert res.representative_sequence == "G" * 1000
+    assert res.representative_read is not None
+    assert res.representative_read.sequence == "G" * 1000
+    assert res.end_state_record.somatic_depth_ratio == 0.98
