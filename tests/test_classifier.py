@@ -613,3 +613,144 @@ def test_biological_branch_ranking():
     assert call.germline_port == p_cand_bio
     assert abs(call.core_depth_ratio - (11.0 / 60.0)) < 1e-4
     assert call.core_depth_ratio == call.depth_ratio
+
+
+def test_distinct_somatic_and_germline_branches_when_cap_matches_core_stoichiometry():
+    """Verify somatic cap is never assigned to both somatic_port and germline_port.
+
+    When stem depth is below core coverage (e.g. 35x vs 60x core coverage), a somatic cap
+    with depth 18x has ratio_to_stem = 18/35 = 0.514 > 0.33 (somatic candidate) AND
+    ratio_to_core = 18/60 = 0.30 <= 0.33 (stoichiometrically in germline range).
+    The classifier must assign the cap to somatic_port and select the distinct GRS arm for germline_port.
+    """
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=100000, depth=35.0)
+    graph.add_segment("cap", length=20000, depth=18.0)
+    graph.add_segment("grs", length=10000, depth=3.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_cap = SegmentPort("cap", Strand.FORWARD)
+    p_grs = SegmentPort("grs", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_cap, cigar="100M")
+    graph.add_edge(p_stem, p_grs, cigar="100M")
+
+    ledger = {
+        p_stem.to_symbol(): _make_dummy_evidence(
+            "stem", "3p", depth=35.0, degree=2, is_tip=False, usco_hit_count=5, tiara_class="eukarya"
+        ),
+        p_cap.to_symbol(): _make_dummy_evidence(
+            "cap", "3p", depth=18.0, degree=0, is_tip=True, has_terminal_telomere=True, tiara_class="eukarya"
+        ),
+        p_grs.to_symbol(): _make_dummy_evidence("grs", "3p", depth=3.0, degree=0, is_tip=True, tiara_class="eukarya"),
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger, core_coverage=60.0)
+    assert call.is_pde_junction is True
+    assert call.somatic_port == p_cap
+    assert call.germline_port == p_grs
+    assert call.somatic_port != call.germline_port
+    assert call.germline_port.name == "grs"
+    assert abs(call.core_depth_ratio - (3.0 / 60.0)) < 1e-4
+
+
+def test_rejection_when_somatic_cap_is_only_germline_depth_branch():
+    """Verify that if somatic cap is the only branch with germline-level core depth, junction is rejected."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=100000, depth=35.0)
+    graph.add_segment("cap", length=20000, depth=18.0)
+    graph.add_segment("noise", length=10000, depth=0.1)  # 0.1 / 60 = 0.0016 < min_germline_depth_ratio (0.04)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_cap = SegmentPort("cap", Strand.FORWARD)
+    p_noise = SegmentPort("noise", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_cap, cigar="100M")
+    graph.add_edge(p_stem, p_noise, cigar="100M")
+
+    ledger = {
+        p_stem.to_symbol(): _make_dummy_evidence(
+            "stem", "3p", depth=35.0, degree=2, is_tip=False, usco_hit_count=5, tiara_class="eukarya"
+        ),
+        p_cap.to_symbol(): _make_dummy_evidence(
+            "cap", "3p", depth=18.0, degree=0, is_tip=True, has_terminal_telomere=True, tiara_class="eukarya"
+        ),
+        p_noise.to_symbol(): _make_dummy_evidence("noise", "3p", depth=0.1, degree=0, is_tip=True),
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger, core_coverage=60.0)
+    # Must reject because no distinct germline continuation exists
+    assert call.is_pde_junction is False
+
+
+def test_germline_candidate_deterministic_tie_breaker():
+    """Verify multivalent forks with identical depth and length tie-break deterministically by name."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=100000, depth=60.0)
+    graph.add_segment("cap", length=25000, depth=55.0)
+    # Three candidates with identical depth and length
+    graph.add_segment("cand_c", length=20000, depth=11.0)
+    graph.add_segment("cand_a", length=20000, depth=11.0)
+    graph.add_segment("cand_b", length=20000, depth=11.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_cap = SegmentPort("cap", Strand.FORWARD)
+    p_c = SegmentPort("cand_c", Strand.FORWARD)
+    p_a = SegmentPort("cand_a", Strand.FORWARD)
+    p_b = SegmentPort("cand_b", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_cap, cigar="100M")
+    graph.add_edge(p_stem, p_c, cigar="100M")
+    graph.add_edge(p_stem, p_a, cigar="100M")
+    graph.add_edge(p_stem, p_b, cigar="100M")
+
+    ledger = {
+        p_stem.to_symbol(): _make_dummy_evidence(
+            "stem", "3p", depth=60.0, degree=4, is_tip=False, usco_hit_count=5, tiara_class="eukarya"
+        ),
+        p_cap.to_symbol(): _make_dummy_evidence(
+            "cap", "3p", depth=55.0, degree=0, is_tip=True, has_terminal_telomere=True, tiara_class="eukarya"
+        ),
+        p_c.to_symbol(): _make_dummy_evidence("cand_c", "3p", depth=11.0, degree=0, is_tip=True),
+        p_a.to_symbol(): _make_dummy_evidence("cand_a", "3p", depth=11.0, degree=0, is_tip=True),
+        p_b.to_symbol(): _make_dummy_evidence("cand_b", "3p", depth=11.0, degree=0, is_tip=True),
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger, core_coverage=60.0)
+    assert call.is_pde_junction is True
+    assert call.somatic_port == p_cap
+    # Deterministic tie-breaker picks cand_a over cand_b and cand_c
+    assert call.germline_port == p_a
+
+
+def test_self_loop_edge_on_stem_is_ignored():
+    """Verify that an outgoing self-loop edge back to stem is ignored and does not break classification."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=100000, depth=60.0)
+    graph.add_segment("cap", length=25000, depth=55.0)
+    graph.add_segment("grs", length=20000, depth=11.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_stem_rev = SegmentPort("stem", Strand.REVERSE)
+    p_cap = SegmentPort("cap", Strand.FORWARD)
+    p_grs = SegmentPort("grs", Strand.FORWARD)
+
+    # Stem has outgoing edge to cap, grs, and a self-loop back to stem-
+    graph.add_edge(p_stem, p_cap, cigar="100M")
+    graph.add_edge(p_stem, p_grs, cigar="100M")
+    graph.add_edge(p_stem, p_stem_rev, cigar="100M")
+
+    ledger = {
+        p_stem.to_symbol(): _make_dummy_evidence(
+            "stem", "3p", depth=60.0, degree=3, is_tip=False, usco_hit_count=5, tiara_class="eukarya"
+        ),
+        p_cap.to_symbol(): _make_dummy_evidence(
+            "cap", "3p", depth=55.0, degree=0, is_tip=True, has_terminal_telomere=True, tiara_class="eukarya"
+        ),
+        p_grs.to_symbol(): _make_dummy_evidence("grs", "3p", depth=11.0, degree=0, is_tip=True),
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger, core_coverage=60.0)
+    assert call.is_pde_junction is True
+    assert call.somatic_port == p_cap
+    assert call.germline_port == p_grs

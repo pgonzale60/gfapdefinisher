@@ -82,7 +82,7 @@ A segment port $p$ is called as a `PDE Junction` if and only if all of the follo
 4. **Germline Branch (Stoichiometric GRS Continuation)**:
    Concurrently, at least one outgoing branch from $p$ exhibits a stoichiometric depth ratio relative to core somatic coverage ($C_{\text{core}}$) in the calibrated range:
    $$\text{policy.stoichiometry.min\_germline\_depth\_ratio} \le \frac{rd_{\text{germline}}}{C_{\text{core}}} \le \text{policy.stoichiometry.max\_germline\_depth\_ratio}$$
-   governed strictly by `policy.stoichiometry` (`BIO-002`). Candidate germline branches are ranked by biological criteria (proximity to expected GRS stoichiometry $( \text{min} + \text{max} ) / 2$, segment length, and branch depth support), using unitig port name strictly as a deterministic tie-breaker.
+   governed strictly by `policy.stoichiometry` (`BIO-002`). Candidate germline branches are ranked by biological criteria (proximity to expected GRS stoichiometry $( \text{min} + \text{max} ) / 2$, segment length, and branch depth support), using unitig port name strictly as a deterministic tie-breaker. The germline continuation branch must be distinct from the somatic terminus branch.
 5. **Complex GRS Retention (`BIO-004`, `BIO-005`)**:
    A candidate germline branch is accepted based on depth stoichiometry contrast regardless of whether it continues as an unbranched segment or leads into a complex repeat, satellite array, or graph tangle. Retaining the initial GRS entry from a confident PDE junction ensures partial GRS sequences and satellite arrays are preserved (`BIO-004`) rather than falsely discarding the diminution call.
 6. **Deterministic Label Assignment**:
