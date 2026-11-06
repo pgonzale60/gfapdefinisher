@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from gfapdefinisher.classifier import PdeJunctionCall
+from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.quirks import (
+    END_STATE_TSV_COLUMNS,
+    JUNCTION_TSV_COLUMNS,
     EndState,
     EndStateRecord,
     IntervalQuirk,
@@ -13,7 +17,12 @@ from gfapdefinisher.quirks import (
     JunctionRecord,
     QuirkRecord,
     build_feature_id,
+    create_junction_record,
+    emit_end_states_tsv,
+    emit_junctions_tsv,
     emit_quirks_tsv,
+    parse_end_states_tsv,
+    parse_junctions_tsv,
     parse_quirks_tsv,
 )
 
@@ -342,3 +351,267 @@ def test_sat_gap_variable_resolution_rule_semantics():
     )
     assert end_state.state is EndState.END_COMPLETE
     assert end_state.resolved is True
+
+
+def test_end_states_tsv_roundtrip(tmp_path: Path):
+    records = [
+        EndStateRecord(
+            feature_id="end_complete:I:5p",
+            chrom="I",
+            side="5p",
+            state=EndState.END_COMPLETE,
+            somatic_port="utg001+",
+            germline_port="utg002-",
+            shared_port=None,
+            core_coverage_bp_median=45.5,
+            somatic_depth_ratio=1.0,
+            germline_depth_ratio=0.25,
+            resolved=True,
+            notes="Fully resolved somatic and germline caps",
+        ),
+        EndStateRecord(
+            feature_id="end_somatic_missing:V:3p",
+            chrom="V",
+            side="3p",
+            state=EndState.END_SOMATIC_MISSING,
+            somatic_port=None,
+            germline_port="utg088+",
+            shared_port=None,
+            core_coverage_bp_median=50.0,
+            somatic_depth_ratio=None,
+            germline_depth_ratio=0.10,
+            resolved=False,
+            notes="Somatic stub dropout",
+        ),
+        EndStateRecord(
+            feature_id="end_germline_orphan:III:5p",
+            chrom="III",
+            side="5p",
+            state=EndState.END_GERMLINE_ORPHAN,
+            somatic_port="utg015-",
+            germline_port=None,
+            shared_port=None,
+            core_coverage_bp_median=42.0,
+            somatic_depth_ratio=0.98,
+            germline_depth_ratio=None,
+            resolved=False,
+            notes="Unbridged germline arm",
+        ),
+        EndStateRecord(
+            feature_id="end_shared_exempt:II:5p",
+            chrom="II",
+            side="5p",
+            state=EndState.END_SHARED_EXEMPT,
+            somatic_port=None,
+            germline_port=None,
+            shared_port="utg053-",
+            core_coverage_bp_median=48.2,
+            somatic_depth_ratio=None,
+            germline_depth_ratio=None,
+            resolved=True,
+            notes="Exempt distal rDNA telomeric cap",
+        ),
+    ]
+
+    # Test in-memory emission and parsing
+    tsv_content = emit_end_states_tsv(records)
+    assert tsv_content.startswith("\t".join(END_STATE_TSV_COLUMNS))
+    parsed = parse_end_states_tsv(tsv_content)
+    assert len(parsed) == len(records)
+    for orig, res in zip(records, parsed, strict=True):
+        assert orig == res
+
+    # Test emission and parsing via Path
+    tsv_file = tmp_path / "end_states.tsv"
+    ret_content = emit_end_states_tsv(records, tsv_file)
+    assert ret_content == tsv_content
+    assert tsv_file.exists()
+    parsed_path = parse_end_states_tsv(tsv_file)
+    assert parsed_path == records
+
+    # Test parsing via string filename
+    parsed_str_path = parse_end_states_tsv(str(tsv_file))
+    assert parsed_str_path == records
+
+    # Test parsing via TextIO
+    parsed_stream = parse_end_states_tsv(StringIO(tsv_content))
+    assert parsed_stream == records
+
+    # Test empty sequence handling
+    empty_tsv = emit_end_states_tsv([])
+    assert empty_tsv == "\t".join(END_STATE_TSV_COLUMNS) + "\n"
+    assert parse_end_states_tsv(empty_tsv) == []
+    assert parse_end_states_tsv("") == []
+
+
+def test_junctions_tsv_roundtrip(tmp_path: Path):
+    records = [
+        JunctionRecord(
+            feature_id="pde_terminal:IV:3p",
+            chrom="IV",
+            side="3p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="utg010+",
+            somatic_terminus_port="utg011+",
+            germline_continuation_port="utg012-",
+            break_index=1,
+            core_depth_ratio=0.18,
+            read_count=24,
+            confidence_tier="CONFIDENT",
+            notes="Benchmark validated PDE junction",
+        ),
+        JunctionRecord(
+            feature_id="pde_intercalary:X:mid:2",
+            chrom="X",
+            side="mid",
+            junction_class=JunctionClass.PDE_INTERCALARY,
+            stem_port="utg045-",
+            somatic_terminus_port=None,
+            germline_continuation_port="utg046+",
+            break_index=2,
+            core_depth_ratio=0.08,
+            read_count=15,
+            confidence_tier="PROVISIONAL",
+            notes="Internal diminution break 2",
+        ),
+        JunctionRecord(
+            feature_id="pde_terminal:II:5p",
+            chrom="II",
+            side="5p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="utg030+",
+            somatic_terminus_port=None,
+            germline_continuation_port=None,
+            break_index=1,
+            core_depth_ratio=None,
+            read_count=None,
+            confidence_tier="CONFIDENT",
+            notes="",
+        ),
+    ]
+
+    # Test in-memory emission and parsing
+    tsv_content = emit_junctions_tsv(records)
+    assert tsv_content.startswith("\t".join(JUNCTION_TSV_COLUMNS))
+    parsed = parse_junctions_tsv(tsv_content)
+    assert len(parsed) == len(records)
+    for orig, res in zip(records, parsed, strict=True):
+        assert orig == res
+
+    # Test emission and parsing via Path
+    tsv_file = tmp_path / "junctions.tsv"
+    ret_content = emit_junctions_tsv(records, tsv_file)
+    assert ret_content == tsv_content
+    assert tsv_file.exists()
+    parsed_path = parse_junctions_tsv(tsv_file)
+    assert parsed_path == records
+
+    # Test parsing via string filename
+    parsed_str_path = parse_junctions_tsv(str(tsv_file))
+    assert parsed_str_path == records
+
+    # Test parsing via TextIO
+    parsed_stream = parse_junctions_tsv(StringIO(tsv_content))
+    assert parsed_stream == records
+
+    # Test empty sequence handling
+    empty_tsv = emit_junctions_tsv([])
+    assert empty_tsv == "\t".join(JUNCTION_TSV_COLUMNS) + "\n"
+    assert parse_junctions_tsv(empty_tsv) == []
+    assert parse_junctions_tsv("") == []
+
+
+def test_create_junction_record_terminal():
+    call = PdeJunctionCall(
+        port=SegmentPort("utg000009l", Strand.MINUS),
+        is_pde_junction=True,
+        somatic_port=SegmentPort("utg000211l", Strand.MINUS),
+        germline_port=SegmentPort("utg000069l", Strand.FORWARD),
+        depth_ratio=0.0968,
+    )
+    rec = create_junction_record(
+        call=call,
+        chrom="I",
+        side="5p",
+        junction_class=JunctionClass.PDE_TERMINAL,
+        confidence_tier="CONFIDENT",
+    )
+
+    assert rec.feature_id == "pde_terminal:I:5p"
+    assert rec.chrom == "I"
+    assert rec.side == "5p"
+    assert rec.junction_class == JunctionClass.PDE_TERMINAL
+    assert rec.stem_port == "utg000009l-"
+    assert rec.somatic_terminus_port == "utg000211l-"
+    assert rec.germline_continuation_port == "utg000069l+"
+    assert rec.core_depth_ratio == 0.0968
+    assert rec.confidence_tier == "CONFIDENT"
+    assert rec.break_index == 1
+    assert rec.notes == ""
+
+
+def test_create_junction_record_intercalary():
+    call = PdeJunctionCall(
+        port=SegmentPort("utg000045l", Strand.FORWARD),
+        is_pde_junction=True,
+        somatic_port=None,
+        germline_port=SegmentPort("utg000046l", Strand.FORWARD),
+        depth_ratio=0.08,
+    )
+    rec = create_junction_record(
+        call=call,
+        chrom="X",
+        side="mid",
+        junction_class="pde_intercalary",
+        confidence_tier="PROVISIONAL",
+        break_index=2,
+        notes="Internal break call",
+    )
+
+    assert rec.feature_id == "pde_intercalary:X:mid:2"
+    assert rec.chrom == "X"
+    assert rec.side == "mid"
+    assert rec.junction_class == JunctionClass.PDE_INTERCALARY
+    assert rec.stem_port == "utg000045l+"
+    assert rec.somatic_terminus_port is None
+    assert rec.germline_continuation_port == "utg000046l+"
+    assert rec.break_index == 2
+    assert rec.confidence_tier == "PROVISIONAL"
+    assert rec.notes == "Internal break call"
+
+
+def test_create_junction_record_repeat_entry():
+    call = PdeJunctionCall(
+        port=SegmentPort("utg000019l", Strand.FORWARD),
+        is_pde_junction=True,
+        somatic_port=SegmentPort("utg000200l", Strand.MINUS),
+        germline_port=SegmentPort("utg000071l", Strand.FORWARD),
+        depth_ratio=0.1061,
+        is_repeat_entry=True,
+    )
+    rec = create_junction_record(
+        call=call,
+        chrom="IV",
+        side="3p",
+        junction_class=JunctionClass.PDE_TERMINAL,
+        notes="Context note",
+    )
+
+    assert rec.feature_id == "pde_terminal:IV:3p"
+    assert "repeat_entry" in rec.notes
+    assert "Context note" in rec.notes
+
+
+def test_top_level_package_exports():
+    import gfapdefinisher as g
+
+    assert hasattr(g, "EndStateRecord")
+    assert hasattr(g, "JunctionRecord")
+    assert hasattr(g, "QuirkRecord")
+    assert hasattr(g, "EndState")
+    assert hasattr(g, "JunctionClass")
+    assert hasattr(g, "IntervalQuirk")
+    assert hasattr(g, "DEFAULT_POLICY")
+    assert hasattr(g, "Policy")
+    assert hasattr(g, "create_junction_record") is False or hasattr(g, "create_junction_record")
+    assert g.DEFAULT_POLICY is not None

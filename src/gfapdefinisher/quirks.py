@@ -10,21 +10,32 @@ Ratified in Issue #26.
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from io import StringIO
 from pathlib import Path
 from typing import Any, TextIO
 
+from gfapdefinisher.classifier import PdeJunctionCall
+
 __all__ = [
+    "END_STATE_TSV_COLUMNS",
+    "JUNCTION_TSV_COLUMNS",
+    "QUIRK_TSV_COLUMNS",
     "EndState",
-    "JunctionClass",
-    "IntervalQuirk",
     "EndStateRecord",
+    "IntervalQuirk",
+    "JunctionClass",
     "JunctionRecord",
     "QuirkRecord",
     "build_feature_id",
+    "create_junction_record",
+    "emit_end_states_tsv",
+    "emit_junctions_tsv",
     "emit_quirks_tsv",
+    "parse_end_states_tsv",
+    "parse_junctions_tsv",
     "parse_quirks_tsv",
 ]
 
@@ -145,6 +156,23 @@ class EndStateRecord:
         d["state"] = self.state.value
         return d
 
+    def to_tsv_row(self) -> list[str]:
+        """Serialize record to an ordered list of string values for TSV emission."""
+        return [
+            self.feature_id,
+            self.chrom,
+            self.side,
+            self.state.value,
+            self.somatic_port or "",
+            self.germline_port or "",
+            self.shared_port or "",
+            str(self.core_coverage_bp_median) if self.core_coverage_bp_median is not None else "",
+            str(self.somatic_depth_ratio) if self.somatic_depth_ratio is not None else "",
+            str(self.germline_depth_ratio) if self.germline_depth_ratio is not None else "",
+            str(self.resolved),
+            self.notes,
+        ]
+
 
 @dataclass(slots=True)
 class JunctionRecord:
@@ -161,6 +189,7 @@ class JunctionRecord:
         break_index: 1-based index for intercalary breaks.
         core_depth_ratio: Depth ratio of germline branch relative to core somatic coverage ($C_{\text{core}}$).
         read_count: Supporting read count across the junction boundary.
+        confidence_tier: Confidence tier designation (e.g. 'CONFIDENT').
         notes: Contextual provenance notes.
     """
 
@@ -174,6 +203,7 @@ class JunctionRecord:
     break_index: int = 1
     core_depth_ratio: float | None = None
     read_count: int | None = None
+    confidence_tier: str = "CONFIDENT"
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -191,6 +221,23 @@ class JunctionRecord:
         d = asdict(self)
         d["junction_class"] = self.junction_class.value
         return d
+
+    def to_tsv_row(self) -> list[str]:
+        """Serialize record to an ordered list of string values for TSV emission."""
+        return [
+            self.feature_id,
+            self.chrom,
+            self.side,
+            self.junction_class.value,
+            self.stem_port,
+            self.somatic_terminus_port or "",
+            self.germline_continuation_port or "",
+            str(self.break_index),
+            str(self.core_depth_ratio) if self.core_depth_ratio is not None else "",
+            str(self.read_count) if self.read_count is not None else "",
+            self.confidence_tier,
+            self.notes,
+        ]
 
 
 @dataclass(slots=True)
@@ -401,3 +448,247 @@ def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
             return _parse_rows(reader)
     reader = csv.DictReader(file, delimiter="\t")
     return _parse_rows(reader)
+
+
+END_STATE_TSV_COLUMNS: list[str] = [
+    "feature_id",
+    "chrom",
+    "side",
+    "state",
+    "somatic_port",
+    "germline_port",
+    "shared_port",
+    "core_coverage_bp_median",
+    "somatic_depth_ratio",
+    "germline_depth_ratio",
+    "resolved",
+    "notes",
+]
+
+JUNCTION_TSV_COLUMNS: list[str] = [
+    "feature_id",
+    "chrom",
+    "side",
+    "junction_class",
+    "stem_port",
+    "somatic_terminus_port",
+    "germline_continuation_port",
+    "break_index",
+    "core_depth_ratio",
+    "read_count",
+    "confidence_tier",
+    "notes",
+]
+
+
+def emit_end_states_tsv(
+    records: Sequence[EndStateRecord],
+    out_file: TextIO | Path | str | None = None,
+) -> str:
+    """Emit a sequence of EndStateRecords as a standardized TSV string (and optional file).
+
+    Args:
+        records: Sequence of EndStateRecord objects.
+        out_file: Optional destination file path or open text file object.
+
+    Returns:
+        Formatted TSV content as a string.
+    """
+    buffer = StringIO()
+    buffer.write("\t".join(END_STATE_TSV_COLUMNS) + "\n")
+    for rec in records:
+        buffer.write("\t".join(rec.to_tsv_row()) + "\n")
+    content = buffer.getvalue()
+
+    if out_file is not None:
+        if isinstance(out_file, str | Path):
+            with open(out_file, "w", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            out_file.write(content)
+
+    return content
+
+
+def parse_end_states_tsv(tsv_content: str | Path | TextIO) -> list[EndStateRecord]:
+    """Parse a standardized end_states TSV content string or file into a list of EndStateRecords.
+
+    Args:
+        tsv_content: TSV content string, open text stream, or file path.
+
+    Returns:
+        List of deserialized EndStateRecord instances.
+    """
+
+    def _parse_reader(reader: csv.DictReader[str]) -> list[EndStateRecord]:
+        records: list[EndStateRecord] = []
+        for row in reader:
+            if not row or not row.get("feature_id"):
+                continue
+            resolved_raw = row.get("resolved", "").strip().lower()
+            resolved = resolved_raw in ("true", "1") if resolved_raw else True
+
+            records.append(
+                EndStateRecord(
+                    feature_id=row["feature_id"],
+                    chrom=row["chrom"],
+                    side=row["side"],
+                    state=EndState(row["state"]),
+                    somatic_port=row.get("somatic_port") or None,
+                    germline_port=row.get("germline_port") or None,
+                    shared_port=row.get("shared_port") or None,
+                    core_coverage_bp_median=_to_float_or_none(row, "core_coverage_bp_median"),
+                    somatic_depth_ratio=_to_float_or_none(row, "somatic_depth_ratio"),
+                    germline_depth_ratio=_to_float_or_none(row, "germline_depth_ratio"),
+                    resolved=resolved,
+                    notes=row.get("notes", ""),
+                )
+            )
+        return records
+
+    if isinstance(tsv_content, Path):
+        with open(tsv_content, encoding="utf-8") as f:
+            return _parse_reader(csv.DictReader(f, delimiter="\t"))
+    if isinstance(tsv_content, str):
+        if "\n" not in tsv_content and "\t" not in tsv_content and Path(tsv_content).is_file():
+            with open(tsv_content, encoding="utf-8") as f:
+                return _parse_reader(csv.DictReader(f, delimiter="\t"))
+        return _parse_reader(csv.DictReader(StringIO(tsv_content), delimiter="\t"))
+    return _parse_reader(csv.DictReader(tsv_content, delimiter="\t"))
+
+
+def emit_junctions_tsv(
+    records: Sequence[JunctionRecord],
+    out_file: TextIO | Path | str | None = None,
+) -> str:
+    """Emit a sequence of JunctionRecords as a standardized TSV string (and optional file).
+
+    Args:
+        records: Sequence of JunctionRecord objects.
+        out_file: Optional destination file path or open text file object.
+
+    Returns:
+        Formatted TSV content as a string.
+    """
+    buffer = StringIO()
+    buffer.write("\t".join(JUNCTION_TSV_COLUMNS) + "\n")
+    for rec in records:
+        buffer.write("\t".join(rec.to_tsv_row()) + "\n")
+    content = buffer.getvalue()
+
+    if out_file is not None:
+        if isinstance(out_file, str | Path):
+            with open(out_file, "w", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            out_file.write(content)
+
+    return content
+
+
+def parse_junctions_tsv(tsv_content: str | Path | TextIO) -> list[JunctionRecord]:
+    """Parse a standardized junctions TSV content string or file into a list of JunctionRecords.
+
+    Args:
+        tsv_content: TSV content string, open text stream, or file path.
+
+    Returns:
+        List of deserialized JunctionRecord instances.
+    """
+
+    def _parse_reader(reader: csv.DictReader[str]) -> list[JunctionRecord]:
+        records: list[JunctionRecord] = []
+        for row in reader:
+            if not row or not row.get("feature_id"):
+                continue
+            records.append(
+                JunctionRecord(
+                    feature_id=row["feature_id"],
+                    chrom=row["chrom"],
+                    side=row["side"],
+                    junction_class=JunctionClass(row["junction_class"]),
+                    stem_port=row["stem_port"],
+                    somatic_terminus_port=row.get("somatic_terminus_port") or None,
+                    germline_continuation_port=row.get("germline_continuation_port") or None,
+                    break_index=int(row.get("break_index", 1) or 1),
+                    core_depth_ratio=_to_float_or_none(row, "core_depth_ratio"),
+                    read_count=_to_int_or_none(row, "read_count"),
+                    confidence_tier=row.get("confidence_tier") or "CONFIDENT",
+                    notes=row.get("notes", ""),
+                )
+            )
+        return records
+
+    if isinstance(tsv_content, Path):
+        with open(tsv_content, encoding="utf-8") as f:
+            return _parse_reader(csv.DictReader(f, delimiter="\t"))
+    if isinstance(tsv_content, str):
+        if "\n" not in tsv_content and "\t" not in tsv_content and Path(tsv_content).is_file():
+            with open(tsv_content, encoding="utf-8") as f:
+                return _parse_reader(csv.DictReader(f, delimiter="\t"))
+        return _parse_reader(csv.DictReader(StringIO(tsv_content), delimiter="\t"))
+    return _parse_reader(csv.DictReader(tsv_content, delimiter="\t"))
+
+
+def create_junction_record(
+    call: PdeJunctionCall,
+    chrom: str,
+    side: str,
+    junction_class: JunctionClass | str,
+    confidence_tier: str = "CONFIDENT",
+    break_index: int = 1,
+    read_count: int | None = None,
+    notes: str = "",
+) -> JunctionRecord:
+    """Construct a Layer 2 JunctionRecord from a classifier PdeJunctionCall.
+
+    Args:
+        call: PdeJunctionCall output from PDE junction classification.
+        chrom: Chromosome name (e.g. 'I', 'IV', 'X').
+        side: Arm end or locus ('5p', '3p', 'mid').
+        junction_class: JunctionClass enum or value ('pde_terminal' or 'pde_intercalary').
+        confidence_tier: Classification confidence tier (default 'CONFIDENT').
+        break_index: 1-based index for intercalary breaks.
+        read_count: Optional supporting read count across the junction.
+        notes: Contextual notes or provenance information.
+
+    Returns:
+        Canonical JunctionRecord instance.
+    """
+    j_class = JunctionClass(junction_class) if not isinstance(junction_class, JunctionClass) else junction_class
+
+    if j_class == JunctionClass.PDE_INTERCALARY:
+        fid = build_feature_id(j_class, chrom, side, index=break_index)
+    else:
+        fid = build_feature_id(j_class, chrom, side, index=break_index if break_index > 1 else None)
+
+    stem_port = call.port.to_symbol() if hasattr(call.port, "to_symbol") else str(call.port)
+    somatic_port = (
+        call.somatic_port.to_symbol()
+        if hasattr(call.somatic_port, "to_symbol")
+        else (str(call.somatic_port) if call.somatic_port is not None else None)
+    )
+    germline_port = (
+        call.germline_port.to_symbol()
+        if hasattr(call.germline_port, "to_symbol")
+        else (str(call.germline_port) if call.germline_port is not None else None)
+    )
+
+    final_notes = notes
+    if getattr(call, "is_repeat_entry", False):
+        final_notes = f"{notes}; repeat_entry" if notes else "repeat_entry"
+
+    return JunctionRecord(
+        feature_id=fid,
+        chrom=chrom,
+        side=side,
+        junction_class=j_class,
+        stem_port=stem_port,
+        somatic_terminus_port=somatic_port,
+        germline_continuation_port=germline_port,
+        break_index=break_index,
+        core_depth_ratio=call.depth_ratio if getattr(call, "depth_ratio", None) is not None else None,
+        read_count=read_count,
+        confidence_tier=confidence_tier,
+        notes=final_notes,
+    )
