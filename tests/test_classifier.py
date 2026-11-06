@@ -165,7 +165,9 @@ def test_canonical_pde_junction_detection_direct_cap():
     graph.add_edge(p_stem, p_som, cigar="100M")
     graph.add_edge(p_stem, p_grs, cigar="100M")
 
-    ev_stem = _make_dummy_evidence("stem", "3p", depth=60.0, degree=2, is_tip=False, usco_hit_count=10)
+    ev_stem = _make_dummy_evidence(
+        "stem", "3p", depth=60.0, degree=2, is_tip=False, usco_hit_count=10, tiara_class="eukarya"
+    )
     ev_som = _make_dummy_evidence("somatic_cap", "3p", depth=50.0, degree=0, is_tip=True, has_terminal_telomere=True)
     ev_grs = _make_dummy_evidence("germline_grs", "3p", depth=6.0, degree=0, is_tip=True, has_terminal_telomere=False)
 
@@ -181,6 +183,8 @@ def test_canonical_pde_junction_detection_direct_cap():
     assert call.somatic_port == p_som
     assert call.germline_port == p_grs
     assert abs(call.depth_ratio - 0.10) < 1e-4
+    assert abs(call.core_depth_ratio - 0.10) < 1e-4
+    assert abs(call.stem_depth_ratio - 0.10) < 1e-4
 
 
 def test_1hop_pde_junction_detection_linked_cap():
@@ -202,7 +206,9 @@ def test_1hop_pde_junction_detection_linked_cap():
     # som_mid links 1 hop further to som_cap (telomere cap tip)
     graph.add_edge(p_som_mid, p_som_cap, cigar="100M")
 
-    ev_stem = _make_dummy_evidence("stem", "3p", depth=60.0, degree=2, is_tip=False)
+    ev_stem = _make_dummy_evidence(
+        "stem", "3p", depth=60.0, degree=2, is_tip=False, usco_hit_count=10, tiara_class="eukarya"
+    )
     ev_som_mid = _make_dummy_evidence("som_mid", "3p", depth=55.0, degree=1, is_tip=False)
     ev_som_cap = _make_dummy_evidence("som_cap", "3p", depth=50.0, degree=0, is_tip=True, has_terminal_telomere=True)
     ev_grs = _make_dummy_evidence("germline_grs", "3p", depth=6.0, degree=0, is_tip=True)
@@ -219,6 +225,8 @@ def test_1hop_pde_junction_detection_linked_cap():
     assert call.somatic_port == p_som_mid
     assert call.germline_port == p_grs
     assert abs(call.depth_ratio - 0.10) < 1e-4
+    assert abs(call.core_depth_ratio - 0.10) < 1e-4
+    assert abs(call.stem_depth_ratio - 0.10) < 1e-4
 
 
 def test_negative_cases_symmetric_bubble():
@@ -274,7 +282,7 @@ def test_negative_cases_depth_ratio_too_low():
 
 
 def test_negative_cases_depth_ratio_too_high():
-    """Verify germline candidate ratio above 0.40 (e.g. 30x / 60x = 0.50) is rejected."""
+    """Verify germline candidate ratio above 0.33 (e.g. 30x / 60x = 0.50) is rejected."""
     graph = BidirectedGraph()
     graph.add_segment("stem", length=100000, depth=60.0)
     graph.add_segment("somatic_cap", length=25000, depth=50.0)
@@ -351,7 +359,7 @@ def test_custom_policy_override():
         p_grs.to_symbol(): _make_dummy_evidence("grs", "3p", depth=45.0),
     }
 
-    # Under default policy (max_germline_depth_ratio=0.40), 45/100 = 0.45 is too high
+    # Under default policy (max_germline_depth_ratio=0.33), 45/100 = 0.45 is too high
     call_default = classify_pde_junction(p_stem, graph, ledger)
     assert call_default.is_pde_junction is False
 
@@ -563,3 +571,45 @@ def test_complex_grs_repeat_entry():
     assert call.somatic_port == p_som
     assert call.germline_port == p_rep
     assert call.is_repeat_entry is True
+
+
+def test_biological_branch_ranking():
+    """Verify germline candidates rank by proximity to expected stoichiometry and length over alphabetical sorting."""
+    # Under alphabetical sorting, "utg000010l" would be picked before "utg000099l".
+    # But biologically, "utg000099l" has depth 11x (core ratio 11/60=0.1833, closer to median (0.04+0.33)/2 = 0.185)
+    # and longer segment length (50 kb vs 10 kb), while "utg000010l" has depth 18x (core ratio 18/60=0.30).
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=100000, depth=60.0)
+    graph.add_segment("somatic_cap", length=25000, depth=50.0)
+    graph.add_segment("utg000010l", length=10000, depth=18.0)  # Alphabetically first, but stoichiometric outlier (0.30)
+    graph.add_segment(
+        "utg000099l", length=50000, depth=11.0
+    )  # Alphabetically second, but closer to expected ratio (0.1833) and longer
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_som = SegmentPort("somatic_cap", Strand.FORWARD)
+    p_cand_alpha = SegmentPort("utg000010l", Strand.FORWARD)
+    p_cand_bio = SegmentPort("utg000099l", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_som, cigar="100M")
+    graph.add_edge(p_stem, p_cand_alpha, cigar="100M")
+    graph.add_edge(p_stem, p_cand_bio, cigar="100M")
+
+    ledger = {
+        p_stem.to_symbol(): _make_dummy_evidence(
+            "stem", "3p", depth=60.0, degree=3, is_tip=False, usco_hit_count=10, tiara_class="eukarya"
+        ),
+        p_som.to_symbol(): _make_dummy_evidence(
+            "somatic_cap", "3p", depth=50.0, degree=0, is_tip=True, has_terminal_telomere=True
+        ),
+        p_cand_alpha.to_symbol(): _make_dummy_evidence("utg000010l", "3p", depth=18.0, degree=0, is_tip=True),
+        p_cand_bio.to_symbol(): _make_dummy_evidence("utg000099l", "3p", depth=11.0, degree=0, is_tip=True),
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger)
+    assert call.is_pde_junction is True
+    assert call.somatic_port == p_som
+    # Must pick the biologically superior candidate rather than alphabetically first
+    assert call.germline_port == p_cand_bio
+    assert abs(call.core_depth_ratio - (11.0 / 60.0)) < 1e-4
+    assert call.core_depth_ratio == call.depth_ratio

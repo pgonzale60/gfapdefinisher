@@ -77,7 +77,18 @@ class PdeJunctionCall:
     somatic_port: SegmentPort | None = None
     germline_port: SegmentPort | None = None
     depth_ratio: float = 0.0
+    stem_depth_ratio: float = 0.0
+    core_depth_ratio: float = 0.0
     is_repeat_entry: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class _GermlineCandidate:
+    port: SegmentPort
+    core_depth_ratio: float
+    stem_depth_ratio: float
+    branch_depth: float
+    length: int
 
 
 def _resolve_port(port: SegmentPort | str) -> SegmentPort:
@@ -351,17 +362,17 @@ def classify_pde_junction(
     1. A somatic stem with robust read depth (>= min_stem_core_ratio * core_coverage) and zero rDNA.
     2. Rejection of assembly bubbles where outgoing branches reconverge on the same segment.
     3. Bifurcation into a somatic branch reaching an authentic telomeric cap within <= max_somatic_cap_hops
-       with read depth near/above somatic levels (depth ratio > max_germline_depth_ratio).
+       with read depth near/above somatic levels (depth ratio relative to stem > max_germline_depth_ratio).
     4. Concurrently bifurcating into a germline-retained sequence (GRS) branch with stoichiometric
-       depth ratio in [min_germline_depth_ratio, max_germline_depth_ratio] relative to core coverage (BIO-002, BIO-004),
-       or a non-looping repeat entry when GRS is complex.
+       depth ratio in [min_germline_depth_ratio, max_germline_depth_ratio] relative to core somatic coverage
+       $C_{\\text{core}}$ (BIO-002, BIO-004), or a non-looping repeat entry when GRS is complex.
 
     Args:
         port: Stem port to evaluate.
         graph: Bidirected assembly graph.
         ledger_by_port: Pre-computed end-evidence mapping.
         policy: Operational parameter policy governing stoichiometry and reachability.
-        core_coverage: Length-weighted median depth across nuclear chromosomal unitigs. If None,
+        core_coverage: Length-weighted median depth across nuclear chromosomal unitigs ($C_{\\text{core}}$). If None,
             computed via compute_core_coverage.
 
     Returns:
@@ -426,9 +437,10 @@ def classify_pde_junction(
     min_germline_ratio = policy.stoichiometry.min_germline_depth_ratio.value
     max_germline_ratio = policy.stoichiometry.max_germline_depth_ratio.value
     max_hops = policy.pde.max_somatic_cap_hops.value
+    median_expected = (min_germline_ratio + max_germline_ratio) / 2
 
     somatic_candidates: list[tuple[SegmentPort, float]] = []
-    germline_candidates: list[tuple[SegmentPort, float]] = []
+    germline_candidates: list[_GermlineCandidate] = []
 
     for edge in outgoing_edges:
         branch_port = edge.to_port
@@ -441,6 +453,13 @@ def classify_pde_junction(
             branch_depth = branch_ev.depth
         else:
             branch_depth = 0.0
+
+        if branch_seg is not None and branch_seg.length > 0:
+            branch_len = branch_seg.length
+        elif branch_ev is not None and branch_ev.length > 0:
+            branch_len = branch_ev.length
+        else:
+            branch_len = 0
 
         ratio_to_stem = branch_depth / stem_depth
         ratio_to_core = branch_depth / core_coverage
@@ -459,21 +478,39 @@ def classify_pde_junction(
 
         # Germline candidate: stoichiometric depth ratio relative to core_coverage (BIO-002, BIO-004)
         if min_germline_ratio <= ratio_to_core <= max_germline_ratio:
-            germline_candidates.append((branch_port, ratio_to_stem))
+            germline_candidates.append(
+                _GermlineCandidate(
+                    port=branch_port,
+                    core_depth_ratio=ratio_to_core,
+                    stem_depth_ratio=ratio_to_stem,
+                    branch_depth=branch_depth,
+                    length=branch_len,
+                )
+            )
 
     if somatic_candidates and germline_candidates:
         somatic_candidates.sort(key=lambda item: (-item[1], item[0].name, item[0].strand.value))
-        germline_candidates.sort(key=lambda item: (item[0].name, item[0].strand.value))
+        germline_candidates.sort(
+            key=lambda cand: (
+                abs(cand.core_depth_ratio - median_expected),
+                -cand.length,
+                -cand.branch_depth,
+                cand.port.name,
+                cand.port.strand.value,
+            )
+        )
 
         best_somatic_port, _ = somatic_candidates[0]
-        best_germline_port, best_germline_ratio = germline_candidates[0]
+        best_germline = germline_candidates[0]
 
         return PdeJunctionCall(
             port=resolved_stem,
             is_pde_junction=True,
             somatic_port=best_somatic_port,
-            germline_port=best_germline_port,
-            depth_ratio=best_germline_ratio,
+            germline_port=best_germline.port,
+            depth_ratio=best_germline.core_depth_ratio,
+            stem_depth_ratio=best_germline.stem_depth_ratio,
+            core_depth_ratio=best_germline.core_depth_ratio,
             is_repeat_entry=False,
         )
 
@@ -486,7 +523,7 @@ def classify_pde_junction(
         best_somatic_port, _ = somatic_candidates[0]
         somatic_port_names = {p[0].name for p in somatic_candidates}
 
-        repeat_candidates: list[tuple[SegmentPort, float]] = []
+        repeat_candidates: list[_GermlineCandidate] = []
         for edge in outgoing_edges:
             branch_port = edge.to_port
             if branch_port.name in somatic_port_names:
@@ -510,17 +547,43 @@ def classify_pde_junction(
                         b_depth = branch_ev.depth
                     else:
                         b_depth = 0.0
-                    repeat_candidates.append((branch_port, b_depth / stem_depth))
+
+                    if branch_seg is not None and branch_seg.length > 0:
+                        b_len = branch_seg.length
+                    elif branch_ev is not None and branch_ev.length > 0:
+                        b_len = branch_ev.length
+                    else:
+                        b_len = 0
+
+                    repeat_candidates.append(
+                        _GermlineCandidate(
+                            port=branch_port,
+                            core_depth_ratio=b_depth / core_coverage,
+                            stem_depth_ratio=b_depth / stem_depth,
+                            branch_depth=b_depth,
+                            length=b_len,
+                        )
+                    )
 
         if repeat_candidates:
-            repeat_candidates.sort(key=lambda item: (item[0].name, item[0].strand.value))
-            best_repeat_port, best_repeat_ratio = repeat_candidates[0]
+            repeat_candidates.sort(
+                key=lambda cand: (
+                    abs(cand.core_depth_ratio - median_expected),
+                    -cand.length,
+                    -cand.branch_depth,
+                    cand.port.name,
+                    cand.port.strand.value,
+                )
+            )
+            best_repeat = repeat_candidates[0]
             return PdeJunctionCall(
                 port=resolved_stem,
                 is_pde_junction=True,
                 somatic_port=best_somatic_port,
-                germline_port=best_repeat_port,
-                depth_ratio=best_repeat_ratio,
+                germline_port=best_repeat.port,
+                depth_ratio=best_repeat.core_depth_ratio,
+                stem_depth_ratio=best_repeat.stem_depth_ratio,
+                core_depth_ratio=best_repeat.core_depth_ratio,
                 is_repeat_entry=True,
             )
 
