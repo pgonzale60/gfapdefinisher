@@ -51,6 +51,11 @@ def test_default_policy_completeness():
     )
     assert DEFAULT_POLICY.pde.max_somatic_cap_hops.value == 2
     assert DEFAULT_POLICY.pde.max_somatic_cap_hops.provisional is True
+    assert DEFAULT_POLICY.ont.min_anchor_bp.value == 1000
+    assert DEFAULT_POLICY.ont.max_boundary_slack_bp.value == 1500
+    assert DEFAULT_POLICY.ont.min_mapq.value == 0
+    assert DEFAULT_POLICY.ont.min_spanning_reads.value == 2
+    assert DEFAULT_POLICY.ont.quantile_num.value == 4
 
 
 def test_no_species_hardcoding_in_src():
@@ -79,9 +84,11 @@ def test_no_magic_numbers_in_src():
     # Explicit non-policy operational exemptions:
     # - store.py: DEFAULT_BATCH_SIZE, MIN_A_LINE_TOKENS (parsing token counts & batch buffers)
     # - annotations.py: column indices for standard 0-indexed TSV/GFF/BED format parsing (0..15)
+    # - resolver.py: column indices for standard 0-indexed PAF format parsing (0..15)
     exemptions_by_file: dict[str, set[int | float]] = {
         "store.py": {DEFAULT_BATCH_SIZE, MIN_A_LINE_TOKENS},
         "annotations.py": set(range(16)),
+        "resolver.py": set(range(16)),
     }
 
     for py_file in SRC_DIR.rglob("*.py"):

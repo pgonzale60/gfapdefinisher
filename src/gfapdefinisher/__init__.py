@@ -21,6 +21,14 @@ from gfapdefinisher.quirks import (
     JunctionRecord,
     QuirkRecord,
 )
+from gfapdefinisher.resolver import (
+    GapDistribution,
+    OntBridgingEngine,
+    PafHit,
+    SatelliteGapResolution,
+    SpanningRead,
+    parse_paf_hits,
+)
 
 
 def hello() -> str:
@@ -31,17 +39,23 @@ __all__ = [
     "DEFAULT_POLICY",
     "EndState",
     "EndStateRecord",
+    "GapDistribution",
     "IntervalQuirk",
     "JunctionClass",
     "JunctionRecord",
+    "OntBridgingEngine",
+    "PafHit",
     "PdeJunctionCall",
     "Policy",
     "PortClassification",
     "Provenance",
     "QuirkRecord",
+    "SatelliteGapResolution",
+    "SpanningRead",
     "TerminalFeature",
     "Topology",
     "classify_pde_junction",
     "classify_port",
     "hello",
+    "parse_paf_hits",
 ]
