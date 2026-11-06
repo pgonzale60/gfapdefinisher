@@ -86,7 +86,7 @@ def build_end_evidence_ledger(
         out_5p = graph.get_outgoing(p_5p)
         deg_5p = len(out_5p)
         tip_5p = deg_5p == 0
-        neigh_5p = tuple(e.to_port.name for e in out_5p)
+        neigh_5p = tuple(dict.fromkeys(e.to_port.to_symbol() for e in out_5p))
 
         if ann is not None:
             w_5p = [w for w in ann.tidk_windows if w.window_start <= window_bp]
@@ -132,7 +132,7 @@ def build_end_evidence_ledger(
         out_3p = graph.get_outgoing(p_3p)
         deg_3p = len(out_3p)
         tip_3p = deg_3p == 0
-        neigh_3p = tuple(e.to_port.name for e in out_3p)
+        neigh_3p = tuple(dict.fromkeys(e.to_port.to_symbol() for e in out_3p))
 
         boundary_3p = max(0, seg_len - window_bp)
 

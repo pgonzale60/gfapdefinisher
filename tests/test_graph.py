@@ -3,6 +3,8 @@
 import gzip
 from pathlib import Path
 
+import pytest
+
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.models import SegmentPort, Strand
 
@@ -248,3 +250,148 @@ def test_cigar_with_indels_in_graph_edge():
     assert edge.overlap_len == 22
     assert graph.degree("u1", "+") == 1
     assert graph.degree("u2", "-") == 1
+
+
+def test_load_gfa_reciprocal_dual_deduplication(tmp_path: Path):
+    """Verify that reciprocal dual L lines in GFA do not inflate degree or duplicate edges."""
+    gfa_content = "\n".join(
+        [
+            "H\tVN:Z:1.0",
+            "S\tsegA\t*\tLN:i:1000",
+            "S\tsegB\t*\tLN:i:2000",
+            "S\tsegC\t*\tLN:i:1500",
+            "L\tsegA\t+\tsegB\t+\t50M",
+            "L\tsegB\t-\tsegA\t-\t50M",
+            "L\tsegB\t+\tsegC\t+\t40M",
+            "L\tsegC\t-\tsegB\t-\t40M",
+        ]
+    )
+    gfa_file = tmp_path / "reciprocal.gfa"
+    gfa_file.write_text(gfa_content, encoding="utf-8")
+
+    graph = load_gfa(gfa_file)
+
+    # Exactly 2 canonical edges
+    assert len(graph.canonical_edges) == 2
+
+    # Port outgoing degrees must NOT be doubled (no inflation):
+    assert graph.degree("segA", "+") == 1
+    assert graph.degree("segA", "-") == 0  # 5' tip
+    assert graph.degree("segB", "+") == 1
+    assert graph.degree("segB", "-") == 1
+    assert graph.degree("segC", "+") == 0  # 3' tip
+    assert graph.degree("segC", "-") == 1
+
+    # Incoming degrees must not be doubled:
+    assert len(graph.get_incoming("segB", "+")) == 1
+    assert len(graph.get_incoming("segC", "+")) == 1
+    assert len(graph.get_incoming("segA", "-")) == 1
+    assert len(graph.get_incoming("segB", "-")) == 1
+
+    # Outgoing edge count per port:
+    assert len(graph.get_outgoing("segA", "+")) == 1
+    assert len(graph.get_outgoing("segB", "-")) == 1
+
+
+def test_forward_only_vs_reciprocal_gfa_equivalence(tmp_path: Path):
+    """Verify graphs loaded from forward-only vs reciprocal GFA have identical topology and degrees."""
+    fwd_gfa = "\n".join(
+        [
+            "H\tVN:Z:1.0",
+            "S\tu1\t*\tLN:i:500",
+            "S\tu2\t*\tLN:i:600",
+            "L\tu1\t+\tu2\t+\t30M",
+        ]
+    )
+    recip_gfa = "\n".join(
+        [
+            "H\tVN:Z:1.0",
+            "S\tu1\t*\tLN:i:500",
+            "S\tu2\t*\tLN:i:600",
+            "L\tu1\t+\tu2\t+\t30M",
+            "L\tu2\t-\tu1\t-\t30M",
+        ]
+    )
+    p_fwd = tmp_path / "fwd.gfa"
+    p_recip = tmp_path / "recip.gfa"
+    p_fwd.write_text(fwd_gfa, encoding="utf-8")
+    p_recip.write_text(recip_gfa, encoding="utf-8")
+
+    g_fwd = load_gfa(p_fwd)
+    g_recip = load_gfa(p_recip)
+
+    for seg in ["u1", "u2"]:
+        for strand in ["+", "-"]:
+            assert g_fwd.degree(seg, strand) == g_recip.degree(seg, strand)
+            assert g_fwd.is_tip(seg, strand) == g_recip.is_tip(seg, strand)
+
+    assert len(g_fwd.canonical_edges) == len(g_recip.canonical_edges) == 1
+
+
+def test_coordinate_l2_zero_preserved():
+    """Verify that l2 = 0 is preserved and not overwritten with segment length."""
+    graph = BidirectedGraph()
+    graph.add_segment("s1", length=1000)
+    graph.add_segment("s2", length=2000)
+
+    edge = graph.add_edge("s1+", "s2+", cigar="50M", l1=1000, l2=0)
+    assert edge.l1 == 1000
+    assert edge.l2 == 0
+
+
+def test_edge_cigar_upgrade_and_metadata_merge():
+    """Verify adding edge with better CIGAR upgrades placeholder edge and merges tags."""
+    graph = BidirectedGraph()
+    graph.add_segment("s1", length=1000)
+    graph.add_segment("s2", length=2000)
+
+    # First add with placeholder CIGAR
+    edge1 = graph.add_edge("s1+", "s2+", cigar="*", tags={"t1": 1})
+    assert edge1.cigar == "*"
+
+    # Now add with specific CIGAR and additional tag
+    edge2 = graph.add_edge("s1+", "s2+", cigar="50M", tags={"t2": 2})
+    assert edge2.cigar == "50M"
+    assert edge2.overlap_len == 50
+
+    # Outgoing degree remains 1
+    assert graph.degree("s1", "+") == 1
+    out_edge = graph.get_outgoing("s1", "+")[0]
+    assert out_edge.cigar == "50M"
+    assert out_edge.overlap_len == 50
+
+    # Tags merged
+    tags = graph.edge_tags[(SegmentPort("s1", Strand.FORWARD), SegmentPort("s2", Strand.FORWARD))]
+    assert tags["t1"] == 1
+    assert tags["t2"] == 2
+
+
+@pytest.mark.benchmark
+def test_benchmark_df5120_degree_distribution():
+    """Verify exact degree distribution on benchmark DF5120 assembly graph."""
+    bench_candidates = [
+        Path("data/benchmark/DF5120/asm.p_utg.gfa.gz"),
+        Path("data/benchmark/DF5120/asm.p_utg.gfa"),
+    ]
+    bench_file = next((p for p in bench_candidates if p.exists()), None)
+    if bench_file is None:
+        pytest.skip("Benchmark DF5120 GFA file not present.")
+
+    graph = load_gfa(bench_file)
+
+    # Port outgoing degree distribution in raw GFA:
+    # deg 0 (tips): 233 ports
+    # deg 1 (collinear): 141 ports
+    # deg 2 (forks): 69 ports
+    # deg 3 (complex branches): 3 ports
+    degree_counts: dict[int, int] = {}
+    for seg_name in graph.segments:
+        for strand in [Strand.FORWARD, Strand.REVERSE]:
+            deg = graph.degree(seg_name, strand)
+            degree_counts[deg] = degree_counts.get(deg, 0) + 1
+
+    assert degree_counts.get(0, 0) == 233
+    assert degree_counts.get(1, 0) == 141
+    assert degree_counts.get(2, 0) == 69
+    assert degree_counts.get(3, 0) == 3
+    assert len(graph.canonical_edges) == 144
