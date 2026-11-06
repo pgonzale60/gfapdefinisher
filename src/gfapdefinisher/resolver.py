@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from gfapdefinisher.models import SegmentPort
+from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY, Policy
 from gfapdefinisher.quirks import (
     EndState,
@@ -33,6 +33,38 @@ _COMPLEMENT = str.maketrans("ACGTNacgtn", "TGCANtgcan")
 def reverse_complement(sequence: str) -> str:
     """Return the reverse complement of a nucleotide sequence."""
     return sequence.translate(_COMPLEMENT)[::-1]
+
+
+def _parse_port_spec(port: str | SegmentPort) -> tuple[str, Strand]:
+    """Extract contig name and port strand from a port specification.
+
+    Handles SegmentPort instances, string representations like 'utg000056l+' or 'utg000126l-',
+    and plain contig names (defaulting to Strand.FORWARD).
+    """
+    if isinstance(port, SegmentPort):
+        return port.name, port.strand
+    s = str(port).strip()
+    if s.endswith("+"):
+        return s[:-1], Strand.FORWARD
+    if s.endswith("-"):
+        return s[:-1], Strand.REVERSE
+    return s, Strand.FORWARD
+
+
+def _port_boundary_slack(hit: PafHit, is_left: bool, strand: Strand) -> int:
+    """Compute unaligned distance between alignment and segment port boundary.
+
+    For left port (walk exiting port at 3'):
+      - '+' strand: boundary is target tlen -> slack is tlen - tend (left_slack).
+      - '-' strand: boundary is target 0 -> slack is tstart (right_slack).
+
+    For right port (walk entering port at 5'):
+      - '+' strand: boundary is target 0 -> slack is tstart (right_slack).
+      - '-' strand: boundary is target tlen -> slack is tlen - tend (left_slack).
+    """
+    if is_left:
+        return hit.left_slack if strand == Strand.FORWARD else hit.right_slack
+    return hit.right_slack if strand == Strand.FORWARD else hit.left_slack
 
 
 @dataclass(slots=True, frozen=True)
@@ -239,56 +271,58 @@ class OntBridgingEngine:
         )
         mapq_min = min_mapq if min_mapq is not None else self.policy.ont.min_mapq.value
 
-        left_name = left_port.name if isinstance(left_port, SegmentPort) else str(left_port)
-        right_name = right_port.name if isinstance(right_port, SegmentPort) else str(right_port)
+        left_name, left_strand = _parse_port_spec(left_port)
+        right_name, right_strand = _parse_port_spec(right_port)
+
         left_sym = left_port.to_symbol() if hasattr(left_port, "to_symbol") else str(left_port)
         right_sym = right_port.to_symbol() if hasattr(right_port, "to_symbol") else str(right_port)
 
-        target_names = {left_name, right_name, left_sym, right_sym}
+        left_match_names = {left_name, left_sym, f"{left_name}+", f"{left_name}-"}
+        right_match_names = {right_name, right_sym, f"{right_name}+", f"{right_name}-"}
+        target_names = left_match_names | right_match_names
 
         # Memory-efficient collection: only retain hits matching target ports
         hits_by_read: dict[str, list[PafHit]] = defaultdict(list)
-        if isinstance(paf_source, Iterable) and not isinstance(paf_source, str | Path | TextIO):
-            # Could be PafHit stream or raw line stream
-            first_item = next(iter(paf_source), None)
-            if first_item is None:
-                return []
-            if isinstance(first_item, PafHit):
-                if first_item.tname in target_names:
-                    hits_by_read[first_item.qname].append(first_item)
-                for h in paf_source:
-                    if isinstance(h, PafHit) and h.tname in target_names:
-                        hits_by_read[h.qname].append(h)
-            else:
-                for line in paf_source:
-                    s = line.strip()
-                    if s and not s.startswith("#"):
-                        hit = PafHit.from_line(s)
-                        if hit.tname in target_names:
-                            hits_by_read[hit.qname].append(hit)
+        source_iterable: Iterable[str | PafHit]
+        if isinstance(paf_source, str | Path | TextIO):
+            source_iterable = parse_paf_hits(paf_source)
         else:
-            for hit in parse_paf_hits(paf_source):
-                if hit.tname in target_names:
-                    hits_by_read[hit.qname].append(hit)
+            source_iterable = paf_source
+
+        for item in source_iterable:
+            if isinstance(item, PafHit):
+                hit = item
+            else:
+                s = item.strip()
+                if not s or s.startswith("#"):
+                    continue
+                hit = PafHit.from_line(s)
+            if hit.tname in target_names:
+                hits_by_read[hit.qname].append(hit)
 
         spanning_reads: list[SpanningRead] = []
+
+        fwd_l_strand = left_strand.to_symbol()
+        fwd_r_strand = right_strand.to_symbol()
+        rev_l_strand = left_strand.invert().to_symbol()
+        rev_r_strand = right_strand.invert().to_symbol()
 
         for qname, read_hits in hits_by_read.items():
             l_hits = [
                 h
                 for h in read_hits
-                if h.tname in (left_name, left_sym)
+                if h.tname in left_match_names
                 and h.alen >= anchor_min
                 and h.mapq >= mapq_min
-                and h.left_slack <= slack_max
+                and _port_boundary_slack(h, is_left=True, strand=left_strand) <= slack_max
             ]
             r_hits = [
                 h
                 for h in read_hits
-                if h.tname in (right_name, right_sym)
+                if h.tname in right_match_names
                 and h.alen >= anchor_min
                 and h.mapq >= mapq_min
-                and h.right_slack <= slack_max
+                and _port_boundary_slack(h, is_left=False, strand=right_strand) <= slack_max
             ]
 
             if not l_hits or not r_hits:
@@ -297,14 +331,16 @@ class OntBridgingEngine:
             best_candidate: SpanningRead | None = None
             min_inner_distance: int | None = None
 
-            # 1. Forward strand dovetail collinearity: Left before Right (L.qend <= R.qstart)
-            l_fwd = [h for h in l_hits if h.strand == "+"]
-            r_fwd = [h for h in r_hits if h.strand == "+"]
+            # 1. Forward walk orientation: Left before Right (L.qend <= R.qstart)
+            l_fwd = [h for h in l_hits if h.strand == fwd_l_strand]
+            r_fwd = [h for h in r_hits if h.strand == fwd_r_strand]
             for lh in l_fwd:
                 for rh in r_fwd:
                     if lh.qend <= rh.qstart:
-                        begin = lh.qend + lh.left_slack
-                        end = rh.qstart - rh.right_slack
+                        l_slack = _port_boundary_slack(lh, is_left=True, strand=left_strand)
+                        r_slack = _port_boundary_slack(rh, is_left=False, strand=right_strand)
+                        begin = lh.qend + l_slack
+                        end = rh.qstart - r_slack
                         if end >= begin:
                             inner_dist = rh.qstart - lh.qend
                             if min_inner_distance is None or inner_dist < min_inner_distance:
@@ -323,14 +359,16 @@ class OntBridgingEngine:
                                     sequence=seq,
                                 )
 
-            # 2. Reverse strand dovetail collinearity: Right before Left (R.qend <= L.qstart)
-            l_rev = [h for h in l_hits if h.strand == "-"]
-            r_rev = [h for h in r_hits if h.strand == "-"]
+            # 2. Reverse walk orientation: Right before Left (R.qend <= L.qstart)
+            l_rev = [h for h in l_hits if h.strand == rev_l_strand]
+            r_rev = [h for h in r_hits if h.strand == rev_r_strand]
             for lh in l_rev:
                 for rh in r_rev:
                     if rh.qend <= lh.qstart:
-                        begin = rh.qend + rh.right_slack
-                        end = lh.qstart - lh.left_slack
+                        r_slack = _port_boundary_slack(rh, is_left=False, strand=right_strand)
+                        l_slack = _port_boundary_slack(lh, is_left=True, strand=left_strand)
+                        begin = rh.qend + r_slack
+                        end = lh.qstart - l_slack
                         if end >= begin:
                             inner_dist = lh.qstart - rh.qend
                             if min_inner_distance is None or inner_dist < min_inner_distance:
@@ -415,11 +453,13 @@ class OntBridgingEngine:
         right_port: str | SegmentPort,
         paf_source: Path | str | TextIO | Iterable[str] | Iterable[PafHit] | None = None,
         *,
+        gap_index: int = 1,
         spanning_reads: Sequence[SpanningRead] | None = None,
         reads_sequences: Mapping[str, str] | None = None,
         repeat_monomer_len_bp: int | None = None,
         core_coverage_bp_median: float | None = None,
         core_depth_ratio: float | None = None,
+        somatic_depth_ratio: float | None = None,
         min_spanning_reads: int | None = None,
         notes: str = "",
     ) -> SatelliteGapResolution:
@@ -437,11 +477,13 @@ class OntBridgingEngine:
             left_port: Proximal unitig port bounding gap.
             right_port: Distal unitig port bounding gap.
             paf_source: Optional PAF file path or stream to extract spanning reads.
+            gap_index: 1-based occurrence index for the quirk feature identifier.
             spanning_reads: Pre-collected SpanningRead sequence if already computed.
             reads_sequences: Optional dictionary mapping read ID to sequence.
             repeat_monomer_len_bp: Known repeating satellite monomer length in bp.
             core_coverage_bp_median: Somatic core reference depth ($C_{core}$).
             core_depth_ratio: Relative depth ratio ($D / C_{core}$).
+            somatic_depth_ratio: Optional somatic cap depth ratio relative to core.
             min_spanning_reads: Minimum spanning reads threshold (from policy by default).
             notes: Contextual provenance notes.
 
@@ -469,7 +511,7 @@ class OntBridgingEngine:
         left_name = getattr(left_port, "name", str(left_port))
         right_name = getattr(right_port, "name", str(right_port))
 
-        feature_id_quirk = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, chrom, side, index=1)
+        feature_id_quirk = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, chrom, side, index=gap_index)
 
         if len(reads_list) >= floor:
             # Successfully bridged
@@ -483,6 +525,18 @@ class OntBridgingEngine:
             if rep_seq is None and reads_sequences and best_read.qname in reads_sequences:
                 raw_seq = reads_sequences[best_read.qname][best_read.q_from : best_read.q_to]
                 rep_seq = reverse_complement(raw_seq) if best_read.strand == "-" else raw_seq
+
+            if rep_seq is not None and best_read.sequence is None:
+                best_read = SpanningRead(
+                    qname=best_read.qname,
+                    strand=best_read.strand,
+                    left_hit=best_read.left_hit,
+                    right_hit=best_read.right_hit,
+                    gap_length=best_read.gap_length,
+                    q_from=best_read.q_from,
+                    q_to=best_read.q_to,
+                    sequence=rep_seq,
+                )
 
             copy_number_range: str | None = None
             if repeat_monomer_len_bp and repeat_monomer_len_bp > 0:
@@ -540,6 +594,7 @@ class OntBridgingEngine:
                 germline_port=right_str,
                 shared_port=None,
                 core_coverage_bp_median=core_coverage_bp_median,
+                somatic_depth_ratio=somatic_depth_ratio,
                 germline_depth_ratio=core_depth_ratio,
                 resolved=True,
                 notes=end_notes,
@@ -603,6 +658,7 @@ class OntBridgingEngine:
             germline_port=None,
             shared_port=None,
             core_coverage_bp_median=core_coverage_bp_median,
+            somatic_depth_ratio=somatic_depth_ratio,
             germline_depth_ratio=core_depth_ratio,
             resolved=False,
             notes=end_notes,
