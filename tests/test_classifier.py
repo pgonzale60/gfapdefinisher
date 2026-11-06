@@ -8,6 +8,7 @@ from gfapdefinisher.classifier import (
     Topology,
     classify_pde_junction,
     classify_port,
+    compute_core_coverage,
 )
 from gfapdefinisher.graph import BidirectedGraph
 from gfapdefinisher.ledger import EndEvidence
@@ -367,3 +368,198 @@ def test_custom_policy_override():
     assert call_custom.somatic_port == p_som
     assert call_custom.germline_port == p_grs
     assert abs(call_custom.depth_ratio - 0.45) < 1e-4
+
+
+# ==============================================================================
+# Core Coverage, Provenance Extensions, and Structural Guardrail Unit Tests
+# ==============================================================================
+
+
+def test_compute_core_coverage_tier1_usco_and_eukarya():
+    """Verify compute_core_coverage calculates length-weighted median for Tier 1 segments."""
+    graph = BidirectedGraph()
+    graph.add_segment("u1", length=1000, depth=20.0)
+    graph.add_segment("u2", length=3000, depth=60.0)
+    graph.add_segment("u3", length=5000, depth=100.0)
+
+    p1 = SegmentPort("u1", Strand.FORWARD)
+    p2 = SegmentPort("u2", Strand.FORWARD)
+    p3 = SegmentPort("u3", Strand.FORWARD)
+
+    ledger = {
+        p1.to_symbol(): _make_dummy_evidence("u1", "3p", depth=20.0, usco_hit_count=3, tiara_class="eukarya"),
+        p2.to_symbol(): _make_dummy_evidence("u2", "3p", depth=60.0, usco_hit_count=10, tiara_class="eukarya"),
+        p3.to_symbol(): _make_dummy_evidence("u3", "3p", depth=100.0, usco_hit_count=0, tiara_class="bacteria"),
+    }
+
+    # Eligible pool: u1 (1000 bp @ 20x) and u2 (3000 bp @ 60x). Total: 4000 bp.
+    # Half-point: 2000 bp -> falls into u2 (cum_len 4000 >= 2000). Length-weighted median = 60.0.
+    core_cov = compute_core_coverage(graph, ledger)
+    assert abs(core_cov - 60.0) < 1e-4
+
+
+def test_compute_core_coverage_fallback_tiers():
+    """Verify compute_core_coverage falls back to Tier 2 (eukarya) and Tier 3 (all segments)."""
+    # Tier 2 fallback: no USCO hits, but eukarya present
+    g2 = BidirectedGraph()
+    g2.add_segment("s1", length=1000, depth=30.0)
+    g2.add_segment("s2", length=2000, depth=50.0)
+    p1 = SegmentPort("s1", Strand.FORWARD)
+    p2 = SegmentPort("s2", Strand.FORWARD)
+    l2 = {
+        p1.to_symbol(): _make_dummy_evidence("s1", "3p", depth=30.0, usco_hit_count=0, tiara_class="eukarya"),
+        p2.to_symbol(): _make_dummy_evidence("s2", "3p", depth=50.0, usco_hit_count=0, tiara_class="eukarya"),
+    }
+    # Total: 3000 bp. Half: 1500 bp -> s2 (cum 3000 >= 1500) -> 50.0
+    assert abs(compute_core_coverage(g2, l2) - 50.0) < 1e-4
+
+    # Tier 3 fallback: no USCO, no eukarya -> all segments
+    g3 = BidirectedGraph()
+    g3.add_segment("b1", length=1000, depth=15.0)
+    g3.add_segment("b2", length=2000, depth=40.0)
+    p_b1 = SegmentPort("b1", Strand.FORWARD)
+    p_b2 = SegmentPort("b2", Strand.FORWARD)
+    l3 = {
+        p_b1.to_symbol(): _make_dummy_evidence("b1", "3p", depth=15.0, tiara_class="unknown"),
+        p_b2.to_symbol(): _make_dummy_evidence("b2", "3p", depth=40.0, tiara_class="unknown"),
+    }
+    assert abs(compute_core_coverage(g3, l3) - 40.0) < 1e-4
+
+    # Empty graph
+    g_empty = BidirectedGraph()
+    assert compute_core_coverage(g_empty, {}) == 0.0
+
+
+def test_prokarya_and_mitochondria_provenance():
+    """Verify mitochondria and prokarya Tiara classes map to ORGANELLE and CONTAMINANT."""
+    graph = BidirectedGraph()
+    graph.add_segment("mito_seg", length=14000, depth=250.0)
+    graph.add_segment("prok_seg", length=40000, depth=15.0)
+
+    ev_mito = _make_dummy_evidence("mito_seg", "3p", depth=250.0, tiara_class="mitochondria")
+    call_mito = classify_port(SegmentPort("mito_seg", Strand.FORWARD), graph, ev_mito)
+    assert call_mito.provenance == Provenance.ORGANELLE
+
+    ev_prok = _make_dummy_evidence("prok_seg", "5p", depth=15.0, tiara_class="prokarya")
+    call_prok = classify_port(SegmentPort("prok_seg", Strand.MINUS), graph, ev_prok)
+    assert call_prok.provenance == Provenance.CONTAMINANT
+
+
+def test_stem_rdna_rejection():
+    """Verify stem carrying rDNA is rejected as a PDE junction (prevents rDNA fork false positives)."""
+    graph = BidirectedGraph()
+    graph.add_segment("rdna_stem", length=40000, depth=60.0)
+    graph.add_segment("som_cap", length=20000, depth=50.0)
+    graph.add_segment("grs_branch", length=50000, depth=6.0)
+
+    p_stem = SegmentPort("rdna_stem", Strand.FORWARD)
+    p_som = SegmentPort("som_cap", Strand.FORWARD)
+    p_grs = SegmentPort("grs_branch", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_som, cigar="100M")
+    graph.add_edge(p_stem, p_grs, cigar="100M")
+
+    # Stem with rdna_hit_count > 0
+    ev_stem_hits = _make_dummy_evidence(
+        "rdna_stem", "3p", depth=60.0, degree=2, is_tip=False, has_terminal_rdna=False, usco_hit_count=0
+    )
+    ev_stem_hits = EndEvidence(
+        segment_name="rdna_stem",
+        end="3p",
+        port=p_stem,
+        length=40000,
+        depth=60.0,
+        degree=2,
+        is_tip=False,
+        outgoing_neighbors=(),
+        has_terminal_telomere=False,
+        has_terminal_rdna=False,
+        rdna_hit_count=4,
+        usco_hit_count=0,
+        tiara_class="eukarya",
+    )
+    ev_som = _make_dummy_evidence("som_cap", "3p", depth=50.0, degree=0, is_tip=True, has_terminal_telomere=True)
+    ev_grs = _make_dummy_evidence("grs_branch", "3p", depth=6.0, degree=0, is_tip=True)
+
+    ledger_hits = {
+        p_stem.to_symbol(): ev_stem_hits,
+        p_som.to_symbol(): ev_som,
+        p_grs.to_symbol(): ev_grs,
+    }
+    call_hits = classify_pde_junction(p_stem, graph, ledger_hits)
+    assert call_hits.is_pde_junction is False
+
+    # Stem with has_terminal_rdna = True
+    ev_stem_term = _make_dummy_evidence("rdna_stem", "3p", depth=60.0, degree=2, is_tip=False, has_terminal_rdna=True)
+    ledger_term = {
+        p_stem.to_symbol(): ev_stem_term,
+        p_som.to_symbol(): ev_som,
+        p_grs.to_symbol(): ev_grs,
+    }
+    call_term = classify_pde_junction(p_stem, graph, ledger_term)
+    assert call_term.is_pde_junction is False
+
+
+def test_rejoining_bubble_rejection():
+    """Verify bifurcations reconverging onto the same downstream target segment are rejected."""
+    graph = BidirectedGraph()
+    graph.add_segment("bubble_stem", length=70000, depth=55.0)
+    graph.add_segment("arm_a", length=30000, depth=28.0)
+    graph.add_segment("arm_b", length=25000, depth=18.0)
+    graph.add_segment("target_seg", length=80000, depth=55.0)
+
+    p_stem = SegmentPort("bubble_stem", Strand.FORWARD)
+    p_arm_a = SegmentPort("arm_a", Strand.FORWARD)
+    p_arm_b = SegmentPort("arm_b", Strand.FORWARD)
+    p_target = SegmentPort("target_seg", Strand.FORWARD)
+
+    # Stem forks into arm_a and arm_b
+    graph.add_edge(p_stem, p_arm_a, cigar="100M")
+    graph.add_edge(p_stem, p_arm_b, cigar="100M")
+    # Both arms reconverge onto target_seg
+    graph.add_edge(p_arm_a, p_target, cigar="100M")
+    graph.add_edge(p_arm_b, p_target, cigar="100M")
+
+    ledger = {
+        p_stem.to_symbol(): _make_dummy_evidence("bubble_stem", "3p", depth=55.0, degree=2, is_tip=False),
+        p_arm_a.to_symbol(): _make_dummy_evidence("arm_a", "3p", depth=28.0, degree=1, is_tip=False),
+        p_arm_b.to_symbol(): _make_dummy_evidence("arm_b", "3p", depth=18.0, degree=1, is_tip=False),
+        p_target.to_symbol(): _make_dummy_evidence("target_seg", "5p", depth=55.0, degree=0, is_tip=True),
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger)
+    assert call.is_pde_junction is False
+
+
+def test_complex_grs_repeat_entry():
+    """Verify complex GRS repeat entry is identified when somatic cap is verified but no single-copy GRS."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=100000, depth=60.0)
+    graph.add_segment("somatic_cap", length=25000, depth=50.0)
+    graph.add_segment("repeat_grs", length=15000, depth=60.0)  # Multi-copy depth, degree 2
+    graph.add_segment("satellite1", length=5000, depth=60.0)
+    graph.add_segment("satellite2", length=5000, depth=60.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_som = SegmentPort("somatic_cap", Strand.FORWARD)
+    p_rep = SegmentPort("repeat_grs", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_som, cigar="100M")
+    graph.add_edge(p_stem, p_rep, cigar="100M")
+    # repeat_grs branches into satellites (degree >= 2), does not loop back to stem
+    graph.add_edge(p_rep, SegmentPort("satellite1", Strand.FORWARD), cigar="50M")
+    graph.add_edge(p_rep, SegmentPort("satellite2", Strand.FORWARD), cigar="50M")
+
+    ledger = {
+        p_stem.to_symbol(): _make_dummy_evidence("stem", "3p", depth=60.0, degree=2, is_tip=False, usco_hit_count=5),
+        p_som.to_symbol(): _make_dummy_evidence(
+            "somatic_cap", "3p", depth=50.0, degree=0, is_tip=True, has_terminal_telomere=True
+        ),
+        p_rep.to_symbol(): _make_dummy_evidence("repeat_grs", "3p", depth=60.0, degree=2, is_tip=False),
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger)
+    assert call.is_pde_junction is True
+    assert call.somatic_port == p_som
+    assert call.germline_port == p_rep
+    assert call.is_repeat_entry is True

@@ -51,6 +51,12 @@ class TelomerePolicy:
 
 @dataclass(frozen=True)
 class StoichiometryPolicy:
+    min_stem_core_ratio: PolicyValue[float] = PolicyValue(
+        value=0.50,
+        justification="Minimum stem read depth relative to core coverage to qualify as a substantial somatic stem; BIO-002",
+        provenance="@pgonzale60 biological calibration from somatic chromosome depth vs GRS; BIO-002",
+        provisional=True,
+    )
     min_germline_depth_ratio: PolicyValue[float] = PolicyValue(
         value=0.04,
         justification="Lower bound for germline-retained depth relative to somatic stem depth in mixed worm tissue; ~5% of cells are germline in unstaged culture, avoiding filtering out true GRS.",

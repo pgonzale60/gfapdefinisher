@@ -1,12 +1,22 @@
 """Biological scenario verification tests for 3-axis classification and PDE junctions.
 
-Falsification test suite validating that the 4 reference diminution boundaries
+Falsification test suite validating all 12 authentic diminution boundaries
 in nematode benchmark DF5120 (BIO-001, BIO-002, BIO-003, BIO-006):
-  1. utg000009l:5p (utg000009l-) -> somatic: utg000211l-, germline: utg000069l+
-  2. utg000016l:5p (utg000016l-) -> somatic: utg000088l+, germline: utg000096l+
-  3. utg000019l:3p (utg000019l+) -> somatic: utg000200l-, germline: utg000071l+
-  4. utg000021l:5p (utg000021l-) -> somatic: utg000051l+, germline: utg000071l-
-are unambiguously called as PDE junctions with somatic and germline ports resolved.
+  Megabase chromosome arm ends:
+    1. utg000001l:3p (utg000001l+) -> somatic: utg000142l-, germline: utg000101l+
+    2. utg000001l:5p (utg000001l-) -> somatic: utg000076l+, germline: utg000039l+
+    3. utg000002l:3p (utg000002l+) -> somatic: utg000194l+, germline: utg000115l+
+    4. utg000002l:5p (utg000002l-) -> somatic: utg000093l-, germline: utg000103l+
+    5. utg000009l:5p (utg000009l-) -> somatic: utg000211l-, germline: utg000069l+
+    6. utg000013l:3p (utg000013l+) -> somatic: utg000167l+, germline: utg000033l-
+    7. utg000027l:5p (utg000027l-) -> somatic: utg000154l-, germline: utg000189l-
+  Chr X internal breaks:
+    8. utg000016l:5p (utg000016l-) -> somatic: utg000088l+, germline: utg000096l+
+    9. utg000019l:3p (utg000019l+) -> somatic: utg000200l-, germline: utg000071l+
+    10. utg000019l:5p (utg000019l-) -> somatic: utg000129l-, germline: utg000145l+
+    11. utg000021l:5p (utg000021l-) -> somatic: utg000051l+, germline: utg000071l-
+    12. utg000027l:3p (utg000027l+) -> somatic: utg000209l+, germline: utg000145l-
+and rejecting negative controls utg000020l+ (rDNA) and utg000065l- (bubble).
 """
 
 from pathlib import Path
@@ -191,12 +201,50 @@ def test_benchmark_df5120_real_pde_junctions():
     ledger = _load_benchmark_ledger(ledger_path)
 
     expected_junctions = [
+        # Megabase chromosome arm ends
+        {
+            "port_str": "utg000001l+",
+            "name": "utg000001l:3p",
+            "expected_somatic": "utg000142l-",
+            "expected_germline": "utg000101l+",
+        },
+        {
+            "port_str": "utg000001l-",
+            "name": "utg000001l:5p",
+            "expected_somatic": "utg000076l+",
+            "expected_germline": "utg000039l+",
+        },
+        {
+            "port_str": "utg000002l+",
+            "name": "utg000002l:3p",
+            "expected_somatic": "utg000194l+",
+            "expected_germline": "utg000115l+",
+        },
+        {
+            "port_str": "utg000002l-",
+            "name": "utg000002l:5p",
+            "expected_somatic": "utg000093l-",
+            "expected_germline": "utg000103l+",
+        },
         {
             "port_str": "utg000009l-",
             "name": "utg000009l:5p",
             "expected_somatic": "utg000211l-",
             "expected_germline": "utg000069l+",
         },
+        {
+            "port_str": "utg000013l+",
+            "name": "utg000013l:3p",
+            "expected_somatic": "utg000167l+",
+            "expected_germline": "utg000033l-",
+        },
+        {
+            "port_str": "utg000027l-",
+            "name": "utg000027l:5p",
+            "expected_somatic": "utg000154l-",
+            "expected_germline": "utg000189l-",
+        },
+        # Chr X internal breaks
         {
             "port_str": "utg000016l-",
             "name": "utg000016l:5p",
@@ -210,10 +258,22 @@ def test_benchmark_df5120_real_pde_junctions():
             "expected_germline": "utg000071l+",
         },
         {
+            "port_str": "utg000019l-",
+            "name": "utg000019l:5p",
+            "expected_somatic": "utg000129l-",
+            "expected_germline": "utg000145l+",
+        },
+        {
             "port_str": "utg000021l-",
             "name": "utg000021l:5p",
             "expected_somatic": "utg000051l+",
             "expected_germline": "utg000071l-",
+        },
+        {
+            "port_str": "utg000027l+",
+            "name": "utg000027l:3p",
+            "expected_somatic": "utg000209l+",
+            "expected_germline": "utg000145l-",
         },
     ]
 
@@ -228,3 +288,15 @@ def test_benchmark_df5120_real_pde_junctions():
         assert call.germline_port is not None
         assert call.germline_port.to_symbol() == item["expected_germline"]
         assert 0.04 <= call.depth_ratio <= 0.40
+
+    # Negative controls: rDNA fork and assembly bubble must NOT be called as PDE junctions
+    negative_controls = [
+        ("utg000020l+", "rDNA fork"),
+        ("utg000065l-", "assembly bubble"),
+    ]
+    for neg_port_str, neg_desc in negative_controls:
+        neg_port = graph._resolve_port(neg_port_str)
+        neg_call: PdeJunctionCall = classify_pde_junction(neg_port, graph, ledger)
+        assert neg_call.is_pde_junction is False, (
+            f"Negative control {neg_port_str} ({neg_desc}) was falsely called as PDE junction"
+        )
