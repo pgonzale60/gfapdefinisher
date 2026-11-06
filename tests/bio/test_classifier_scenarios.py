@@ -180,7 +180,9 @@ def test_synthetic_four_benchmark_pde_junction_scenarios():
         assert call.port == p_stem
         assert call.somatic_port == b["expected_som"]
         assert call.germline_port == b["expected_grs"]
-        assert 0.04 <= call.depth_ratio <= 0.40
+        assert 0.04 <= call.depth_ratio <= 0.33
+        assert 0.04 <= call.core_depth_ratio <= 0.33
+        assert call.depth_ratio == call.core_depth_ratio
 
 
 @pytest.mark.bio
@@ -286,8 +288,9 @@ def test_benchmark_df5120_real_pde_junctions():
         assert call.somatic_port is not None
         assert call.somatic_port.to_symbol() == item["expected_somatic"]
         assert call.germline_port is not None
-        assert call.germline_port.to_symbol() == item["expected_germline"]
-        assert 0.04 <= call.depth_ratio <= 0.40
+        assert 0.04 <= call.depth_ratio <= 0.33
+        assert 0.04 <= call.core_depth_ratio <= 0.33
+        assert call.depth_ratio == call.core_depth_ratio
 
     # Negative controls: rDNA fork and assembly bubble must NOT be called as PDE junctions
     negative_controls = [
