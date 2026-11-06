@@ -12,7 +12,7 @@ def test_hello() -> None:
 
 def test_cli(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        main()
+        main([])
     assert exc_info.value.code == 0
     captured = capsys.readouterr()
     assert "gfapdefinisher" in captured.out

@@ -19,8 +19,9 @@ from gfapdefinisher.annotations import NodeAnnotations
 from gfapdefinisher.graph import BidirectedGraph
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY, Policy
+from gfapdefinisher.telomere import scan_terminal_tract
 
-DEFAULT_TERMINAL_WINDOW_BP: int = int("10000")
+DEFAULT_TERMINAL_WINDOW_BP: int = DEFAULT_POLICY.telomere.terminal_scan_bp.value
 
 
 @dataclass(slots=True, frozen=True)
@@ -50,6 +51,8 @@ class EndEvidence:
     tiara_class: str
     telomere_fwd_count: int = 0
     telomere_rev_count: int = 0
+    telomere_offset_bp: int | None = None
+    telomere_tract_bp: int | None = None
 
     def __init__(
         self,
@@ -72,6 +75,8 @@ class EndEvidence:
         tiara_class: str = "",
         telomere_fwd_count: int | None = None,
         telomere_rev_count: int | None = None,
+        telomere_offset_bp: int | None = None,
+        telomere_tract_bp: int | None = None,
     ) -> None:
         object.__setattr__(self, "segment_name", segment_name)
         object.__setattr__(self, "end", end)
@@ -88,6 +93,8 @@ class EndEvidence:
         object.__setattr__(self, "usco_hit_count", usco_hit_count)
         object.__setattr__(self, "usco_genes", usco_genes)
         object.__setattr__(self, "tiara_class", tiara_class)
+        object.__setattr__(self, "telomere_offset_bp", telomere_offset_bp)
+        object.__setattr__(self, "telomere_tract_bp", telomere_tract_bp)
 
         is_5p = end == "5p" or (port.strand == Strand.MINUS)
         if telomere_canonical_count is not None and telomere_opposite_count is not None:
@@ -160,28 +167,104 @@ def build_end_evidence_ledger(
         tip_5p = deg_5p == 0
         neigh_5p = tuple(dict.fromkeys(e.to_port.to_symbol() for e in out_5p))
 
-        if ann is not None:
-            w_5p = [w for w in ann.tidk_windows if w.window_end <= boundary_5p]
-            tel_fwd_5p = sum(w.forward_count for w in w_5p)
-            tel_rev_5p = sum(w.reverse_count for w in w_5p)
-            # Port-relative: 5p (-) outgoing canonical repeat is reverse (GCCTAA)
-            tel_canon_5p = tel_rev_5p
-            tel_opp_5p = tel_fwd_5p
-            has_tel_5p = tel_canon_5p >= min_tel_repeats
+        # 3' port: SegmentPort(segment.name, Strand.PLUS)
+        p_3p = SegmentPort(seg_name, Strand.PLUS)
+        out_3p = graph.get_outgoing(p_3p)
+        deg_3p = len(out_3p)
+        tip_3p = deg_3p == 0
+        neigh_3p = tuple(dict.fromkeys(e.to_port.to_symbol() for e in out_3p))
 
+        seq = graph.get_sequence(seg_name)
+        if seq:
+            max_offset = active_policy.telomere.max_terminal_offset_bp.value
+            max_gap = active_policy.telomere.max_internal_gap_bp.value
+            scan_bp = boundary_5p
+
+            call_5p_canon = scan_terminal_tract(
+                sequence=seq,
+                motif=active_policy.telomere.motif_reverse.value,
+                terminal_scan_bp=scan_bp,
+                max_terminal_offset_bp=max_offset,
+                max_internal_gap_bp=max_gap,
+                min_repeat_count=min_tel_repeats,
+                is_suffix=False,
+            )
+            call_5p_opp = scan_terminal_tract(
+                sequence=seq,
+                motif=active_policy.telomere.motif_forward.value,
+                terminal_scan_bp=scan_bp,
+                max_terminal_offset_bp=max_offset,
+                max_internal_gap_bp=max_gap,
+                min_repeat_count=min_tel_repeats,
+                is_suffix=False,
+            )
+            tel_canon_5p = call_5p_canon.repeat_count
+            tel_opp_5p = call_5p_opp.repeat_count
+            has_tel_5p = call_5p_canon.is_terminal_cap
+            tel_fwd_5p = tel_opp_5p
+            tel_rev_5p = tel_canon_5p
+            tel_offset_5p = call_5p_canon.offset_bp
+            tel_tract_5p = call_5p_canon.tract_length_bp
+
+            call_3p_canon = scan_terminal_tract(
+                sequence=seq,
+                motif=active_policy.telomere.motif_forward.value,
+                terminal_scan_bp=scan_bp,
+                max_terminal_offset_bp=max_offset,
+                max_internal_gap_bp=max_gap,
+                min_repeat_count=min_tel_repeats,
+                is_suffix=True,
+            )
+            call_3p_opp = scan_terminal_tract(
+                sequence=seq,
+                motif=active_policy.telomere.motif_reverse.value,
+                terminal_scan_bp=scan_bp,
+                max_terminal_offset_bp=max_offset,
+                max_internal_gap_bp=max_gap,
+                min_repeat_count=min_tel_repeats,
+                is_suffix=True,
+            )
+            tel_canon_3p = call_3p_canon.repeat_count
+            tel_opp_3p = call_3p_opp.repeat_count
+            has_tel_3p = call_3p_canon.is_terminal_cap
+            tel_fwd_3p = tel_canon_3p
+            tel_rev_3p = tel_opp_3p
+            tel_offset_3p = call_3p_canon.offset_bp
+            tel_tract_3p = call_3p_canon.tract_length_bp
+        else:
+            tel_canon_5p = 0
+            tel_opp_5p = 0
+            tel_fwd_5p = 0
+            tel_rev_5p = 0
+            has_tel_5p = False
+            tel_offset_5p = None
+            tel_tract_5p = None
+
+            tel_canon_3p = 0
+            tel_opp_3p = 0
+            tel_fwd_3p = 0
+            tel_rev_3p = 0
+            has_tel_3p = False
+            tel_offset_3p = None
+            tel_tract_3p = None
+
+        if ann is not None:
             rdna_5p = [h for h in ann.barrnap_hits if h.start <= boundary_5p]
             rdna_cnt_5p = len(rdna_5p)
             rdna_feat_5p = tuple(sorted({h.feature_name for h in rdna_5p}))
             has_rdna_5p = rdna_cnt_5p > 0
+
+            rdna_3p = [h for h in ann.barrnap_hits if h.end >= boundary_3p]
+            rdna_cnt_3p = len(rdna_3p)
+            rdna_feat_3p = tuple(sorted({h.feature_name for h in rdna_3p}))
+            has_rdna_3p = rdna_cnt_3p > 0
         else:
-            tel_fwd_5p = 0
-            tel_rev_5p = 0
-            tel_canon_5p = 0
-            tel_opp_5p = 0
-            has_tel_5p = False
             rdna_cnt_5p = 0
             rdna_feat_5p = ()
             has_rdna_5p = False
+            rdna_cnt_3p = 0
+            rdna_feat_3p = ()
+            has_rdna_3p = False
 
         ev_5p = EndEvidence(
             segment_name=seg_name,
@@ -203,38 +286,10 @@ def build_end_evidence_ledger(
             tiara_class=tiara_cls,
             telomere_fwd_count=tel_fwd_5p,
             telomere_rev_count=tel_rev_5p,
+            telomere_offset_bp=tel_offset_5p,
+            telomere_tract_bp=tel_tract_5p,
         )
         ledger.append(ev_5p)
-
-        # 3' port: SegmentPort(segment.name, Strand.PLUS)
-        p_3p = SegmentPort(seg_name, Strand.PLUS)
-        out_3p = graph.get_outgoing(p_3p)
-        deg_3p = len(out_3p)
-        tip_3p = deg_3p == 0
-        neigh_3p = tuple(dict.fromkeys(e.to_port.to_symbol() for e in out_3p))
-
-        if ann is not None:
-            w_3p = [w for w in ann.tidk_windows if w.window_end > boundary_3p]
-            tel_fwd_3p = sum(w.forward_count for w in w_3p)
-            tel_rev_3p = sum(w.reverse_count for w in w_3p)
-            # Port-relative: 3p (+) outgoing canonical repeat is forward (TTAGGC)
-            tel_canon_3p = tel_fwd_3p
-            tel_opp_3p = tel_rev_3p
-            has_tel_3p = tel_canon_3p >= min_tel_repeats
-
-            rdna_3p = [h for h in ann.barrnap_hits if h.end >= boundary_3p]
-            rdna_cnt_3p = len(rdna_3p)
-            rdna_feat_3p = tuple(sorted({h.feature_name for h in rdna_3p}))
-            has_rdna_3p = rdna_cnt_3p > 0
-        else:
-            tel_fwd_3p = 0
-            tel_rev_3p = 0
-            tel_canon_3p = 0
-            tel_opp_3p = 0
-            has_tel_3p = False
-            rdna_cnt_3p = 0
-            rdna_feat_3p = ()
-            has_rdna_3p = False
 
         ev_3p = EndEvidence(
             segment_name=seg_name,
@@ -256,6 +311,8 @@ def build_end_evidence_ledger(
             tiara_class=tiara_cls,
             telomere_fwd_count=tel_fwd_3p,
             telomere_rev_count=tel_rev_3p,
+            telomere_offset_bp=tel_offset_3p,
+            telomere_tract_bp=tel_tract_3p,
         )
         ledger.append(ev_3p)
 

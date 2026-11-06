@@ -147,7 +147,8 @@ def test_tip_detection_and_outgoing_neighbors():
 def test_telomere_and_rdna_end_mapping():
     """Verify telomere windows and rDNA hits map to appropriate 5p vs 3p ends."""
     graph = BidirectedGraph()
-    graph.add_segment("utg_arm", length=100000, depth=25.0)
+    seq_arm = ("GCCTAA" * 35) + ("TTAGGC" * 2) + ("A" * (100000 - 37 * 6 - 41 * 6)) + ("GCCTAA" * 1) + ("TTAGGC" * 40)
+    graph.add_segment("utg_arm", length=100000, depth=25.0, sequence=seq_arm)
 
     # Annotations:
     # 5p terminal telomere at 1000: canonical repeat on 5p (-) is reverse (GCCTAA)
@@ -461,7 +462,8 @@ def test_port_relative_telomere_orientation():
     """Verify 5p vs 3p port-relative canonical repeat counts and orientation gating."""
     graph = BidirectedGraph()
     # utg_orient: long unitig (50 kb) with telomeres at both ends
-    graph.add_segment("utg_orient", length=50000, depth=30.0)
+    seq_orient = ("GCCTAA" * 35) + ("TTAGGC" * 2) + ("A" * (50000 - 37 * 6 - 43 * 6)) + ("GCCTAA" * 3) + ("TTAGGC" * 40)
+    graph.add_segment("utg_orient", length=50000, depth=30.0, sequence=seq_orient)
 
     # 5p terminal window (at 1000 bp):
     # canonical outgoing repeat for 5p (-) is reverse (GCCTAA).
@@ -473,7 +475,10 @@ def test_port_relative_telomere_orientation():
     ]
 
     # utg_inverted: long unitig (50 kb) where repeats run in the non-canonical direction
-    graph.add_segment("utg_inverted", length=50000, depth=30.0)
+    seq_inverted = (
+        ("TTAGGC" * 35) + ("GCCTAA" * 2) + ("A" * (50000 - 37 * 6 - 37 * 6)) + ("TTAGGC" * 2) + ("GCCTAA" * 35)
+    )
+    graph.add_segment("utg_inverted", length=50000, depth=30.0, sequence=seq_inverted)
     wins_inverted = [
         # At 5p, forward repeats point away from port into segment (internal, not cap)
         TidkWindow("utg_inverted", window_end=1000, forward_count=35, reverse_count=2),
@@ -521,10 +526,9 @@ def test_port_relative_telomere_orientation():
 def test_short_unitig_window_clamping_no_mirroring():
     """Verify window clamping on short unitigs (< 2 * window_bp) prevents window mirroring."""
     graph = BidirectedGraph()
-    # 8 kb unitig: with window_bp = 10000, seg_len (8000) < 2 * 10000 = 20000.
-    # Boundary clamps to midpoint: 8000 // 2 = 4000.
-    # 5p takes window_end <= 4000; 3p takes window_end > 4000.
-    graph.add_segment("utg_short", length=8000, depth=20.0)
+    # 8 kb unitig with telomeres on both ends
+    seq_short = ("GCCTAA" * 70) + ("A" * (8000 - 70 * 6 - 80 * 6)) + ("TTAGGC" * 80)
+    graph.add_segment("utg_short", length=8000, depth=20.0, sequence=seq_short)
 
     wins_short = [
         TidkWindow("utg_short", window_end=2000, forward_count=0, reverse_count=35),
@@ -533,8 +537,9 @@ def test_short_unitig_window_clamping_no_mirroring():
         TidkWindow("utg_short", window_end=8000, forward_count=40, reverse_count=0),
     ]
 
-    # Another short unitig with telomere ONLY at the 5p end (window 2000)
-    graph.add_segment("utg_left_only", length=6000, depth=20.0)
+    # Another short unitig with telomere ONLY at the 5p end
+    seq_left_only = ("GCCTAA" * 50) + ("A" * (6000 - 50 * 6))
+    graph.add_segment("utg_left_only", length=6000, depth=20.0, sequence=seq_left_only)
     wins_left_only = [
         TidkWindow("utg_left_only", window_end=2000, forward_count=0, reverse_count=50),
     ]
@@ -576,9 +581,12 @@ def test_short_unitig_window_clamping_no_mirroring():
 def test_telomere_threshold_gating_at_30_repeats():
     """Verify telomere threshold gating at 30 repeats and policy customization."""
     graph = BidirectedGraph()
-    graph.add_segment("utg_sub", length=30000, depth=20.0)
-    graph.add_segment("utg_exact", length=30000, depth=20.0)
-    graph.add_segment("utg_noise", length=30000, depth=20.0)
+    seq_sub = ("A" * (30000 - 29 * 6)) + ("TTAGGC" * 29)
+    seq_exact = ("A" * (30000 - 30 * 6)) + ("TTAGGC" * 30)
+    seq_noise = ("A" * (30000 - 5 * 6)) + ("TTAGGC" * 5)
+    graph.add_segment("utg_sub", length=30000, depth=20.0, sequence=seq_sub)
+    graph.add_segment("utg_exact", length=30000, depth=20.0, sequence=seq_exact)
+    graph.add_segment("utg_noise", length=30000, depth=20.0, sequence=seq_noise)
 
     annotations = {
         # 29 canonical repeats (just below threshold 30)
@@ -627,3 +635,37 @@ def test_telomere_threshold_gating_at_30_repeats():
     # Under strict policy (50), exact (30) now fails
     assert custom_by_key[("utg_exact", "3p")].telomere_canonical_count == 30
     assert custom_by_key[("utg_exact", "3p")].has_terminal_telomere is False
+
+
+def test_no_tidk_fallback_when_sequence_missing():
+    """Verify architectural requirement: if segment sequence is absent, telomere evidence is 0.
+
+    Even if TIDK windows are provided in annotations, the ledger relies strictly on
+    the native sequence scanner. Missing sequences must yield 0 / has_terminal_telomere=False.
+    """
+    graph = BidirectedGraph()
+    # No sequence provided
+    graph.add_segment("utg_no_seq", length=50000, depth=30.0)
+
+    annotations = {
+        "utg_no_seq": NodeAnnotations(
+            sequence_id="utg_no_seq",
+            tidk_windows=[
+                TidkWindow("utg_no_seq", window_end=1000, forward_count=0, reverse_count=50),
+                TidkWindow("utg_no_seq", window_end=49000, forward_count=50, reverse_count=0),
+            ],
+        )
+    }
+
+    ledger = build_end_evidence_ledger(graph, annotations)
+    by_key = {(e.segment_name, e.end): e for e in ledger}
+
+    for end in ("5p", "3p"):
+        e = by_key[("utg_no_seq", end)]
+        assert e.telomere_canonical_count == 0
+        assert e.telomere_opposite_count == 0
+        assert e.telomere_fwd_count == 0
+        assert e.telomere_rev_count == 0
+        assert e.has_terminal_telomere is False
+        assert e.telomere_offset_bp is None
+        assert e.telomere_tract_bp is None
