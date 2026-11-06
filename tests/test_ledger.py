@@ -21,6 +21,7 @@ from gfapdefinisher.ledger import (
     emit_tsv_ledger,
 )
 from gfapdefinisher.models import SegmentPort, Strand
+from gfapdefinisher.policy import Policy, PolicyValue, TelomerePolicy
 
 BENCHMARK_DIR = Path("data/benchmark/DF5120")
 
@@ -37,8 +38,8 @@ def test_end_evidence_dataclass():
         degree=0,
         is_tip=True,
         outgoing_neighbors=(),
-        telomere_fwd_count=10,
-        telomere_rev_count=0,
+        telomere_canonical_count=35,
+        telomere_opposite_count=2,
         has_terminal_telomere=True,
         rdna_hit_count=0,
         rdna_features=(),
@@ -55,8 +56,11 @@ def test_end_evidence_dataclass():
     assert ev.degree == 0
     assert ev.is_tip is True
     assert ev.outgoing_neighbors == ()
-    assert ev.telomere_fwd_count == 10
-    assert ev.telomere_rev_count == 0
+    assert ev.telomere_canonical_count == 35
+    assert ev.telomere_opposite_count == 2
+    # For 5p (-), reverse is canonical and forward is opposite
+    assert ev.telomere_rev_count == 35
+    assert ev.telomere_fwd_count == 2
     assert ev.has_terminal_telomere is True
     assert ev.rdna_hit_count == 0
     assert ev.rdna_features == ()
@@ -146,11 +150,13 @@ def test_telomere_and_rdna_end_mapping():
     graph.add_segment("utg_arm", length=100000, depth=25.0)
 
     # Annotations:
-    # 5p terminal telomere at 1000, 3p terminal telomere at 95000, internal telomere at 50000
+    # 5p terminal telomere at 1000: canonical repeat on 5p (-) is reverse (GCCTAA)
+    # 3p terminal telomere at 95000: canonical repeat on 3p (+) is forward (TTAGGC)
+    # internal telomere at 50000
     tidk_wins = [
-        TidkWindow("utg_arm", window_start=1000, forward_count=12, reverse_count=2),
-        TidkWindow("utg_arm", window_start=50000, forward_count=20, reverse_count=20),
-        TidkWindow("utg_arm", window_start=95000, forward_count=0, reverse_count=18),
+        TidkWindow("utg_arm", window_end=1000, forward_count=2, reverse_count=35),
+        TidkWindow("utg_arm", window_end=50000, forward_count=20, reverse_count=20),
+        TidkWindow("utg_arm", window_end=95000, forward_count=40, reverse_count=1),
     ]
 
     # Barrnap rDNA: 18S near 5p (start=500), 28S near 3p (start=94000), 5S in middle (start=50000)
@@ -174,8 +180,10 @@ def test_telomere_and_rdna_end_mapping():
 
     # 5p end should capture the window at 1000 and the 18S hit at 500
     e_5p = by_end["5p"]
-    assert e_5p.telomere_fwd_count == 12
-    assert e_5p.telomere_rev_count == 2
+    assert e_5p.telomere_canonical_count == 35
+    assert e_5p.telomere_opposite_count == 2
+    assert e_5p.telomere_fwd_count == 2
+    assert e_5p.telomere_rev_count == 35
     assert e_5p.has_terminal_telomere is True
     assert e_5p.rdna_hit_count == 1
     assert e_5p.rdna_features == ("18S_rRNA",)
@@ -183,8 +191,10 @@ def test_telomere_and_rdna_end_mapping():
 
     # 3p end should capture the window at 95000 and the 28S hit at 94000
     e_3p = by_end["3p"]
-    assert e_3p.telomere_fwd_count == 0
-    assert e_3p.telomere_rev_count == 18
+    assert e_3p.telomere_canonical_count == 40
+    assert e_3p.telomere_opposite_count == 1
+    assert e_3p.telomere_fwd_count == 40
+    assert e_3p.telomere_rev_count == 1
     assert e_3p.has_terminal_telomere is True
     assert e_3p.rdna_hit_count == 1
     assert e_3p.rdna_features == ("28S_rRNA",)
@@ -231,8 +241,8 @@ def test_emit_tsv_ledger_formatting(tmp_path: Path):
         degree=0,
         is_tip=True,
         outgoing_neighbors=(),
-        telomere_fwd_count=15,
-        telomere_rev_count=1,
+        telomere_canonical_count=35,
+        telomere_opposite_count=1,
         has_terminal_telomere=True,
         rdna_hit_count=0,
         rdna_features=(),
@@ -250,8 +260,8 @@ def test_emit_tsv_ledger_formatting(tmp_path: Path):
         degree=2,
         is_tip=False,
         outgoing_neighbors=("utg2", "utg3"),
-        telomere_fwd_count=0,
-        telomere_rev_count=0,
+        telomere_canonical_count=0,
+        telomere_opposite_count=0,
         has_terminal_telomere=False,
         rdna_hit_count=2,
         rdna_features=("18S_rRNA", "28S_rRNA"),
@@ -277,6 +287,8 @@ def test_emit_tsv_ledger_formatting(tmp_path: Path):
         "degree",
         "is_tip",
         "outgoing_neighbors",
+        "telomere_canonical_count",
+        "telomere_opposite_count",
         "telomere_fwd_count",
         "telomere_rev_count",
         "has_terminal_telomere",
@@ -298,15 +310,17 @@ def test_emit_tsv_ledger_formatting(tmp_path: Path):
     assert row_5p[5] == "0"
     assert row_5p[6] == "True"
     assert row_5p[7] == ""
-    assert row_5p[8] == "15"
+    assert row_5p[8] == "35"
     assert row_5p[9] == "1"
-    assert row_5p[10] == "True"
-    assert row_5p[11] == "0"
-    assert row_5p[12] == ""
-    assert row_5p[13] == "False"
-    assert row_5p[14] == "1"
-    assert row_5p[15] == "geneA"
-    assert row_5p[16] == "eukarya"
+    assert row_5p[10] == "1"
+    assert row_5p[11] == "35"
+    assert row_5p[12] == "True"
+    assert row_5p[13] == "0"
+    assert row_5p[14] == ""
+    assert row_5p[15] == "False"
+    assert row_5p[16] == "1"
+    assert row_5p[17] == "geneA"
+    assert row_5p[18] == "eukarya"
 
     row_3p = lines[2].split("\t")
     assert row_3p[1] == "3p"
@@ -314,7 +328,7 @@ def test_emit_tsv_ledger_formatting(tmp_path: Path):
     assert row_3p[5] == "2"
     assert row_3p[6] == "False"
     assert row_3p[7] == "utg2,utg3"
-    assert row_3p[12] == "18S_rRNA,28S_rRNA"
+    assert row_3p[14] == "18S_rRNA,28S_rRNA"
 
     # Also test stream writing with io.StringIO
     buf = io.StringIO()
@@ -441,3 +455,175 @@ def test_ledger_outgoing_neighbors_strand_symbol_and_deduplication():
     e_20_3p = by_key[("utg20", "3p")]
     assert e_20_3p.degree == 1
     assert e_20_3p.outgoing_neighbors == ("utg10-",)
+
+
+def test_port_relative_telomere_orientation():
+    """Verify 5p vs 3p port-relative canonical repeat counts and orientation gating."""
+    graph = BidirectedGraph()
+    # utg_orient: long unitig (50 kb) with telomeres at both ends
+    graph.add_segment("utg_orient", length=50000, depth=30.0)
+
+    # 5p terminal window (at 1000 bp):
+    # canonical outgoing repeat for 5p (-) is reverse (GCCTAA).
+    # 3p terminal window (at 49000 bp):
+    # canonical outgoing repeat for 3p (+) is forward (TTAGGC).
+    wins_orient = [
+        TidkWindow("utg_orient", window_end=1000, forward_count=2, reverse_count=35),
+        TidkWindow("utg_orient", window_end=49000, forward_count=40, reverse_count=3),
+    ]
+
+    # utg_inverted: long unitig (50 kb) where repeats run in the non-canonical direction
+    graph.add_segment("utg_inverted", length=50000, depth=30.0)
+    wins_inverted = [
+        # At 5p, forward repeats point away from port into segment (internal, not cap)
+        TidkWindow("utg_inverted", window_end=1000, forward_count=35, reverse_count=2),
+        # At 3p, reverse repeats point away from port into segment (internal, not cap)
+        TidkWindow("utg_inverted", window_end=49000, forward_count=2, reverse_count=35),
+    ]
+
+    annotations = {
+        "utg_orient": NodeAnnotations(sequence_id="utg_orient", tidk_windows=wins_orient),
+        "utg_inverted": NodeAnnotations(sequence_id="utg_inverted", tidk_windows=wins_inverted),
+    }
+
+    ledger = build_end_evidence_ledger(graph, annotations, terminal_window_bp=10000)
+    by_key = {(e.segment_name, e.end): e for e in ledger}
+
+    # Canonical segment:
+    # 5p: reverse_count is canonical
+    e_or_5p = by_key[("utg_orient", "5p")]
+    assert e_or_5p.telomere_canonical_count == 35
+    assert e_or_5p.telomere_opposite_count == 2
+    assert e_or_5p.telomere_rev_count == 35
+    assert e_or_5p.telomere_fwd_count == 2
+    assert e_or_5p.has_terminal_telomere is True
+
+    # 3p: forward_count is canonical
+    e_or_3p = by_key[("utg_orient", "3p")]
+    assert e_or_3p.telomere_canonical_count == 40
+    assert e_or_3p.telomere_opposite_count == 3
+    assert e_or_3p.telomere_fwd_count == 40
+    assert e_or_3p.telomere_rev_count == 3
+    assert e_or_3p.has_terminal_telomere is True
+
+    # Inverted segment: repeats in wrong orientation fail terminal telomere threshold
+    e_inv_5p = by_key[("utg_inverted", "5p")]
+    assert e_inv_5p.telomere_canonical_count == 2
+    assert e_inv_5p.telomere_opposite_count == 35
+    assert e_inv_5p.has_terminal_telomere is False
+
+    e_inv_3p = by_key[("utg_inverted", "3p")]
+    assert e_inv_3p.telomere_canonical_count == 2
+    assert e_inv_3p.telomere_opposite_count == 35
+    assert e_inv_3p.has_terminal_telomere is False
+
+
+def test_short_unitig_window_clamping_no_mirroring():
+    """Verify window clamping on short unitigs (< 2 * window_bp) prevents window mirroring."""
+    graph = BidirectedGraph()
+    # 8 kb unitig: with window_bp = 10000, seg_len (8000) < 2 * 10000 = 20000.
+    # Boundary clamps to midpoint: 8000 // 2 = 4000.
+    # 5p takes window_end <= 4000; 3p takes window_end > 4000.
+    graph.add_segment("utg_short", length=8000, depth=20.0)
+
+    wins_short = [
+        TidkWindow("utg_short", window_end=2000, forward_count=0, reverse_count=35),
+        TidkWindow("utg_short", window_end=4000, forward_count=0, reverse_count=35),
+        TidkWindow("utg_short", window_end=6000, forward_count=40, reverse_count=0),
+        TidkWindow("utg_short", window_end=8000, forward_count=40, reverse_count=0),
+    ]
+
+    # Another short unitig with telomere ONLY at the 5p end (window 2000)
+    graph.add_segment("utg_left_only", length=6000, depth=20.0)
+    wins_left_only = [
+        TidkWindow("utg_left_only", window_end=2000, forward_count=0, reverse_count=50),
+    ]
+
+    annotations = {
+        "utg_short": NodeAnnotations(sequence_id="utg_short", tidk_windows=wins_short),
+        "utg_left_only": NodeAnnotations(sequence_id="utg_left_only", tidk_windows=wins_left_only),
+    }
+
+    ledger = build_end_evidence_ledger(graph, annotations, terminal_window_bp=10000)
+    by_key = {(e.segment_name, e.end): e for e in ledger}
+
+    # utg_short:
+    # 5p gets windows 2000 and 4000 (total reverse = 70)
+    e_short_5p = by_key[("utg_short", "5p")]
+    assert e_short_5p.telomere_canonical_count == 70
+    assert e_short_5p.telomere_opposite_count == 0
+    assert e_short_5p.has_terminal_telomere is True
+
+    # 3p gets windows 6000 and 8000 (total forward = 80)
+    e_short_3p = by_key[("utg_short", "3p")]
+    assert e_short_3p.telomere_canonical_count == 80
+    assert e_short_3p.telomere_opposite_count == 0
+    assert e_short_3p.has_terminal_telomere is True
+
+    # utg_left_only:
+    # 5p has telomere (midpoint = 3000, window 2000 <= 3000)
+    e_lo_5p = by_key[("utg_left_only", "5p")]
+    assert e_lo_5p.telomere_canonical_count == 50
+    assert e_lo_5p.has_terminal_telomere is True
+
+    # 3p MUST NOT mirror window 2000 (window 2000 is not > 3000)
+    e_lo_3p = by_key[("utg_left_only", "3p")]
+    assert e_lo_3p.telomere_canonical_count == 0
+    assert e_lo_3p.telomere_opposite_count == 0
+    assert e_lo_3p.has_terminal_telomere is False
+
+
+def test_telomere_threshold_gating_at_30_repeats():
+    """Verify telomere threshold gating at 30 repeats and policy customization."""
+    graph = BidirectedGraph()
+    graph.add_segment("utg_sub", length=30000, depth=20.0)
+    graph.add_segment("utg_exact", length=30000, depth=20.0)
+    graph.add_segment("utg_noise", length=30000, depth=20.0)
+
+    annotations = {
+        # 29 canonical repeats (just below threshold 30)
+        "utg_sub": NodeAnnotations(
+            sequence_id="utg_sub",
+            tidk_windows=[TidkWindow("utg_sub", window_end=29000, forward_count=29, reverse_count=0)],
+        ),
+        # 30 canonical repeats (exact threshold)
+        "utg_exact": NodeAnnotations(
+            sequence_id="utg_exact",
+            tidk_windows=[TidkWindow("utg_exact", window_end=29000, forward_count=30, reverse_count=0)],
+        ),
+        # 5 repeats (background random 6-mer noise)
+        "utg_noise": NodeAnnotations(
+            sequence_id="utg_noise",
+            tidk_windows=[TidkWindow("utg_noise", window_end=29000, forward_count=5, reverse_count=0)],
+        ),
+    }
+
+    # Default policy (min_terminal_repeat_count = 30)
+    ledger = build_end_evidence_ledger(graph, annotations, terminal_window_bp=10000)
+    by_key = {(e.segment_name, e.end): e for e in ledger}
+
+    assert by_key[("utg_sub", "3p")].telomere_canonical_count == 29
+    assert by_key[("utg_sub", "3p")].has_terminal_telomere is False
+
+    assert by_key[("utg_exact", "3p")].telomere_canonical_count == 30
+    assert by_key[("utg_exact", "3p")].has_terminal_telomere is True
+
+    assert by_key[("utg_noise", "3p")].telomere_canonical_count == 5
+    assert by_key[("utg_noise", "3p")].has_terminal_telomere is False
+
+    # Custom policy override (min_terminal_repeat_count = 50)
+    custom_policy = Policy(
+        telomere=TelomerePolicy(
+            min_terminal_repeat_count=PolicyValue(
+                value=50,
+                justification="Strict threshold for high-stringency analysis",
+                provenance="User-specified experiment parameter",
+            )
+        )
+    )
+    custom_ledger = build_end_evidence_ledger(graph, annotations, terminal_window_bp=10000, policy=custom_policy)
+    custom_by_key = {(e.segment_name, e.end): e for e in custom_ledger}
+
+    # Under strict policy (50), exact (30) now fails
+    assert custom_by_key[("utg_exact", "3p")].telomere_canonical_count == 30
+    assert custom_by_key[("utg_exact", "3p")].has_terminal_telomere is False

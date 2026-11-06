@@ -11,6 +11,7 @@ from gfapdefinisher.annotations import (
     NodeAnnotations,
     TiaraHit,
     TidkWindow,
+    TidkWindowRow,
     aggregate_node_annotations,
     load_barrnap,
     load_compleasm,
@@ -32,8 +33,10 @@ def test_data_structures():
     tidk = TidkWindow(sequence_id="utg1", window_start=1000, forward_count=5, reverse_count=0)
     assert tidk.sequence_id == "utg1"
     assert tidk.window_start == 1000
+    assert tidk.window_end == 1000
     assert tidk.forward_count == 5
     assert tidk.reverse_count == 0
+    assert TidkWindowRow is TidkWindow
 
     barrnap = BarrnapHit(
         sequence_id="utg1",

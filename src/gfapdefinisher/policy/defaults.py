@@ -23,6 +23,12 @@ class TelomerePolicy:
         provenance="Empirical observation across curated nematode T2T assemblies",
         provisional=True,
     )
+    min_terminal_repeat_count: PolicyValue[int] = PolicyValue(
+        value=30,
+        justification="we want as low a number possible to still consider telomeric reads that did not span the whole telomere, but large enough to discrimate internal telomere sequences. It is open for revision upon bigger data observation",
+        provenance="@pgonzale60 biological calibration on reference benchmark and nematode telomere architecture (BIO-001)",
+        provisional=True,
+    )
 
 
 @dataclass(frozen=True)
