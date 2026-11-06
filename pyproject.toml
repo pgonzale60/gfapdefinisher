@@ -45,4 +45,5 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 markers = [
     "bio: biological scenario test assertions (owned by @pgonzale60)",
+    "benchmark: integration tests on benchmark datasets",
 ]
