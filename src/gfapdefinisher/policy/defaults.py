@@ -47,6 +47,12 @@ class TelomerePolicy:
         provenance="@pgonzale60 biological calibration on reference benchmark (BIO-001)",
         provisional=True,
     )
+    max_reachability_hops: PolicyValue[int] = PolicyValue(
+        value=1,
+        justification="Maximum traversal hops from a somatic bifurcation port to reach an authentic terminal telomeric cap; BIO-001, BIO-003",
+        provenance="@pgonzale60 biological calibration on reference benchmark (BIO-003)",
+        provisional=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,12 @@ class StoichiometryPolicy:
         value=0.40,
         justification="Upper bound for germline-retained depth relative to somatic stem depth in mixed worm tissue.",
         provenance="ha_analyze_count k-mer peak calibration on reference benchmark; BIO-002",
+        provisional=True,
+    )
+    max_reachability_hops: PolicyValue[int] = PolicyValue(
+        value=1,
+        justification="Maximum traversal hops to reach somatic telomeric cap from diminution junction; BIO-002, BIO-003",
+        provenance="@pgonzale60 biological calibration on reference benchmark (BIO-003)",
         provisional=True,
     )
 
