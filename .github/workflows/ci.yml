@@ -1,0 +1,41 @@
+name: CI & Quality Gate
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+    branches:
+      - dev
+      - main
+
+jobs:
+  validate:
+    name: Lint, Format & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --frozen || uv sync
+
+      - name: Check Ruff Linting
+        run: uv run ruff check .
+
+      - name: Check Ruff Formatting
+        run: uv run ruff format --check .
+
+      - name: Run Pytest Suite
+        run: uv run pytest
