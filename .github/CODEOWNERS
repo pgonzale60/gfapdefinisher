@@ -1,0 +1,11 @@
+# CODEOWNERS for gfapdefinisher
+# Enforces human biology expert sign-off on truth definitions, policies, and tests
+
+# Biology specifications and non-negotiables
+docs/biology/                @pgonzale60
+
+# Biological regression test scenarios
+tests/bio/                   @pgonzale60
+
+# Parameter governance and policy declarations
+src/gfapdefinisher/policy/   @pgonzale60
