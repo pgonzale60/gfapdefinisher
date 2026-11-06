@@ -29,6 +29,24 @@ class TelomerePolicy:
         provenance="@pgonzale60 biological calibration on reference benchmark and nematode telomere architecture (BIO-001)",
         provisional=True,
     )
+    terminal_scan_bp: PolicyValue[int] = PolicyValue(
+        value=10000,
+        justification="Maximum sequence length inspected from segment physical terminus for telomeric arrays; BIO-001",
+        provenance="Subtelomeric terminal window standard",
+        provisional=True,
+    )
+    max_terminal_offset_bp: PolicyValue[int] = PolicyValue(
+        value=10,
+        justification="Chromosome ends terminate directly with canonical telomeric repeats; non-repeat leader sequence must be <= 10 bp to distinguish genuine terminal caps from subtelomeric/interstitial repeats and tolerate only minimal sequencing or clipping noise; BIO-001",
+        provenance="@pgonzale60 biological calibration on reference benchmark (BIO-001)",
+        provisional=True,
+    )
+    max_internal_gap_bp: PolicyValue[int] = PolicyValue(
+        value=10,
+        justification="Canonical telomeric repeat arrays are dense and contiguous; non-repeat gaps between adjacent repeat units exceeding 10 bp indicate interrupting non-telomeric sequence rather than minor sequencing error; BIO-001",
+        provenance="@pgonzale60 biological calibration on reference benchmark (BIO-001)",
+        provisional=True,
+    )
 
 
 @dataclass(frozen=True)

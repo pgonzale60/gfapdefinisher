@@ -32,6 +32,14 @@ def test_default_policy_completeness():
     assert (
         "biological calibration on reference benchmark" in DEFAULT_POLICY.telomere.min_terminal_repeat_count.provenance
     )
+    assert DEFAULT_POLICY.telomere.terminal_scan_bp.value == 10000
+    assert DEFAULT_POLICY.telomere.terminal_scan_bp.provisional is True
+    assert DEFAULT_POLICY.telomere.max_terminal_offset_bp.value == 10
+    assert DEFAULT_POLICY.telomere.max_terminal_offset_bp.provisional is True
+    assert "biological calibration on reference benchmark" in DEFAULT_POLICY.telomere.max_terminal_offset_bp.provenance
+    assert DEFAULT_POLICY.telomere.max_internal_gap_bp.value == 10
+    assert DEFAULT_POLICY.telomere.max_internal_gap_bp.provisional is True
+    assert "biological calibration on reference benchmark" in DEFAULT_POLICY.telomere.max_internal_gap_bp.provenance
     assert DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value > 0
     assert (
         DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value
