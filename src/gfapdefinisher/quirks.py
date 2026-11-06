@@ -159,7 +159,7 @@ class JunctionRecord:
         somatic_terminus_port: Somatic branch port terminating or stubbing out.
         germline_continuation_port: Germline branch port continuing chromosome arm.
         break_index: 1-based index for intercalary breaks.
-        core_depth_ratio: Depth ratio of germline branch relative to somatic stem.
+        core_depth_ratio: Depth ratio of germline branch relative to core somatic coverage ($C_{\text{core}}$).
         read_count: Supporting read count across the junction boundary.
         notes: Contextual provenance notes.
     """
