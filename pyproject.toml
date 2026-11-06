@@ -1,0 +1,22 @@
+[project]
+name = "gfapdefinisher"
+version = "0.1.0"
+description = "Biologically informed Hifiasm GFA harness for automated germline T2T and outcrosser nematode assemblies"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "networkx>=3.0",
+    "pyfaidx>=0.7.0",
+]
+
+[project.scripts]
+gfapdefinisher = "gfapdefinisher.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+]
