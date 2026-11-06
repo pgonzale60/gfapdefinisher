@@ -18,6 +18,7 @@ from typing import Any, TextIO
 from gfapdefinisher.annotations import NodeAnnotations
 from gfapdefinisher.graph import BidirectedGraph
 from gfapdefinisher.models import SegmentPort, Strand
+from gfapdefinisher.policy import DEFAULT_POLICY, Policy
 
 DEFAULT_TERMINAL_WINDOW_BP: int = int("10000")
 
@@ -38,8 +39,8 @@ class EndEvidence:
     degree: int
     is_tip: bool
     outgoing_neighbors: tuple[str, ...]
-    telomere_fwd_count: int
-    telomere_rev_count: int
+    telomere_canonical_count: int
+    telomere_opposite_count: int
     has_terminal_telomere: bool
     rdna_hit_count: int
     rdna_features: tuple[str, ...]
@@ -47,12 +48,74 @@ class EndEvidence:
     usco_hit_count: int
     usco_genes: tuple[str, ...]
     tiara_class: str
+    telomere_fwd_count: int = 0
+    telomere_rev_count: int = 0
+
+    def __init__(
+        self,
+        segment_name: str,
+        end: str,
+        port: SegmentPort,
+        length: int,
+        depth: float,
+        degree: int,
+        is_tip: bool,
+        outgoing_neighbors: tuple[str, ...],
+        telomere_canonical_count: int | None = None,
+        telomere_opposite_count: int | None = None,
+        has_terminal_telomere: bool = False,
+        rdna_hit_count: int = 0,
+        rdna_features: tuple[str, ...] = (),
+        has_terminal_rdna: bool = False,
+        usco_hit_count: int = 0,
+        usco_genes: tuple[str, ...] = (),
+        tiara_class: str = "",
+        telomere_fwd_count: int | None = None,
+        telomere_rev_count: int | None = None,
+    ) -> None:
+        object.__setattr__(self, "segment_name", segment_name)
+        object.__setattr__(self, "end", end)
+        object.__setattr__(self, "port", port)
+        object.__setattr__(self, "length", length)
+        object.__setattr__(self, "depth", depth)
+        object.__setattr__(self, "degree", degree)
+        object.__setattr__(self, "is_tip", is_tip)
+        object.__setattr__(self, "outgoing_neighbors", outgoing_neighbors)
+        object.__setattr__(self, "has_terminal_telomere", has_terminal_telomere)
+        object.__setattr__(self, "rdna_hit_count", rdna_hit_count)
+        object.__setattr__(self, "rdna_features", rdna_features)
+        object.__setattr__(self, "has_terminal_rdna", has_terminal_rdna)
+        object.__setattr__(self, "usco_hit_count", usco_hit_count)
+        object.__setattr__(self, "usco_genes", usco_genes)
+        object.__setattr__(self, "tiara_class", tiara_class)
+
+        is_5p = end == "5p" or (port.strand == Strand.MINUS)
+        if telomere_canonical_count is not None and telomere_opposite_count is not None:
+            canon = telomere_canonical_count
+            opp = telomere_opposite_count
+            fwd = opp if is_5p else canon
+            rev = canon if is_5p else opp
+            if telomere_fwd_count is not None:
+                fwd = telomere_fwd_count
+            if telomere_rev_count is not None:
+                rev = telomere_rev_count
+        else:
+            fwd = telomere_fwd_count if telomere_fwd_count is not None else 0
+            rev = telomere_rev_count if telomere_rev_count is not None else 0
+            canon = rev if is_5p else fwd
+            opp = fwd if is_5p else rev
+
+        object.__setattr__(self, "telomere_canonical_count", canon)
+        object.__setattr__(self, "telomere_opposite_count", opp)
+        object.__setattr__(self, "telomere_fwd_count", fwd)
+        object.__setattr__(self, "telomere_rev_count", rev)
 
 
 def build_end_evidence_ledger(
     graph: BidirectedGraph,
     annotations: dict[str, NodeAnnotations],
     terminal_window_bp: int | None = None,
+    policy: Policy | None = None,
 ) -> list[EndEvidence]:
     """Build end-evidence ledger evaluating both ends (5p and 3p) of all segments in graph.
 
@@ -60,10 +123,13 @@ def build_end_evidence_ledger(
         graph: Bidirected assembly graph.
         annotations: Node annotations mapping sequence_id to NodeAnnotations.
         terminal_window_bp: Terminal window size in bp. If None, uses default.
+        policy: Policy instance governing thresholds. If None, uses DEFAULT_POLICY.
 
     Returns:
         Deterministically sorted list of EndEvidence records by (segment_name, end).
     """
+    active_policy = policy if policy is not None else DEFAULT_POLICY
+    min_tel_repeats = active_policy.telomere.min_terminal_repeat_count.value
     window_bp = terminal_window_bp if terminal_window_bp is not None else DEFAULT_TERMINAL_WINDOW_BP
     ledger: list[EndEvidence] = []
 
@@ -71,6 +137,12 @@ def build_end_evidence_ledger(
         ann = annotations.get(seg_name)
         seg_len = seg.length
         seg_depth = seg.depth
+
+        is_short = seg_len < 2 * window_bp
+        midpoint = seg_len // 2
+
+        boundary_5p = midpoint if is_short else window_bp
+        boundary_3p = midpoint if is_short else max(0, seg_len - window_bp)
 
         if ann is not None:
             usco_count = len(ann.compleasm_hits)
@@ -89,18 +161,23 @@ def build_end_evidence_ledger(
         neigh_5p = tuple(dict.fromkeys(e.to_port.to_symbol() for e in out_5p))
 
         if ann is not None:
-            w_5p = [w for w in ann.tidk_windows if w.window_start <= window_bp]
+            w_5p = [w for w in ann.tidk_windows if w.window_end <= boundary_5p]
             tel_fwd_5p = sum(w.forward_count for w in w_5p)
             tel_rev_5p = sum(w.reverse_count for w in w_5p)
-            has_tel_5p = (tel_fwd_5p > 0) or (tel_rev_5p > 0)
+            # Port-relative: 5p (-) outgoing canonical repeat is reverse (GCCTAA)
+            tel_canon_5p = tel_rev_5p
+            tel_opp_5p = tel_fwd_5p
+            has_tel_5p = tel_canon_5p >= min_tel_repeats
 
-            rdna_5p = [h for h in ann.barrnap_hits if h.start <= window_bp]
+            rdna_5p = [h for h in ann.barrnap_hits if h.start <= boundary_5p]
             rdna_cnt_5p = len(rdna_5p)
             rdna_feat_5p = tuple(sorted({h.feature_name for h in rdna_5p}))
             has_rdna_5p = rdna_cnt_5p > 0
         else:
             tel_fwd_5p = 0
             tel_rev_5p = 0
+            tel_canon_5p = 0
+            tel_opp_5p = 0
             has_tel_5p = False
             rdna_cnt_5p = 0
             rdna_feat_5p = ()
@@ -115,8 +192,8 @@ def build_end_evidence_ledger(
             degree=deg_5p,
             is_tip=tip_5p,
             outgoing_neighbors=neigh_5p,
-            telomere_fwd_count=tel_fwd_5p,
-            telomere_rev_count=tel_rev_5p,
+            telomere_canonical_count=tel_canon_5p,
+            telomere_opposite_count=tel_opp_5p,
             has_terminal_telomere=has_tel_5p,
             rdna_hit_count=rdna_cnt_5p,
             rdna_features=rdna_feat_5p,
@@ -124,6 +201,8 @@ def build_end_evidence_ledger(
             usco_hit_count=usco_count,
             usco_genes=usco_genes,
             tiara_class=tiara_cls,
+            telomere_fwd_count=tel_fwd_5p,
+            telomere_rev_count=tel_rev_5p,
         )
         ledger.append(ev_5p)
 
@@ -134,13 +213,14 @@ def build_end_evidence_ledger(
         tip_3p = deg_3p == 0
         neigh_3p = tuple(dict.fromkeys(e.to_port.to_symbol() for e in out_3p))
 
-        boundary_3p = max(0, seg_len - window_bp)
-
         if ann is not None:
-            w_3p = [w for w in ann.tidk_windows if w.window_start >= boundary_3p]
+            w_3p = [w for w in ann.tidk_windows if w.window_end > boundary_3p]
             tel_fwd_3p = sum(w.forward_count for w in w_3p)
             tel_rev_3p = sum(w.reverse_count for w in w_3p)
-            has_tel_3p = (tel_fwd_3p > 0) or (tel_rev_3p > 0)
+            # Port-relative: 3p (+) outgoing canonical repeat is forward (TTAGGC)
+            tel_canon_3p = tel_fwd_3p
+            tel_opp_3p = tel_rev_3p
+            has_tel_3p = tel_canon_3p >= min_tel_repeats
 
             rdna_3p = [h for h in ann.barrnap_hits if h.end >= boundary_3p]
             rdna_cnt_3p = len(rdna_3p)
@@ -149,6 +229,8 @@ def build_end_evidence_ledger(
         else:
             tel_fwd_3p = 0
             tel_rev_3p = 0
+            tel_canon_3p = 0
+            tel_opp_3p = 0
             has_tel_3p = False
             rdna_cnt_3p = 0
             rdna_feat_3p = ()
@@ -163,8 +245,8 @@ def build_end_evidence_ledger(
             degree=deg_3p,
             is_tip=tip_3p,
             outgoing_neighbors=neigh_3p,
-            telomere_fwd_count=tel_fwd_3p,
-            telomere_rev_count=tel_rev_3p,
+            telomere_canonical_count=tel_canon_3p,
+            telomere_opposite_count=tel_opp_3p,
             has_terminal_telomere=has_tel_3p,
             rdna_hit_count=rdna_cnt_3p,
             rdna_features=rdna_feat_3p,
@@ -172,6 +254,8 @@ def build_end_evidence_ledger(
             usco_hit_count=usco_count,
             usco_genes=usco_genes,
             tiara_class=tiara_cls,
+            telomere_fwd_count=tel_fwd_3p,
+            telomere_rev_count=tel_rev_3p,
         )
         ledger.append(ev_3p)
 
@@ -195,6 +279,8 @@ def emit_tsv_ledger(ledger: list[EndEvidence], out_file: TextIO | Path | str) ->
         "degree",
         "is_tip",
         "outgoing_neighbors",
+        "telomere_canonical_count",
+        "telomere_opposite_count",
         "telomere_fwd_count",
         "telomere_rev_count",
         "has_terminal_telomere",
@@ -218,6 +304,8 @@ def emit_tsv_ledger(ledger: list[EndEvidence], out_file: TextIO | Path | str) ->
                 str(e.degree),
                 str(e.is_tip),
                 ",".join(e.outgoing_neighbors),
+                str(e.telomere_canonical_count),
+                str(e.telomere_opposite_count),
                 str(e.telomere_fwd_count),
                 str(e.telomere_rev_count),
                 str(e.has_terminal_telomere),

@@ -27,12 +27,45 @@ class TiaraHit:
 
 @dataclass(slots=True, frozen=True)
 class TidkWindow:
-    """Telomeric repeat motif count within a sliding sequence window from TIDK."""
+    """Telomeric repeat motif count within a sliding sequence window from TIDK.
+
+    Note: TIDK reports the 1-based end coordinate of each window in the 'window' column.
+    """
 
     sequence_id: str
-    window_start: int
+    window_end: int
     forward_count: int
     reverse_count: int
+    window_start: int
+
+    def __init__(
+        self,
+        sequence_id: str,
+        window_end: int | None = None,
+        forward_count: int = 0,
+        reverse_count: int = 0,
+        window_start: int | None = None,
+    ) -> None:
+        if window_end is None and window_start is not None:
+            end_val = window_start
+            start_val = window_start
+        elif window_end is not None and window_start is None:
+            end_val = window_end
+            start_val = window_end
+        elif window_end is not None and window_start is not None:
+            end_val = window_end
+            start_val = window_start
+        else:
+            end_val = 0
+            start_val = 0
+        object.__setattr__(self, "sequence_id", sequence_id)
+        object.__setattr__(self, "window_end", end_val)
+        object.__setattr__(self, "forward_count", forward_count)
+        object.__setattr__(self, "reverse_count", reverse_count)
+        object.__setattr__(self, "window_start", start_val)
+
+
+TidkWindowRow = TidkWindow
 
 
 @dataclass(slots=True, frozen=True)
@@ -200,7 +233,7 @@ def load_tidk(path: str | Path) -> dict[str, list[TidkWindow]]:
                 for idx, col in enumerate(header):
                     if col in ("id", "sequence_id", "seq_id", "sequence"):
                         seq_idx = idx
-                    elif col in ("window", "window_start", "start"):
+                    elif col in ("window", "window_end", "window_start", "start", "end"):
                         win_idx = idx
                     elif col in ("forward_repeat_number", "forward_count", "forward", "fwd"):
                         fwd_idx = idx
@@ -229,7 +262,7 @@ def load_tidk(path: str | Path) -> dict[str, list[TidkWindow]]:
 
             hit = TidkWindow(
                 sequence_id=seq_id,
-                window_start=int(float(row[win_idx].strip())),
+                window_end=int(float(row[win_idx].strip())),
                 forward_count=int(float(row[fwd_idx].strip())),
                 reverse_count=int(float(row[rev_idx].strip())),
             )

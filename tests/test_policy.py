@@ -28,6 +28,10 @@ def test_policy_value_validation():
 def test_default_policy_completeness():
     assert DEFAULT_POLICY.telomere.motif_forward.value == "TTAGGC"
     assert DEFAULT_POLICY.telomere.motif_reverse.value == "GCCTAA"
+    assert DEFAULT_POLICY.telomere.min_terminal_repeat_count.value == 30
+    assert (
+        "biological calibration on reference benchmark" in DEFAULT_POLICY.telomere.min_terminal_repeat_count.provenance
+    )
     assert DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value > 0
     assert (
         DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value
