@@ -26,3 +26,7 @@ data/benchmark/**/*.gfa
 .pytest_cache/
 .coverage
 htmlcov/
+data/benchmark/**/*.fa
+data/benchmark/**/*.fasta
+data/benchmark/**/*.paf
+data/
