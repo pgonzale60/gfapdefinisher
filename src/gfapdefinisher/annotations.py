@@ -245,16 +245,14 @@ def load_tidk(path: str | Path) -> dict[str, list[TidkWindow]]:
                     elif col in ("reverse_repeat_number", "reverse_count", "reverse", "rev"):
                         rev_idx = idx
 
-                default_indices = [i for i, _ in enumerate(("id", "win", "fwd", "rev"))]
-                _d_id, _d_win, _d_fwd, _d_rev = default_indices
                 if seq_idx == -1:
-                    seq_idx = _d_id
+                    seq_idx = 0
                 if win_idx == -1:
-                    win_idx = _d_win
+                    win_idx = 1
                 if fwd_idx == -1:
-                    fwd_idx = _d_fwd
+                    fwd_idx = 2
                 if rev_idx == -1:
-                    rev_idx = _d_rev
+                    rev_idx = 3
                 continue
 
             max_idx = max(seq_idx, win_idx, fwd_idx, rev_idx)
@@ -341,9 +339,6 @@ def load_compleasm(path: str | Path) -> dict[str, list[CompleasmHit]]:
     Returns:
         Mapping from sequence_id to list of CompleasmHit records placed on that unitig.
     """
-    compleasm_cols = ("gene", "status", "seq", "start", "end", "strand", "score")
-    default_indices = [i for i, _ in enumerate(compleasm_cols)]
-    d_gene, d_status, d_seq, d_start, d_end, _d_strand, d_score = default_indices
 
     hits: dict[str, list[CompleasmHit]] = {}
     with _open_file(path) as f:
@@ -380,17 +375,17 @@ def load_compleasm(path: str | Path) -> dict[str, list[CompleasmHit]]:
                         score_idx = idx
 
                 if gene_idx == -1:
-                    gene_idx = d_gene
+                    gene_idx = 0
                 if status_idx == -1:
-                    status_idx = d_status
+                    status_idx = 1
                 if seq_idx == -1:
-                    seq_idx = d_seq
+                    seq_idx = 2
                 if start_idx == -1:
-                    start_idx = d_start
+                    start_idx = 3
                 if end_idx == -1:
-                    end_idx = d_end
+                    end_idx = 4
                 if score_idx == -1:
-                    score_idx = d_score
+                    score_idx = 6
                 continue
 
             max_idx = max(gene_idx, status_idx, seq_idx, start_idx, end_idx, score_idx)

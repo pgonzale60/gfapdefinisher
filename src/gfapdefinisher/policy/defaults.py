@@ -17,12 +17,6 @@ class TelomerePolicy:
         justification="Reverse complement of canonical nematode telomeric repeat hexamer.",
         provenance="Mathematical derivation; BIO-001",
     )
-    min_terminal_repeat_fraction: PolicyValue[float] = PolicyValue(
-        value=0.60,
-        justification="Minimum fraction of window composed of telomeric motifs to qualify as an authentic cap.",
-        provenance="Empirical observation across curated nematode T2T assemblies",
-        provisional=True,
-    )
     min_terminal_repeat_count: PolicyValue[int] = PolicyValue(
         value=30,
         justification="we want as low a number possible to still consider telomeric reads that did not span the whole telomere, but large enough to discrimate internal telomere sequences. It is open for revision upon bigger data observation",
