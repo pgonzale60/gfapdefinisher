@@ -123,15 +123,15 @@ def test_tip_detection_and_outgoing_neighbors():
     assert by_key[("utg1", "5p")].is_tip is True
     assert by_key[("utg1", "5p")].outgoing_neighbors == ()
 
-    # utg1 3' (utg1+): degree 1 -> utg2
+    # utg1 3' (utg1+): degree 1 -> utg2+
     assert by_key[("utg1", "3p")].degree == 1
     assert by_key[("utg1", "3p")].is_tip is False
-    assert by_key[("utg1", "3p")].outgoing_neighbors == ("utg2",)
+    assert by_key[("utg1", "3p")].outgoing_neighbors == ("utg2+",)
 
-    # utg2 3' (utg2+): degree 2 -> utg3, utg4
+    # utg2 3' (utg2+): degree 2 -> utg3+, utg4+
     assert by_key[("utg2", "3p")].degree == 2
     assert by_key[("utg2", "3p")].is_tip is False
-    assert set(by_key[("utg2", "3p")].outgoing_neighbors) == {"utg3", "utg4"}
+    assert set(by_key[("utg2", "3p")].outgoing_neighbors) == {"utg3+", "utg4+"}
 
     # utg3 3' (utg3+) and utg4 3' (utg4+): tips
     assert by_key[("utg3", "3p")].degree == 0
@@ -418,3 +418,26 @@ def test_benchmark_df5120_staged_integration(tmp_path: Path):
     header = lines[0].split("\t")
     assert "segment_name" in header
     assert "has_terminal_telomere" in header
+
+
+def test_ledger_outgoing_neighbors_strand_symbol_and_deduplication():
+    """Verify ledger outgoing_neighbors includes strand symbols and deduplicates ports."""
+    graph = BidirectedGraph()
+    graph.add_segment("utg10", length=10000, depth=25.0)
+    graph.add_segment("utg20", length=15000, depth=25.0)
+
+    # utg10+ -> utg20-
+    graph.add_edge("utg10+", "utg20-", "100M")
+
+    ledger = build_end_evidence_ledger(graph, annotations={})
+    by_key = {(e.segment_name, e.end): e for e in ledger}
+
+    # utg10 3p (utg10+) connects to utg20-
+    e_10_3p = by_key[("utg10", "3p")]
+    assert e_10_3p.degree == 1
+    assert e_10_3p.outgoing_neighbors == ("utg20-",)
+
+    # utg20 3p (utg20+) connects to utg10- (dual of utg10+ -> utg20-)
+    e_20_3p = by_key[("utg20", "3p")]
+    assert e_20_3p.degree == 1
+    assert e_20_3p.outgoing_neighbors == ("utg10-",)

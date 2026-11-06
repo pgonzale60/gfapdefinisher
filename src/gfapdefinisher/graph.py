@@ -118,26 +118,67 @@ class BidirectedGraph:
         edge: DovetailEdge,
         tags: dict[str, Any] | None = None,
         raw_tags: list[str] | None = None,
-    ) -> None:
+    ) -> DovetailEdge:
         """Record a single directed edge in outgoing and incoming registries."""
         port_edges = self.edges.setdefault(edge.from_port, [])
-        if edge not in port_edges:
-            port_edges.append(edge)
-
         inc_edges = self._incoming.setdefault(edge.to_port, [])
-        if edge not in inc_edges:
-            inc_edges.append(edge)
-
         key = (edge.from_port, edge.to_port)
-        if tags is not None:
-            self.edge_tags[key] = tags
+
+        existing_idx = -1
+        existing_edge: DovetailEdge | None = None
+        for i, e in enumerate(port_edges):
+            if e.to_port == edge.to_port:
+                existing_edge = e
+                existing_idx = i
+                break
+
+        if existing_edge is None:
+            port_edges.append(edge)
+            if edge not in inc_edges:
+                inc_edges.append(edge)
+            recorded = edge
+        else:
+            existing_is_placeholder = existing_edge.cigar in ("", "*") or existing_edge.overlap_len == 0
+            new_is_placeholder = edge.cigar in ("", "*") or edge.overlap_len == 0
+
+            better_cigar = (existing_is_placeholder and not new_is_placeholder) or (
+                edge.overlap_len > existing_edge.overlap_len
+            )
+            better_coords = (
+                not better_cigar and existing_edge.cigar == edge.cigar and existing_edge.l1 == 0 and edge.l1 != 0
+            )
+
+            if better_cigar or better_coords:
+                port_edges[existing_idx] = edge
+                for j, e in enumerate(inc_edges):
+                    if e.from_port == edge.from_port:
+                        inc_edges[j] = edge
+                        break
+                else:
+                    inc_edges.append(edge)
+                recorded = edge
+            else:
+                recorded = existing_edge
+
+        if tags:
+            if key not in self.edge_tags or not self.edge_tags[key]:
+                self.edge_tags[key] = dict(tags)
+            else:
+                self.edge_tags[key].update(tags)
         elif key not in self.edge_tags:
             self.edge_tags[key] = {}
 
-        if raw_tags is not None:
-            self.raw_edge_tags[key] = raw_tags
+        if raw_tags:
+            if key not in self.raw_edge_tags or not self.raw_edge_tags[key]:
+                self.raw_edge_tags[key] = list(raw_tags)
+            else:
+                for rt in raw_tags:
+                    if rt not in self.raw_edge_tags[key]:
+                        self.raw_edge_tags[key].append(rt)
         elif key not in self.raw_edge_tags:
             self.raw_edge_tags[key] = []
+
+        return recorded
 
     def add_edge(
         self,
@@ -157,8 +198,6 @@ class BidirectedGraph:
         overlap_len = cigar_overlap_length(cigar)
         if l1 == 0 and p_from.name in self.segments:
             l1 = self.segments[p_from.name].length
-        if l2 == 0 and p_to.name in self.segments:
-            l2 = self.segments[p_to.name].length
 
         edge = DovetailEdge(
             from_port=p_from,
@@ -169,13 +208,13 @@ class BidirectedGraph:
             l2=l2,
         )
 
-        self._record_directed_edge(edge, tags, raw_tags)
+        recorded = self._record_directed_edge(edge, tags, raw_tags)
 
         if add_dual:
-            dual_edge = edge.dual
+            dual_edge = recorded.dual
             self._record_directed_edge(dual_edge, tags, raw_tags)
 
-        return edge
+        return recorded
 
     def get_outgoing(self, port: SegmentPort | str, strand: Strand | str | None = None) -> list[DovetailEdge]:
         """Return list of outgoing dovetail edges extending from port."""
