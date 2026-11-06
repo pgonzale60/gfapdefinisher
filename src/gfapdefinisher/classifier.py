@@ -444,6 +444,8 @@ def classify_pde_junction(
 
     for edge in outgoing_edges:
         branch_port = edge.to_port
+        if branch_port.name == resolved_stem.name:
+            continue
         branch_seg = graph.segments.get(branch_port.name)
         branch_ev = _lookup_evidence(ledger_by_port, branch_port)
 
@@ -488,45 +490,46 @@ def classify_pde_junction(
                 )
             )
 
-    if somatic_candidates and germline_candidates:
+    if somatic_candidates:
         somatic_candidates.sort(key=lambda item: (-item[1], item[0].name, item[0].strand.value))
-        germline_candidates.sort(
-            key=lambda cand: (
-                abs(cand.core_depth_ratio - median_expected),
-                -cand.length,
-                -cand.branch_depth,
-                cand.port.name,
-                cand.port.strand.value,
-            )
-        )
 
-        best_somatic_port, _ = somatic_candidates[0]
-        best_germline = germline_candidates[0]
+        for best_somatic_port, _ in somatic_candidates:
+            # Germline continuation must be distinct from somatic terminus branch
+            eligible_germline = [cand for cand in germline_candidates if cand.port.name != best_somatic_port.name]
+            if eligible_germline:
+                eligible_germline.sort(
+                    key=lambda cand: (
+                        abs(cand.core_depth_ratio - median_expected),
+                        -cand.length,
+                        -cand.branch_depth,
+                        cand.port.name,
+                        cand.port.strand.value,
+                    )
+                )
+                best_germline = eligible_germline[0]
 
-        return PdeJunctionCall(
-            port=resolved_stem,
-            is_pde_junction=True,
-            somatic_port=best_somatic_port,
-            germline_port=best_germline.port,
-            depth_ratio=best_germline.core_depth_ratio,
-            stem_depth_ratio=best_germline.stem_depth_ratio,
-            core_depth_ratio=best_germline.core_depth_ratio,
-            is_repeat_entry=False,
-        )
+                return PdeJunctionCall(
+                    port=resolved_stem,
+                    is_pde_junction=True,
+                    somatic_port=best_somatic_port,
+                    germline_port=best_germline.port,
+                    depth_ratio=best_germline.core_depth_ratio,
+                    stem_depth_ratio=best_germline.stem_depth_ratio,
+                    core_depth_ratio=best_germline.core_depth_ratio,
+                    is_repeat_entry=False,
+                )
 
-    # Complex GRS: If a somatic arm is firmly verified (reaches somatic cap <= 2 hops)
-    # but no single-copy GRS branch is found, check if an outgoing branch is a repeat entry
-    # (degree >= 2 or repeat annotation) that does not loop back into the chromosome;
-    # mark with is_repeat_entry=True on PdeJunctionCall rather than dropping the junction.
-    if somatic_candidates and not germline_candidates:
-        somatic_candidates.sort(key=lambda item: (-item[1], item[0].name, item[0].strand.value))
+        # Complex GRS: If a somatic arm is firmly verified (reaches somatic cap <= 2 hops)
+        # but no single-copy GRS branch is found, check if an outgoing branch is a repeat entry
+        # (degree >= 2 or repeat annotation) that does not loop back into the chromosome;
+        # mark with is_repeat_entry=True on PdeJunctionCall rather than dropping the junction.
         best_somatic_port, _ = somatic_candidates[0]
         somatic_port_names = {p[0].name for p in somatic_candidates}
 
         repeat_candidates: list[_GermlineCandidate] = []
         for edge in outgoing_edges:
             branch_port = edge.to_port
-            if branch_port.name in somatic_port_names:
+            if branch_port.name in somatic_port_names or branch_port.name == resolved_stem.name:
                 continue
 
             branch_seg = graph.segments.get(branch_port.name)
