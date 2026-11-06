@@ -36,14 +36,14 @@ class TelomerePolicy:
         provisional=True,
     )
     max_terminal_offset_bp: PolicyValue[int] = PolicyValue(
-        value=10,
-        justification="Chromosome ends terminate directly with canonical telomeric repeats; non-repeat leader sequence must be <= 10 bp to distinguish genuine terminal caps from subtelomeric/interstitial repeats and tolerate only minimal sequencing or clipping noise; BIO-001",
+        value=25,
+        justification="Chromosome ends terminate directly with canonical telomeric repeats; non-repeat leader sequence must be <= 25 bp to distinguish genuine terminal caps from subtelomeric/interstitial repeats and tolerate sequencing/clipping noise; BIO-001",
         provenance="@pgonzale60 biological calibration on reference benchmark (BIO-001)",
         provisional=True,
     )
     max_internal_gap_bp: PolicyValue[int] = PolicyValue(
-        value=10,
-        justification="Canonical telomeric repeat arrays are dense and contiguous; non-repeat gaps between adjacent repeat units exceeding 10 bp indicate interrupting non-telomeric sequence rather than minor sequencing error; BIO-001",
+        value=25,
+        justification="Canonical telomeric repeat arrays are dense and contiguous; non-repeat gaps between adjacent repeat units exceeding 25 bp indicate interrupting non-telomeric sequence rather than minor sequencing error; BIO-001",
         provenance="@pgonzale60 biological calibration on reference benchmark (BIO-001)",
         provisional=True,
     )
@@ -52,9 +52,9 @@ class TelomerePolicy:
 @dataclass(frozen=True)
 class StoichiometryPolicy:
     min_germline_depth_ratio: PolicyValue[float] = PolicyValue(
-        value=0.15,
-        justification="Lower bound for germline-retained depth relative to somatic stem depth in mixed worm tissue.",
-        provenance="ha_analyze_count k-mer peak calibration on reference benchmark; BIO-002",
+        value=0.04,
+        justification="Lower bound for germline-retained depth relative to somatic stem depth in mixed worm tissue; ~5% of cells are germline in unstaged culture, avoiding filtering out true GRS.",
+        provenance="@pgonzale60 biological calibration from unstaged nematode cell proportions and GRS sensitivity (BIO-002)",
         provisional=True,
     )
     max_germline_depth_ratio: PolicyValue[float] = PolicyValue(
