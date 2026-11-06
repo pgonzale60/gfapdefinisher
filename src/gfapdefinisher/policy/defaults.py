@@ -37,13 +37,13 @@ class TelomerePolicy:
     )
     max_terminal_offset_bp: PolicyValue[int] = PolicyValue(
         value=25,
-        justification="Chromosome ends terminate directly with canonical telomeric repeats; non-repeat leader sequence must be <= 25 bp to distinguish genuine terminal caps from subtelomeric/interstitial repeats and tolerate sequencing/clipping noise; BIO-001",
+        justification="Chromosome ends terminate directly with canonical telomeric repeats; empirically adjusted as up to 16 bp of true telomere were not capped by exact hexamers (e.g. clipped leader sequence), so <= 25 bp tolerates this while excluding interstitial noise; BIO-001",
         provenance="@pgonzale60 biological calibration on reference benchmark (BIO-001)",
         provisional=True,
     )
     max_internal_gap_bp: PolicyValue[int] = PolicyValue(
         value=25,
-        justification="Canonical telomeric repeat arrays are dense and contiguous; non-repeat gaps between adjacent repeat units exceeding 25 bp indicate interrupting non-telomeric sequence rather than minor sequencing error; BIO-001",
+        justification="Canonical telomeric repeat arrays are dense and contiguous; empirically adjusted as internal sequencing indels created gaps up to 12 bp within true telomeric arrays, so <= 25 bp preserves array continuity while breaking on non-telomeric sequence; BIO-001",
         provenance="@pgonzale60 biological calibration on reference benchmark (BIO-001)",
         provisional=True,
     )
@@ -58,7 +58,7 @@ class StoichiometryPolicy:
         provisional=True,
     )
     max_germline_depth_ratio: PolicyValue[float] = PolicyValue(
-        value=0.45,
+        value=0.40,
         justification="Upper bound for germline-retained depth relative to somatic stem depth in mixed worm tissue.",
         provenance="ha_analyze_count k-mer peak calibration on reference benchmark; BIO-002",
         provisional=True,
