@@ -52,6 +52,19 @@ Locations: `PDE_origin/scripts/assembly/hifiasm_t2t/`, `PDE_origin/scripts/analy
 - Fixed 2 kb terminal window and fixed 6-hop BFS limit; fixed minor-allele ratio 0.35.
 - Any logic that treats an rDNA end as a legitimate terminus.
 
+### 4a. nf-core-pdefinisher (the predecessor; read it first)
+
+Repo: `/Users/pgonzale60/Documents/research/sanger_curation/nf-core-pdefinisher` (branch `dev`). It is the source of the project's intent: resolve absolutely every chromosome end. It works on scaffolded, semi-curated assemblies plus read BAMs, and models ends as open ports with valency conservation (`curationsynthesis/models.py`: `Port`). gfapdefinisher keeps that goal but works directly on the hifiasm graph instead of on scaffolds. How the two relate long term (replacement, wrapper, or a graph front end feeding it) is undecided until a working version exists.
+
+Pieces that state the intended behaviour, to read and mirror at the logic level:
+- `terminus_resolver.py`: the terminus hierarchy (rDNA array precedence, somatic boundary vs germline tip, unitig/read capping, satellite-linked distal telomere, uncapped subtelomere walk). Reimplement against graph evidence, not BAM clips.
+- `rdnacassetteresolver/.../pde_rdna_cassette_resolver.py`: single-copy anchor + rDNA monomer + distal telomeric unitig, with a complexity gatekeeper (`DEFER_COMPLEX_RDNA_LOCUS`). Basis for the cassette model to be built here.
+- `telomerewalker/.../teloscaffold/repeat_scaffolder.py` and `telocapping/unitig_capper.py`: satellite-linked telomere scaffolding and unitig capping with overlap excision.
+- `targetedgapassembly/.../consensus_bridge.py`: spanning-read candidates and abPOA bridging.
+- `curationagpgenerator/.../pde_generate_agp.py`: AGP v2.1 block accumulator.
+- `assets/curation_policy.json`: the single source of truth for parameters ("policy parameters must not be hardcoded"). Copy this pattern. Caution: its values (e.g. `min_repeats` 15, `terminal_window_bp` 10000, `chimeric_terminus_max_dist_bp` 50000) are still fixed numbers and have not been shown to be non-arbitrary; each one adopted here needs a justification or a data-derived replacement.
+- Its pipeline stages (reconnaissance, synthesis, resolution engines, surgery, evaluation) are the end-to-end flow gfapdefinisher must eventually be able to replace or feed.
+
 ## 5. Inputs for DF5120
 
 Local: `data/benchmark/DF5120/` (gitignored; re-fetch from Farm22 if missing).
