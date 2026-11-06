@@ -145,7 +145,12 @@ class NodeAnnotations:
 
     def is_contaminant(self) -> bool:
         """Return True if Tiara classification identifies node as prokaryotic/contaminant."""
-        return self.tiara is not None and self.tiara.classification.lower() in ("bacteria", "archaea")
+        return self.tiara is not None and self.tiara.classification.lower() in (
+            "bacteria",
+            "archaea",
+            "prokarya",
+            "contaminant",
+        )
 
 
 def _open_file(path: str | Path):
