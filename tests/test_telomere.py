@@ -50,20 +50,20 @@ def test_interstitial_telomeric_sequence_classified_non_terminal_suffix():
 
 
 def test_terminal_offset_threshold_boundary():
-    """Verify calibrated max_terminal_offset_bp = 25 gates cap status cleanly."""
-    # Offset = 25 bp (tolerates <= 25 bp non-telomeric leader sequence)
-    seq_25 = ("A" * 25) + ("GCCTAA" * 35) + ("A" * 1000)
-    call_25 = scan_terminal_tract(seq_25, motif="GCCTAA", is_suffix=False)
-    assert call_25.offset_bp == 25
-    assert call_25.repeat_count == 35
-    assert call_25.is_terminal_cap is True
+    """Verify calibrated max_terminal_offset_bp = 10 gates cap status cleanly."""
+    # Offset = 10 bp (tolerates <= 10 bp non-telomeric leader sequence)
+    seq_10 = ("A" * 10) + ("GCCTAA" * 35) + ("A" * 1000)
+    call_10 = scan_terminal_tract(seq_10, motif="GCCTAA", is_suffix=False)
+    assert call_10.offset_bp == 10
+    assert call_10.repeat_count == 35
+    assert call_10.is_terminal_cap is True
 
-    # Offset = 26 bp (exceeds 25 bp limit -> non-terminal / ITS)
-    seq_26 = ("A" * 26) + ("GCCTAA" * 35) + ("A" * 1000)
-    call_26 = scan_terminal_tract(seq_26, motif="GCCTAA", is_suffix=False)
-    assert call_26.offset_bp == 26
-    assert call_26.repeat_count == 35
-    assert call_26.is_terminal_cap is False
+    # Offset = 11 bp (exceeds 10 bp limit -> non-terminal / ITS)
+    seq_11 = ("A" * 11) + ("GCCTAA" * 35) + ("A" * 1000)
+    call_11 = scan_terminal_tract(seq_11, motif="GCCTAA", is_suffix=False)
+    assert call_11.offset_bp == 11
+    assert call_11.repeat_count == 35
+    assert call_11.is_terminal_cap is False
 
 
 def test_sub_threshold_repeat_count():
@@ -87,12 +87,12 @@ def test_exact_threshold_repeat_count():
 
 
 def test_gapped_tract_chaining_within_max_internal_gap():
-    """Verify non-repeat gaps <= max_internal_gap_bp (25) are chained into single tract."""
-    # 20 repeats + 25 bp non-repeat gap + 20 repeats
-    sequence = ("TTAGGC" * 20) + ("N" * 25) + ("TTAGGC" * 20) + ("A" * 2000)
+    """Verify non-repeat gaps <= max_internal_gap_bp (10) are chained into single tract."""
+    # 20 repeats + 8 bp non-repeat gap + 20 repeats
+    sequence = ("TTAGGC" * 20) + "ACTGACTG" + ("TTAGGC" * 20) + ("A" * 2000)
     call = scan_terminal_tract(sequence, motif="TTAGGC", is_suffix=False)
 
-    expected_len = (20 * 6) + 25 + (20 * 6)
+    expected_len = (20 * 6) + 8 + (20 * 6)
     assert call.repeat_count == 40
     assert call.tract_length_bp == expected_len
     assert call.offset_bp == 0
@@ -100,9 +100,9 @@ def test_gapped_tract_chaining_within_max_internal_gap():
 
 
 def test_gapped_tract_broken_when_gap_exceeds_threshold():
-    """Verify non-repeat gaps > max_internal_gap_bp (25) break into separate tracts."""
-    # 20 repeats + 26 bp non-repeat gap + 20 repeats
-    sequence = ("TTAGGC" * 20) + ("N" * 26) + ("TTAGGC" * 20) + ("A" * 2000)
+    """Verify non-repeat gaps > max_internal_gap_bp (10) break into separate tracts."""
+    # 20 repeats + 15 bp non-repeat gap + 20 repeats
+    sequence = ("TTAGGC" * 20) + ("N" * 15) + ("TTAGGC" * 20) + ("A" * 2000)
     call = scan_terminal_tract(sequence, motif="TTAGGC", is_suffix=False)
 
     # Chaining breaks; both tracts have 20 repeats (< 30), so cap is False
@@ -150,17 +150,17 @@ def test_case_insensitivity():
 
 def test_custom_policy_parameter_passing():
     """Verify explicit custom scan parameters override defaults."""
-    sequence = ("A" * 30) + ("GCCTAA" * 50) + ("A" * 500)
-    # Default: max_terminal_offset_bp = 25 -> cap is False
+    sequence = ("A" * 25) + ("GCCTAA" * 50) + ("A" * 500)
+    # Default: max_terminal_offset_bp = 10 -> cap is False
     call_def = scan_terminal_tract(sequence, motif="GCCTAA", is_suffix=False)
     assert call_def.is_terminal_cap is False
 
-    # Custom: max_terminal_offset_bp = 35 -> cap is True
+    # Custom: max_terminal_offset_bp = 30 -> cap is True
     call_cust = scan_terminal_tract(
         sequence,
         motif="GCCTAA",
         terminal_scan_bp=5000,
-        max_terminal_offset_bp=35,
+        max_terminal_offset_bp=30,
         max_internal_gap_bp=20,
         min_repeat_count=40,
         is_suffix=False,
