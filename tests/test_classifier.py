@@ -754,3 +754,185 @@ def test_self_loop_edge_on_stem_is_ignored():
     assert call.is_pde_junction is True
     assert call.somatic_port == p_cap
     assert call.germline_port == p_grs
+
+
+def test_two_hop_rejoining_bubble_rejection():
+    """Verify bifurcations reconverging after 2 hops onto the same downstream target are rejected."""
+    graph = BidirectedGraph()
+    graph.add_segment("bubble_stem", length=70000, depth=55.0)
+    graph.add_segment("arm_a1", length=20000, depth=28.0)
+    graph.add_segment("arm_a2", length=20000, depth=28.0)
+    graph.add_segment("arm_b1", length=20000, depth=18.0)
+    graph.add_segment("arm_b2", length=20000, depth=18.0)
+    graph.add_segment("target_seg", length=80000, depth=55.0)
+
+    p_stem = SegmentPort("bubble_stem", Strand.FORWARD)
+    p_arm_a1 = SegmentPort("arm_a1", Strand.FORWARD)
+    p_arm_a2 = SegmentPort("arm_a2", Strand.FORWARD)
+    p_arm_b1 = SegmentPort("arm_b1", Strand.FORWARD)
+    p_arm_b2 = SegmentPort("arm_b2", Strand.FORWARD)
+    p_target = SegmentPort("target_seg", Strand.FORWARD)
+
+    # Stem forks into arm_a1 and arm_b1
+    graph.add_edge(p_stem, p_arm_a1, cigar="100M")
+    graph.add_edge(p_stem, p_arm_b1, cigar="100M")
+    # Path A: arm_a1 -> arm_a2 -> target_seg (2 hops)
+    graph.add_edge(p_arm_a1, p_arm_a2, cigar="100M")
+    graph.add_edge(p_arm_a2, p_target, cigar="100M")
+    # Path B: arm_b1 -> arm_b2 -> target_seg (2 hops)
+    graph.add_edge(p_arm_b1, p_arm_b2, cigar="100M")
+    graph.add_edge(p_arm_b2, p_target, cigar="100M")
+
+    ledger = {
+        p_stem.to_symbol(): _make_dummy_evidence("bubble_stem", "3p", depth=55.0, degree=2, is_tip=False),
+        p_arm_a1.to_symbol(): _make_dummy_evidence("arm_a1", "3p", depth=28.0, degree=1, is_tip=False),
+        p_arm_a2.to_symbol(): _make_dummy_evidence("arm_a2", "3p", depth=28.0, degree=1, is_tip=False),
+        p_arm_b1.to_symbol(): _make_dummy_evidence("arm_b1", "3p", depth=18.0, degree=1, is_tip=False),
+        p_arm_b2.to_symbol(): _make_dummy_evidence("arm_b2", "3p", depth=18.0, degree=1, is_tip=False),
+        p_target.to_symbol(): _make_dummy_evidence("target_seg", "5p", depth=55.0, degree=0, is_tip=True),
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger)
+    assert call.is_pde_junction is False
+
+
+def test_asymmetric_rejoining_bubble_rejection():
+    """Verify asymmetric bubbles (1 hop on one branch, 2 hops on other) are rejected."""
+    graph = BidirectedGraph()
+    graph.add_segment("bubble_stem", length=70000, depth=55.0)
+    graph.add_segment("arm_a", length=30000, depth=28.0)
+    graph.add_segment("arm_b1", length=20000, depth=18.0)
+    graph.add_segment("arm_b2", length=20000, depth=18.0)
+    graph.add_segment("target_seg", length=80000, depth=55.0)
+
+    p_stem = SegmentPort("bubble_stem", Strand.FORWARD)
+    p_arm_a = SegmentPort("arm_a", Strand.FORWARD)
+    p_arm_b1 = SegmentPort("arm_b1", Strand.FORWARD)
+    p_arm_b2 = SegmentPort("arm_b2", Strand.FORWARD)
+    p_target = SegmentPort("target_seg", Strand.FORWARD)
+
+    # Stem forks into arm_a and arm_b1
+    graph.add_edge(p_stem, p_arm_a, cigar="100M")
+    graph.add_edge(p_stem, p_arm_b1, cigar="100M")
+    # Path A: arm_a -> target_seg (1 hop)
+    graph.add_edge(p_arm_a, p_target, cigar="100M")
+    # Path B: arm_b1 -> arm_b2 -> target_seg (2 hops)
+    graph.add_edge(p_arm_b1, p_arm_b2, cigar="100M")
+    graph.add_edge(p_arm_b2, p_target, cigar="100M")
+
+    ledger = {
+        p_stem.to_symbol(): _make_dummy_evidence("bubble_stem", "3p", depth=55.0, degree=2, is_tip=False),
+        p_arm_a.to_symbol(): _make_dummy_evidence("arm_a", "3p", depth=28.0, degree=1, is_tip=False),
+        p_arm_b1.to_symbol(): _make_dummy_evidence("arm_b1", "3p", depth=18.0, degree=1, is_tip=False),
+        p_arm_b2.to_symbol(): _make_dummy_evidence("arm_b2", "3p", depth=18.0, degree=1, is_tip=False),
+        p_target.to_symbol(): _make_dummy_evidence("target_seg", "5p", depth=55.0, degree=0, is_tip=True),
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger)
+    assert call.is_pde_junction is False
+
+
+def test_low_support_somatic_dropout_qualification():
+    """Verify low-support somatic stub (<0.33 depth) terminating in a telomeric cap qualifies as PDE junction."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=120000, depth=64.0)
+    graph.add_segment("som_stub", length=15000, depth=1.0)
+    graph.add_segment("grs_arm", length=50000, depth=8.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_som = SegmentPort("som_stub", Strand.FORWARD)
+    p_grs = SegmentPort("grs_arm", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_som, cigar="100M")
+    graph.add_edge(p_stem, p_grs, cigar="100M")
+
+    ev_stem = _make_dummy_evidence(
+        "stem", "3p", depth=64.0, degree=2, is_tip=False, usco_hit_count=10, tiara_class="eukarya"
+    )
+    ev_som = _make_dummy_evidence(
+        "som_stub", "3p", depth=1.0, degree=0, is_tip=True, has_terminal_telomere=True, tiara_class="eukarya"
+    )
+    ev_grs = _make_dummy_evidence(
+        "grs_arm", "3p", depth=8.0, degree=0, is_tip=True, has_terminal_telomere=False, tiara_class="eukarya"
+    )
+
+    ledger = {
+        p_stem.to_symbol(): ev_stem,
+        p_som.to_symbol(): ev_som,
+        p_grs.to_symbol(): ev_grs,
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger, core_coverage=64.0)
+    assert call.is_pde_junction is True
+    assert call.is_somatic_dropout is True
+    assert call.somatic_port == p_som
+    assert call.germline_port == p_grs
+    assert call.core_depth_ratio == 8.0 / 64.0
+
+
+def test_low_support_somatic_dropout_rejected_without_telomeric_cap():
+    """Verify low-support branch lacking a telomeric cap is rejected as spurious artifact."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=120000, depth=64.0)
+    graph.add_segment("spurious_stub", length=15000, depth=1.0)
+    graph.add_segment("grs_arm", length=50000, depth=8.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_som = SegmentPort("spurious_stub", Strand.FORWARD)
+    p_grs = SegmentPort("grs_arm", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_som, cigar="100M")
+    graph.add_edge(p_stem, p_grs, cigar="100M")
+
+    ev_stem = _make_dummy_evidence(
+        "stem", "3p", depth=64.0, degree=2, is_tip=False, usco_hit_count=10, tiara_class="eukarya"
+    )
+    ev_som = _make_dummy_evidence(
+        "spurious_stub", "3p", depth=1.0, degree=0, is_tip=True, has_terminal_telomere=False, tiara_class="eukarya"
+    )
+    ev_grs = _make_dummy_evidence(
+        "grs_arm", "3p", depth=8.0, degree=0, is_tip=True, has_terminal_telomere=False, tiara_class="eukarya"
+    )
+
+    ledger = {
+        p_stem.to_symbol(): ev_stem,
+        p_som.to_symbol(): ev_som,
+        p_grs.to_symbol(): ev_grs,
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger, core_coverage=64.0)
+    assert call.is_pde_junction is False
+
+
+def test_low_support_somatic_dropout_rejected_without_stoichiometric_germline():
+    """Verify low-support somatic stub paired with non-stoichiometric branch is rejected."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=120000, depth=64.0)
+    graph.add_segment("som_stub", length=15000, depth=1.0)
+    graph.add_segment("high_branch", length=50000, depth=35.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_som = SegmentPort("som_stub", Strand.FORWARD)
+    p_high = SegmentPort("high_branch", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_som, cigar="100M")
+    graph.add_edge(p_stem, p_high, cigar="100M")
+
+    ev_stem = _make_dummy_evidence(
+        "stem", "3p", depth=64.0, degree=2, is_tip=False, usco_hit_count=10, tiara_class="eukarya"
+    )
+    ev_som = _make_dummy_evidence(
+        "som_stub", "3p", depth=1.0, degree=0, is_tip=True, has_terminal_telomere=True, tiara_class="eukarya"
+    )
+    ev_high = _make_dummy_evidence(
+        "high_branch", "3p", depth=35.0, degree=0, is_tip=True, has_terminal_telomere=False, tiara_class="eukarya"
+    )
+
+    ledger = {
+        p_stem.to_symbol(): ev_stem,
+        p_som.to_symbol(): ev_som,
+        p_high.to_symbol(): ev_high,
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger, core_coverage=64.0)
+    assert call.is_pde_junction is False

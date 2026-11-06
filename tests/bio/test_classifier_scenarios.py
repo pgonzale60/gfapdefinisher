@@ -1,21 +1,22 @@
 """Biological scenario verification tests for 3-axis classification and PDE junctions.
 
-Falsification test suite validating all 12 authentic diminution boundaries
+Falsification test suite validating all 13 authentic diminution boundaries
 in nematode benchmark DF5120 (BIO-001, BIO-002, BIO-003, BIO-006):
   Megabase chromosome arm ends:
     1. utg000001l:3p (utg000001l+) -> somatic: utg000142l-, germline: utg000101l+
     2. utg000001l:5p (utg000001l-) -> somatic: utg000076l+, germline: utg000039l+
     3. utg000002l:3p (utg000002l+) -> somatic: utg000194l+, germline: utg000115l+
     4. utg000002l:5p (utg000002l-) -> somatic: utg000093l-, germline: utg000103l+
-    5. utg000009l:5p (utg000009l-) -> somatic: utg000211l-, germline: utg000069l+
-    6. utg000013l:3p (utg000013l+) -> somatic: utg000167l+, germline: utg000033l-
-    7. utg000027l:5p (utg000027l-) -> somatic: utg000154l-, germline: utg000189l-
+    5. utg000004l:3p (utg000004l+) -> somatic: utg000179l-, germline: utg000139l+ (somatic dropout)
+    6. utg000009l:5p (utg000009l-) -> somatic: utg000211l-, germline: utg000069l+
+    7. utg000013l:3p (utg000013l+) -> somatic: utg000167l+, germline: utg000033l-
+    8. utg000027l:5p (utg000027l-) -> somatic: utg000154l-, germline: utg000189l-
   Chr X internal breaks:
-    8. utg000016l:5p (utg000016l-) -> somatic: utg000088l+, germline: utg000096l+
-    9. utg000019l:3p (utg000019l+) -> somatic: utg000200l-, germline: utg000071l+
-    10. utg000019l:5p (utg000019l-) -> somatic: utg000129l-, germline: utg000145l+
-    11. utg000021l:5p (utg000021l-) -> somatic: utg000051l+, germline: utg000071l-
-    12. utg000027l:3p (utg000027l+) -> somatic: utg000209l+, germline: utg000145l-
+    9. utg000016l:5p (utg000016l-) -> somatic: utg000088l+, germline: utg000096l+
+    10. utg000019l:3p (utg000019l+) -> somatic: utg000200l-, germline: utg000071l+
+    11. utg000019l:5p (utg000019l-) -> somatic: utg000129l-, germline: utg000145l+
+    12. utg000021l:5p (utg000021l-) -> somatic: utg000051l+, germline: utg000071l-
+    13. utg000027l:3p (utg000027l+) -> somatic: utg000209l+, germline: utg000145l-
 and rejecting negative controls utg000020l+ (rDNA) and utg000065l- (bubble).
 """
 
@@ -186,9 +187,84 @@ def test_synthetic_four_benchmark_pde_junction_scenarios():
 
 
 @pytest.mark.bio
+def test_synthetic_chr_v_3p_somatic_dropout():
+    """Verify synthetic Chr V 3p (utg000004l+) somatic dropout qualification.
+
+    Stem utg000004l+ (~64x) bifurcates into stoichiometric germline arm utg000139l+ (8x)
+    and low-support somatic stub utg000179l- (1x) terminating in authentic telomeric cap.
+    """
+    graph = BidirectedGraph()
+    graph.add_segment("utg000004l", length=6949969, depth=64.0)
+    graph.add_segment("utg000179l", length=19005, depth=1.0)
+    graph.add_segment("utg000139l", length=53655, depth=8.0)
+
+    p_stem = SegmentPort("utg000004l", Strand.FORWARD)
+    p_som = SegmentPort("utg000179l", Strand.REVERSE)
+    p_grs = SegmentPort("utg000139l", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_som, cigar="100M")
+    graph.add_edge(p_stem, p_grs, cigar="100M")
+
+    ev_stem = EndEvidence(
+        segment_name="utg000004l",
+        end="3p",
+        port=p_stem,
+        length=6949969,
+        depth=64.0,
+        degree=2,
+        is_tip=False,
+        outgoing_neighbors=(p_som.to_symbol(), p_grs.to_symbol()),
+        usco_hit_count=135,
+        tiara_class="eukarya",
+    )
+    ev_som = EndEvidence(
+        segment_name="utg000179l",
+        end="5p",
+        port=p_som,
+        length=19005,
+        depth=1.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=True,
+        telomere_canonical_count=271,
+        tiara_class="eukarya",
+    )
+    ev_grs = EndEvidence(
+        segment_name="utg000139l",
+        end="3p",
+        port=p_grs,
+        length=53655,
+        depth=8.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=True,
+        telomere_canonical_count=209,
+        tiara_class="eukarya",
+    )
+
+    ledger = {
+        p_stem.to_symbol(): ev_stem,
+        p_som.to_symbol(): ev_som,
+        p_grs.to_symbol(): ev_grs,
+        "utg000004l:3p": ev_stem,
+    }
+
+    call = classify_pde_junction(p_stem, graph, ledger)
+    assert call.is_pde_junction is True
+    assert call.is_somatic_dropout is True
+    assert call.port == p_stem
+    assert call.somatic_port == p_som
+    assert call.germline_port == p_grs
+    assert 0.04 <= call.depth_ratio <= 0.33
+    assert call.depth_ratio == call.core_depth_ratio
+
+
+@pytest.mark.bio
 @pytest.mark.benchmark
 def test_benchmark_df5120_real_pde_junctions():
-    """Verify the 4 real benchmark PDE junctions on actual DF5120 assembly graph & ledger."""
+    """Verify the 13 real benchmark PDE junctions on actual DF5120 assembly graph & ledger."""
     gfa_candidates = [
         BENCHMARK_DIR / "asm.p_utg.gfa.gz",
         BENCHMARK_DIR / "asm.p_utg.gfa",
@@ -227,6 +303,13 @@ def test_benchmark_df5120_real_pde_junctions():
             "name": "utg000002l:5p",
             "expected_somatic": "utg000093l-",
             "expected_germline": "utg000103l+",
+        },
+        {
+            "port_str": "utg000004l+",
+            "name": "utg000004l:3p",
+            "expected_somatic": "utg000179l-",
+            "expected_germline": "utg000139l+",
+            "is_dropout": True,
         },
         {
             "port_str": "utg000009l-",
@@ -291,6 +374,10 @@ def test_benchmark_df5120_real_pde_junctions():
         assert 0.04 <= call.depth_ratio <= 0.33
         assert 0.04 <= call.core_depth_ratio <= 0.33
         assert call.depth_ratio == call.core_depth_ratio
+        is_dropout = item.get("is_dropout", False)
+        assert call.is_somatic_dropout is is_dropout, (
+            f"Expected is_somatic_dropout={is_dropout} for {item['name']}, got {call.is_somatic_dropout}"
+        )
 
     # Negative controls: rDNA fork and assembly bubble must NOT be called as PDE junctions
     negative_controls = [

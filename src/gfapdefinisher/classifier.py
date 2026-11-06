@@ -80,6 +80,7 @@ class PdeJunctionCall:
     stem_depth_ratio: float = 0.0
     core_depth_ratio: float = 0.0
     is_repeat_entry: bool = False
+    is_somatic_dropout: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -414,12 +415,30 @@ def classify_pde_junction(
 
     outgoing_edges = graph.get_outgoing(resolved_stem)
 
-    # Rejoining bubble rejection: If candidate outgoing branches reconverge directly onto
-    # the same downstream target segment, reject as an assembly bubble.
+    # Rejoining bubble rejection: Generalize candidate branch downstream target checks
+    # to bounded BFS (up to policy.pde.max_somatic_cap_hops) to detect multi-hop or
+    # asymmetric reconvergence onto the same downstream segment (e.g. assembly bubbles).
+    max_bubble_hops = policy.pde.max_somatic_cap_hops.value
     branch_targets: list[set[str]] = []
     for edge in outgoing_edges:
-        targets = {e.to_port.name for e in graph.get_outgoing(edge.to_port)}
-        targets.discard(resolved_stem.name)
+        targets: set[str] = set()
+        if edge.to_port.name != resolved_stem.name:
+            targets.add(edge.to_port.name)
+        queue: list[tuple[SegmentPort, int]] = [(edge.to_port, 0)]
+        visited: set[str] = {edge.to_port.to_symbol()}
+        while queue:
+            curr_port, hops = queue.pop(0)
+            if hops >= max_bubble_hops:
+                continue
+            for nxt_edge in graph.get_outgoing(curr_port):
+                nxt_port = nxt_edge.to_port
+                if nxt_port.name == resolved_stem.name:
+                    continue
+                targets.add(nxt_port.name)
+                nxt_sym = nxt_port.to_symbol()
+                if nxt_sym not in visited:
+                    visited.add(nxt_sym)
+                    queue.append((nxt_port, hops + 1))
         branch_targets.append(targets)
 
     is_bubble = False
@@ -440,6 +459,7 @@ def classify_pde_junction(
     median_expected = (min_germline_ratio + max_germline_ratio) / 2
 
     somatic_candidates: list[tuple[SegmentPort, float]] = []
+    dropout_candidates: list[tuple[SegmentPort, float]] = []
     germline_candidates: list[_GermlineCandidate] = []
 
     for edge in outgoing_edges:
@@ -477,6 +497,10 @@ def classify_pde_junction(
                 max_hops,
             ):
                 somatic_candidates.append((branch_port, ratio_to_stem))
+        elif _is_telomere_capped(branch_port, graph, ledger_by_port):
+            # Low-support somatic dropout candidate: terminates directly (0 hops) in an
+            # authentic telomeric cap tip, even if depth is below somatic threshold
+            dropout_candidates.append((branch_port, ratio_to_stem))
 
         # Germline candidate: stoichiometric depth ratio relative to core_coverage (BIO-002, BIO-004)
         if min_germline_ratio <= ratio_to_core <= max_germline_ratio:
@@ -517,6 +541,7 @@ def classify_pde_junction(
                     stem_depth_ratio=best_germline.stem_depth_ratio,
                     core_depth_ratio=best_germline.core_depth_ratio,
                     is_repeat_entry=False,
+                    is_somatic_dropout=False,
                 )
 
         # Complex GRS: If a somatic arm is firmly verified (reaches somatic cap <= 2 hops)
@@ -588,6 +613,40 @@ def classify_pde_junction(
                 stem_depth_ratio=best_repeat.stem_depth_ratio,
                 core_depth_ratio=best_repeat.core_depth_ratio,
                 is_repeat_entry=True,
+                is_somatic_dropout=False,
             )
+
+    # Low-support somatic dropout qualification:
+    # If no standard somatic arm was qualified, check if an alternate somatic stub
+    # terminating directly (0 hops) in an authentic telomeric cap is paired with a
+    # stoichiometric germline candidate arm (Issue #31).
+    if dropout_candidates:
+        dropout_candidates.sort(key=lambda item: (-item[1], item[0].name, item[0].strand.value))
+
+        for best_dropout_port, _ in dropout_candidates:
+            eligible_germline = [cand for cand in germline_candidates if cand.port.name != best_dropout_port.name]
+            if eligible_germline:
+                eligible_germline.sort(
+                    key=lambda cand: (
+                        abs(cand.core_depth_ratio - median_expected),
+                        -cand.length,
+                        -cand.branch_depth,
+                        cand.port.name,
+                        cand.port.strand.value,
+                    )
+                )
+                best_germline = eligible_germline[0]
+
+                return PdeJunctionCall(
+                    port=resolved_stem,
+                    is_pde_junction=True,
+                    somatic_port=best_dropout_port,
+                    germline_port=best_germline.port,
+                    depth_ratio=best_germline.core_depth_ratio,
+                    stem_depth_ratio=best_germline.stem_depth_ratio,
+                    core_depth_ratio=best_germline.core_depth_ratio,
+                    is_repeat_entry=False,
+                    is_somatic_dropout=True,
+                )
 
     return PdeJunctionCall(port=resolved_stem, is_pde_junction=False)
