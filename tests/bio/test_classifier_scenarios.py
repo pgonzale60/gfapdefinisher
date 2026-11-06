@@ -228,4 +228,3 @@ def test_benchmark_df5120_real_pde_junctions():
         assert call.germline_port is not None
         assert call.germline_port.to_symbol() == item["expected_germline"]
         assert 0.04 <= call.depth_ratio <= 0.40
-        assert call.confidence == "HIGH"

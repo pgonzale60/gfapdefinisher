@@ -47,12 +47,6 @@ class TelomerePolicy:
         provenance="@pgonzale60 biological calibration on reference benchmark (BIO-001)",
         provisional=True,
     )
-    max_reachability_hops: PolicyValue[int] = PolicyValue(
-        value=1,
-        justification="Maximum traversal hops from a somatic bifurcation port to reach an authentic terminal telomeric cap; BIO-001, BIO-003",
-        provenance="@pgonzale60 biological calibration on reference benchmark (BIO-003)",
-        provisional=True,
-    )
 
 
 @dataclass(frozen=True)
@@ -69,10 +63,14 @@ class StoichiometryPolicy:
         provenance="ha_analyze_count k-mer peak calibration on reference benchmark; BIO-002",
         provisional=True,
     )
-    max_reachability_hops: PolicyValue[int] = PolicyValue(
-        value=1,
-        justification="Maximum traversal hops to reach somatic telomeric cap from diminution junction; BIO-002, BIO-003",
-        provenance="@pgonzale60 biological calibration on reference benchmark (BIO-003)",
+
+
+@dataclass(frozen=True)
+class PdePolicy:
+    max_somatic_cap_hops: PolicyValue[int] = PolicyValue(
+        value=2,
+        justification="Maximum traversal hops from a somatic bifurcation port to identify an authentic terminal telomeric cap, accommodating short linker or bubble segments before the telomere tract; BIO-003",
+        provenance="Empirical benchmark observation across curated nematode PDE junctions; BIO-003",
         provisional=True,
     )
 
@@ -81,6 +79,7 @@ class StoichiometryPolicy:
 class Policy:
     telomere: TelomerePolicy = TelomerePolicy()
     stoichiometry: StoichiometryPolicy = StoichiometryPolicy()
+    pde: PdePolicy = PdePolicy()
 
 
 DEFAULT_POLICY = Policy()

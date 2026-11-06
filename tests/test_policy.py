@@ -40,14 +40,14 @@ def test_default_policy_completeness():
     assert DEFAULT_POLICY.telomere.max_internal_gap_bp.value == 25
     assert DEFAULT_POLICY.telomere.max_internal_gap_bp.provisional is True
     assert "biological calibration on reference benchmark" in DEFAULT_POLICY.telomere.max_internal_gap_bp.provenance
-    assert DEFAULT_POLICY.telomere.max_reachability_hops.value == 1
     assert DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value == 0.04
     assert DEFAULT_POLICY.stoichiometry.max_germline_depth_ratio.value == 0.40
     assert (
         DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value
         < DEFAULT_POLICY.stoichiometry.max_germline_depth_ratio.value
     )
-    assert DEFAULT_POLICY.stoichiometry.max_reachability_hops.value == 1
+    assert DEFAULT_POLICY.pde.max_somatic_cap_hops.value == 2
+    assert DEFAULT_POLICY.pde.max_somatic_cap_hops.provisional is True
 
 
 def test_no_species_hardcoding_in_src():

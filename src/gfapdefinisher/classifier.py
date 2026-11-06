@@ -1,11 +1,14 @@
 """Port classification and Programmed DNA Elimination (PDE) junction motif detector.
 
 Implements 3-axis port classification (Provenance, Topology, TerminalFeature)
-and 1-hop PDE junction motif detection for bidirected assembly graphs.
-Adheres strictly to biological specifications BIO-001, BIO-002, BIO-003, and BIO-006:
+and PDE junction motif detection for bidirected assembly graphs.
+Adheres strictly to the single source of truth in docs/biology/CLASSIFIERS.md
+and biological specifications BIO-001 through BIO-006:
 - BIO-001: Authentic telomeric cap reachability and completion.
 - BIO-002: Stoichiometric depth contrast over arbitrary length cutoffs.
 - BIO-003: Graph-inferred diminution boundaries without external coordinate dependencies.
+- BIO-004: Repeat representation preservation for variable satellites and complex GRS.
+- BIO-005: Lossless overlap and provenance invariance.
 - BIO-006: Generalization across nematode genomes without benchmark over-tuning.
 """
 
@@ -59,14 +62,16 @@ class PortClassification:
 
 @dataclass(slots=True, frozen=True)
 class PdeJunctionCall:
-    """Decision call evaluating whether an oriented port is a PDE junction."""
+    """Decision call evaluating whether an oriented port is a PDE junction.
+
+    See docs/biology/CLASSIFIERS.md Section 2 for the formal specification.
+    """
 
     port: SegmentPort
     is_pde_junction: bool
     somatic_port: SegmentPort | None = None
     germline_port: SegmentPort | None = None
     depth_ratio: float = 0.0
-    confidence: str = ""
 
 
 def _resolve_port(port: SegmentPort | str) -> SegmentPort:
@@ -116,12 +121,64 @@ def _is_telomere_capped(
     return is_dead_end and has_cap
 
 
+def _reaches_somatic_telomere_cap(
+    start_port: SegmentPort,
+    graph: BidirectedGraph,
+    ledger_by_port: dict[str, EndEvidence] | dict[Any, EndEvidence],
+    stem_depth: float,
+    max_germline_ratio: float,
+    max_hops: int,
+) -> bool:
+    """Evaluate if start_port reaches a somatic telomeric cap within max_hops traversal.
+
+    Governed by policy.pde.max_somatic_cap_hops and docs/biology/CLASSIFIERS.md Section 2.
+    """
+    if _is_telomere_capped(start_port, graph, ledger_by_port):
+        return True
+
+    if max_hops <= 0:
+        return False
+
+    queue: list[tuple[SegmentPort, int]] = [(start_port, 0)]
+    visited: set[str] = {start_port.to_symbol()}
+
+    while queue:
+        curr_port, hops = queue.pop(0)
+        if hops >= max_hops:
+            continue
+
+        for edge in graph.get_outgoing(curr_port):
+            nxt_port = edge.to_port
+            nxt_sym = nxt_port.to_symbol()
+            if nxt_sym in visited:
+                continue
+            visited.add(nxt_sym)
+
+            nxt_seg = graph.segments.get(nxt_port.name)
+            nxt_ev = _lookup_evidence(ledger_by_port, nxt_port)
+            if nxt_seg is not None and nxt_seg.depth > 0:
+                nxt_depth = nxt_seg.depth
+            elif nxt_ev is not None and nxt_ev.depth > 0:
+                nxt_depth = nxt_ev.depth
+            else:
+                nxt_depth = 0.0
+
+            if (nxt_depth / stem_depth) > max_germline_ratio:
+                if _is_telomere_capped(nxt_port, graph, ledger_by_port):
+                    return True
+                queue.append((nxt_port, hops + 1))
+
+    return False
+
+
 def classify_port(
     port: SegmentPort | str,
     graph: BidirectedGraph,
     evidence: EndEvidence,
 ) -> PortClassification:
     """Assign orthogonal 3-axis labels (Provenance, Topology, TerminalFeature) to a port.
+
+    Canonical taxonomy defined in docs/biology/CLASSIFIERS.md Section 1.
 
     Args:
         port: Oriented segment port being classified.
@@ -174,17 +231,18 @@ def classify_port(
 def classify_pde_junction(
     port: SegmentPort | str,
     graph: BidirectedGraph,
-    ledger_by_port: dict[str, EndEvidence],
+    ledger_by_port: dict[str, EndEvidence] | dict[Any, EndEvidence],
     policy: Policy = DEFAULT_POLICY,
 ) -> PdeJunctionCall:
     """Evaluate whether an oriented segment port is a Programmed DNA Elimination (PDE) junction.
 
-    A PDE junction is characterized by a 1-hop motif (BIO-002, BIO-003):
+    See docs/biology/CLASSIFIERS.md Section 2 for the formal biological specification.
+    A PDE junction is characterized by the reachability and stoichiometry motif (BIO-002, BIO-003):
     1. A somatic stem with robust read depth.
-    2. Bifurcation into a somatic branch reaching an authentic telomeric cap within 0 to 1 hops
+    2. Bifurcation into a somatic branch reaching an authentic telomeric cap within <= max_somatic_cap_hops
        with read depth near/above somatic levels (depth ratio > max_germline_depth_ratio).
     3. Concurrently bifurcating into a germline-retained sequence (GRS) branch with stoichiometric
-       depth ratio in [min_germline_depth_ratio, max_germline_depth_ratio].
+       depth ratio in [min_germline_depth_ratio, max_germline_depth_ratio] (BIO-002, BIO-004).
 
     Args:
         port: Stem port to evaluate.
@@ -216,11 +274,11 @@ def classify_pde_junction(
 
     min_germline_ratio = policy.stoichiometry.min_germline_depth_ratio.value
     max_germline_ratio = policy.stoichiometry.max_germline_depth_ratio.value
-    max_hops = policy.telomere.max_reachability_hops.value
+    max_hops = policy.pde.max_somatic_cap_hops.value
 
     outgoing_edges = graph.get_outgoing(resolved_stem)
 
-    somatic_candidates: list[tuple[SegmentPort, float, str]] = []
+    somatic_candidates: list[tuple[SegmentPort, float]] = []
     germline_candidates: list[tuple[SegmentPort, float]] = []
 
     for edge in outgoing_edges:
@@ -237,31 +295,19 @@ def classify_pde_junction(
 
         ratio = branch_depth / stem_depth
 
-        # Check for somatic branch candidate
+        # Somatic candidate: high depth ratio and reaches telomeric cap within max_hops
         if ratio > max_germline_ratio:
-            # 0-hop: directly telomere-capped dead-end
-            if _is_telomere_capped(branch_port, graph, ledger_by_port):
-                somatic_candidates.append((branch_port, ratio, "HIGH"))
-            elif max_hops >= 1:
-                # 1-hop reachability: inspect outgoing extensions from branch_port
-                for next_edge in graph.get_outgoing(branch_port):
-                    next_port = next_edge.to_port
-                    if _is_telomere_capped(next_port, graph, ledger_by_port):
-                        next_seg = graph.segments.get(next_port.name)
-                        next_ev = _lookup_evidence(ledger_by_port, next_port)
-                        if next_seg is not None and next_seg.depth > 0:
-                            next_depth = next_seg.depth
-                        elif next_ev is not None and next_ev.depth > 0:
-                            next_depth = next_ev.depth
-                        else:
-                            next_depth = 0.0
+            if _reaches_somatic_telomere_cap(
+                branch_port,
+                graph,
+                ledger_by_port,
+                stem_depth,
+                max_germline_ratio,
+                max_hops,
+            ):
+                somatic_candidates.append((branch_port, ratio))
 
-                        next_ratio = next_depth / stem_depth
-                        if next_ratio > max_germline_ratio:
-                            somatic_candidates.append((branch_port, ratio, "HIGH"))
-                            break
-
-        # Check for germline branch candidate (BIO-002)
+        # Germline candidate: stoichiometric depth ratio in [min_ratio, max_ratio] (BIO-002, BIO-004)
         if min_germline_ratio <= ratio <= max_germline_ratio:
             germline_candidates.append((branch_port, ratio))
 
@@ -270,7 +316,7 @@ def classify_pde_junction(
         somatic_candidates.sort(key=lambda item: (-item[1], item[0].name, item[0].strand.value))
         germline_candidates.sort(key=lambda item: (item[0].name, item[0].strand.value))
 
-        best_somatic_port, _, conf = somatic_candidates[0]
+        best_somatic_port, _ = somatic_candidates[0]
         best_germline_port, best_germline_ratio = germline_candidates[0]
 
         return PdeJunctionCall(
@@ -279,7 +325,6 @@ def classify_pde_junction(
             somatic_port=best_somatic_port,
             germline_port=best_germline_port,
             depth_ratio=best_germline_ratio,
-            confidence=conf,
         )
 
     return PdeJunctionCall(port=resolved_stem, is_pde_junction=False)

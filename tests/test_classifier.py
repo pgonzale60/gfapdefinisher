@@ -180,7 +180,6 @@ def test_canonical_pde_junction_detection_direct_cap():
     assert call.somatic_port == p_som
     assert call.germline_port == p_grs
     assert abs(call.depth_ratio - 0.10) < 1e-4
-    assert call.confidence == "HIGH"
 
 
 def test_1hop_pde_junction_detection_linked_cap():
