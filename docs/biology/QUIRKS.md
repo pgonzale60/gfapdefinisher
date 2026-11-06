@@ -54,7 +54,7 @@ Classifies each Programmed DNA Elimination (PDE) junction or diminution break in
 
 | Enum Value | Description | Biological / Topological Role | Reference Benchmark Example |
 | :--- | :--- | :--- | :--- |
-| `pde_terminal` | Subtelomeric somatic diminution fork | High-coverage somatic stem unitig transitions into a somatic terminus and a lower-depth ($0.04\text{--}0.33\times C_{\text{core}}$) germline-retained sequence (GRS). | Chr I, II 3p, Chr III, IV, V, X |
+| `pde_terminal` | Subtelomeric somatic diminution fork | High-coverage somatic stem unitig transitions into a somatic terminus and a lower-depth germline-retained sequence (GRS) with depth ratio $D / C_{\text{core}}$ bounded by `StoichiometryPolicy.min_germline_depth_ratio` and `StoichiometryPolicy.max_germline_depth_ratio` (empirically observed at $\sim 0.04\text{--}0.33\times C_{\text{core}}$ during reference benchmark calibration; BIO-002). | Chr I, II 3p, Chr III, IV, V, X |
 | `pde_intercalary` | Internal chromosome fragmentation break | Internal chromosome diminution boundary where internal germline-retained material is excised during development. | Chr X Breaks 1 & 2 |
 
 ---
@@ -92,12 +92,14 @@ Examples:
 
 In accordance with `BIO-006` and project anti-overfitting rules, **no unitig names or species identifiers may be hardcoded into classification logic**. Unitig IDs appear strictly in the evidence payload fields.
 
-### Disambiguation of Low-Depth (1–4×) Unitigs
+### Disambiguation of Low-Depth Germline Arms vs. Spurious Dropout Stubs
 
-To distinguish authentic low-coverage distal germline caps (e.g. 1.0× with 7 spanning reads across 30 kb) from spurious dropout stubs (e.g. 1.0× with 2 reads), records incorporate:
+To distinguish authentic low-coverage distal germline caps (depth ratio $D / C_{\text{core}}$ adhering to `StoichiometryPolicy.min_germline_depth_ratio` with robust multi-read spanning support) from spurious dropout stubs (isolated single-read or low-depth artifacts failing coverage criteria), records incorporate:
 - `read_count`: Number of distinct sequencing reads supporting the segment (from GFA `A` lines or read-association tags).
 - `core_coverage_bp_median` ($C_{\text{core}}$): Median read depth across core somatic chromosome segments.
-- `core_depth_ratio` ($D / C_{\text{core}}$): Normalized depth ratio relative to somatic core coverage.
+- `core_depth_ratio` ($D / C_{\text{core}}$): Normalized depth ratio relative to somatic core coverage, evaluated against `StoichiometryPolicy`.
+
+*(Empirical calibration note: In the DF5120 reference benchmark with core coverage $C_{\text{core}} \approx 63\times$, authentic germline arms were empirically calibrated at $\sim 2.5\text{--}7\times$ [$0.04\text{--}0.11\times C_{\text{core}}$] with multi-read spanning support, whereas somatic dropout stubs exhibited isolated $\le 2$ read support).*
 
 ---
 
