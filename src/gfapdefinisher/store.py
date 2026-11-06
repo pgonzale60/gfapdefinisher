@@ -12,8 +12,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, NamedTuple
 
-DEFAULT_BATCH_SIZE: int = int("100000")
-MIN_A_LINE_TOKENS: int = int("7")
+DEFAULT_BATCH_SIZE: int = 100_000
+MIN_A_LINE_TOKENS: int = 7
 TAG_SPLIT_PARTS: int = 2
 
 
