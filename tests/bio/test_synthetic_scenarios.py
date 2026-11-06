@@ -205,15 +205,25 @@ def test_bio_002_micro_grs_unitigs_under_5kb_not_filtered_by_length():
     assert call_sub_kb.is_pde_junction is True
     assert call_sub_kb.germline_port == p_grs_450
 
-    # Falsification check: inspect AST of classifier.py to ensure zero length comparisons on GRS
-    src_classifier = Path(__file__).resolve().parent.parent.parent / "src" / "gfapdefinisher" / "classifier.py"
-    tree = ast.parse(src_classifier.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Compare):
-            # Check that length is not compared against static literal cutoffs like 5000 or 10000
-            for comp in node.comparators:
-                if isinstance(comp, ast.Constant) and isinstance(comp.value, int) and comp.value in {5000, 10000}:
-                    pytest.fail(f"classifier.py contains forbidden static length cutoff {comp.value}")
+    # Falsification check: inspect AST across src/gfapdefinisher to ensure zero static length cutoffs on GRS
+    src_dir = Path(__file__).resolve().parent.parent.parent / "src" / "gfapdefinisher"
+    forbidden_thresholds = {500, 1000, 2000, 5000, 10000}
+    for py_file in src_dir.rglob("*.py"):
+        if "policy" in py_file.parts:
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Compare):
+                # Check both left-hand and right-hand comparison operands
+                for operand in [node.left, *node.comparators]:
+                    if (
+                        isinstance(operand, ast.Constant)
+                        and isinstance(operand.value, int)
+                        and operand.value in forbidden_thresholds
+                    ):
+                        pytest.fail(
+                            f"{py_file.name}:{node.lineno} contains forbidden static length cutoff {operand.value}"
+                        )
 
 
 # ==============================================================================
@@ -323,6 +333,28 @@ def test_bio_003_graph_topology_discovers_diminution_without_coordinates():
     call_noise = classify_pde_junction(p_noise_stem, graph, ledger)
     assert call_noise.is_pde_junction is False
 
+    # Negative control 4: Heterozygous split where both branches have ~0.50x core depth (exceeding max_germline_ratio 0.33)
+    graph.add_segment("het_stem", length=100_000, depth=60.0)
+    graph.add_segment("het_arm_a", length=40_000, depth=30.0)
+    graph.add_segment("het_arm_b", length=40_000, depth=30.0)
+
+    p_het_stem = SegmentPort("het_stem", Strand.FORWARD)
+    p_het_a = SegmentPort("het_arm_a", Strand.FORWARD)
+    p_het_b = SegmentPort("het_arm_b", Strand.FORWARD)
+    graph.add_edge(p_het_stem, p_het_a, cigar="100M")
+    graph.add_edge(p_het_stem, p_het_b, cigar="100M")
+
+    ev_het_stem = _make_evidence("het_stem", "3p", depth=60.0, degree=2, is_tip=False, usco_hit_count=8)
+    ev_het_a = _make_evidence("het_arm_a", "3p", depth=30.0, degree=0, is_tip=True)
+    ev_het_b = _make_evidence("het_arm_b", "3p", depth=30.0, degree=0, is_tip=True)
+
+    ledger[p_het_stem.to_symbol()] = ev_het_stem
+    ledger[p_het_a.to_symbol()] = ev_het_a
+    ledger[p_het_b.to_symbol()] = ev_het_b
+
+    call_het = classify_pde_junction(p_het_stem, graph, ledger)
+    assert call_het.is_pde_junction is False, "Heterozygous split without stoichiometric GRS branch must be rejected"
+
 
 # ==============================================================================
 # BIO-004: Repeat Representation Preservation for Variable Satellites
@@ -412,6 +444,36 @@ def test_bio_004_variable_tandem_repeats_preserve_representative_sequences(tmp_p
     reloaded = load_gfa(out_gfa, load_sequences=True)
     assert reloaded.get_sequence("sat_repeat_entry") == representative_repeat
 
+    # Negative control: Tandem repeat that loops directly back onto stem is rejected
+    graph_loop = BidirectedGraph()
+    graph_loop.add_segment("loop_stem", length=80_000, depth=64.0)
+    graph_loop.add_segment("loop_som_cap", length=20_000, depth=45.0)
+    graph_loop.add_segment("loop_repeat", length=len(representative_repeat), depth=35.0, sequence=representative_repeat)
+
+    p_loop_stem = SegmentPort("loop_stem", Strand.FORWARD)
+    p_loop_som = SegmentPort("loop_som_cap", Strand.FORWARD)
+    p_loop_rep = SegmentPort("loop_repeat", Strand.FORWARD)
+
+    graph_loop.add_edge(p_loop_stem, p_loop_som, cigar="100M")
+    graph_loop.add_edge(p_loop_stem, p_loop_rep, cigar="100M")
+    # Repeat loops back to stem
+    graph_loop.add_edge(p_loop_rep, p_loop_stem, cigar="50M")
+
+    ev_loop_stem = _make_evidence("loop_stem", "3p", depth=64.0, degree=2, is_tip=False, usco_hit_count=8)
+    ev_loop_som = _make_evidence("loop_som_cap", "3p", depth=45.0, degree=0, is_tip=True, has_terminal_telomere=True)
+    ev_loop_rep = _make_evidence("loop_repeat", "3p", depth=35.0, degree=2, is_tip=False)
+
+    ledger_loop = {
+        p_loop_stem.to_symbol(): ev_loop_stem,
+        p_loop_som.to_symbol(): ev_loop_som,
+        p_loop_rep.to_symbol(): ev_loop_rep,
+    }
+
+    call_loop = classify_pde_junction(p_loop_stem, graph_loop, ledger_loop)
+    assert call_loop.is_pde_junction is False, (
+        "Repeat looping back to stem must not be accepted as an authentic GRS branch"
+    )
+
 
 # ==============================================================================
 # BIO-005: Lossless Overlap and Provenance Invariance
@@ -478,6 +540,11 @@ def test_bio_005_lossless_graph_representation_preserves_dovetails_and_offsets(t
     assert loaded_a_lines[0] == a_line
     assert len(reloaded_graph.a_lines) == 1
     assert reloaded_graph.a_lines[0] == a_line
+
+    # Non-standard segment and edge tags (LN, rd, L1, L2) must be preserved losslessly
+    assert reloaded_graph.raw_segment_tags.get("seg_alpha") == ["LN:i:50000", "rd:i:64"]
+    assert reloaded_graph.raw_segment_tags.get("seg_beta") == ["LN:i:30000", "rd:i:32"]
+    assert reloaded_graph.raw_edge_tags.get((p_alpha, p_beta)) == ["L1:i:50000", "L2:i:30000"]
 
 
 # ==============================================================================
@@ -593,3 +660,14 @@ def test_bio_006_unitig_id_permutation_and_sorting_invariance():
     assert call_perm2.somatic_port == p_som_p2
     assert call_perm2.germline_port == p_grs_p2
     assert abs(call_perm2.depth_ratio - call_base.depth_ratio) < 1e-6
+
+    # Verify cap identification invariance: somatic cap ports are recognized as TELOMERIC_CAP regardless of naming/ordering
+    assert classify_port(p_som, g_base, ev_som).terminal_feature == TerminalFeature.TELOMERIC_CAP
+    assert classify_port(p_som_p1, g_perm1, ev_som_p1).terminal_feature == TerminalFeature.TELOMERIC_CAP
+    assert classify_port(p_som_p2, g_perm2, ev_som_p2).terminal_feature == TerminalFeature.TELOMERIC_CAP
+
+    # Verify non-cap classification invariance: stem and GRS ports remain NONE across permutations
+    for p, g, ev in [(p_stem, g_base, ev_stem), (p_stem_p1, g_perm1, ev_stem_p1), (p_stem_p2, g_perm2, ev_stem_p2)]:
+        assert classify_port(p, g, ev).terminal_feature == TerminalFeature.NONE
+    for p, g, ev in [(p_grs, g_base, ev_grs), (p_grs_p1, g_perm1, ev_grs_p1), (p_grs_p2, g_perm2, ev_grs_p2)]:
+        assert classify_port(p, g, ev).terminal_feature == TerminalFeature.NONE

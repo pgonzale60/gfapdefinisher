@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from gfapdefinisher.policy import DEFAULT_POLICY, PolicyValue
+from gfapdefinisher.store import DEFAULT_BATCH_SIZE, MIN_A_LINE_TOKENS
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src" / "gfapdefinisher"
 
@@ -76,11 +77,11 @@ def test_no_magic_numbers_in_src():
     allowed_numbers = {0, 1, -1, 2}  # Basic indexing, boolean-like offsets, standard exit codes
 
     # Explicit non-policy operational exemptions:
-    # - store.py: DEFAULT_BATCH_SIZE (100_000), MIN_A_LINE_TOKENS (7)
-    # - annotations.py: column indices for TSV/GFF format parsing
+    # - store.py: DEFAULT_BATCH_SIZE, MIN_A_LINE_TOKENS (parsing token counts & batch buffers)
+    # - annotations.py: column indices for standard 0-indexed TSV/GFF/BED format parsing (0..15)
     exemptions_by_file: dict[str, set[int | float]] = {
-        "store.py": {100_000, 7},
-        "annotations.py": {3, 4, 5, 6, 7, 8},
+        "store.py": {DEFAULT_BATCH_SIZE, MIN_A_LINE_TOKENS},
+        "annotations.py": set(range(16)),
     }
 
     for py_file in SRC_DIR.rglob("*.py"):
