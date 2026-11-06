@@ -213,6 +213,8 @@ class JunctionRecord:
             raise ValueError("Side cannot be empty.")
         if not self.stem_port:
             raise ValueError("Stem port cannot be empty.")
+        if self.break_index < 1:
+            raise ValueError("Break index must be at least 1.")
         if isinstance(self.junction_class, str) and not isinstance(self.junction_class, JunctionClass):
             self.junction_class = JunctionClass(self.junction_class)
 
@@ -376,9 +378,10 @@ def emit_quirks_tsv(records: Iterable[QuirkRecord], out_file: TextIO | Path | st
     """
 
     def _write_records(writer: Any) -> None:
-        writer.write("\t".join(QUIRK_TSV_COLUMNS) + "\n")
+        csv_w = csv.writer(writer, delimiter="\t", lineterminator="\n")
+        csv_w.writerow(QUIRK_TSV_COLUMNS)
         for rec in records:
-            writer.write("\t".join(rec.to_tsv_row()) + "\n")
+            csv_w.writerow(rec.to_tsv_row())
 
     if isinstance(out_file, str | Path):
         with open(out_file, "w", encoding="utf-8") as f:
@@ -495,9 +498,10 @@ def emit_end_states_tsv(
         Formatted TSV content as a string.
     """
     buffer = StringIO()
-    buffer.write("\t".join(END_STATE_TSV_COLUMNS) + "\n")
+    writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
+    writer.writerow(END_STATE_TSV_COLUMNS)
     for rec in records:
-        buffer.write("\t".join(rec.to_tsv_row()) + "\n")
+        writer.writerow(rec.to_tsv_row())
     content = buffer.getvalue()
 
     if out_file is not None:
@@ -508,6 +512,22 @@ def emit_end_states_tsv(
             out_file.write(content)
 
     return content
+
+
+def _clean_tsv_stream(stream: Iterable[str]) -> list[str]:
+    """Filter comment and blank lines, normalizing commented headers."""
+    cleaned: list[str] = []
+    for line in stream:
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#") and "\t" in s and s.lstrip("#").strip().startswith("feature_id"):
+            cleaned.append(s.lstrip("#").strip() + "\n")
+            continue
+        if s.startswith("#"):
+            continue
+        cleaned.append(line)
+    return cleaned
 
 
 def parse_end_states_tsv(tsv_content: str | Path | TextIO) -> list[EndStateRecord]:
@@ -523,20 +543,23 @@ def parse_end_states_tsv(tsv_content: str | Path | TextIO) -> list[EndStateRecor
     def _parse_reader(reader: csv.DictReader[str]) -> list[EndStateRecord]:
         records: list[EndStateRecord] = []
         for row in reader:
-            if not row or not row.get("feature_id"):
+            if not row:
+                continue
+            fid = row.get("feature_id")
+            if not fid or fid.startswith("#"):
                 continue
             resolved_raw = row.get("resolved", "").strip().lower()
-            resolved = resolved_raw in ("true", "1") if resolved_raw else True
+            resolved = resolved_raw in ("true", "1", "yes", "t") if resolved_raw else True
 
             records.append(
                 EndStateRecord(
-                    feature_id=row["feature_id"],
-                    chrom=row["chrom"],
-                    side=row["side"],
-                    state=EndState(row["state"]),
-                    somatic_port=row.get("somatic_port") or None,
-                    germline_port=row.get("germline_port") or None,
-                    shared_port=row.get("shared_port") or None,
+                    feature_id=fid.strip(),
+                    chrom=row["chrom"].strip(),
+                    side=row["side"].strip(),
+                    state=EndState(row["state"].strip()),
+                    somatic_port=(row.get("somatic_port") or "").strip() or None,
+                    germline_port=(row.get("germline_port") or "").strip() or None,
+                    shared_port=(row.get("shared_port") or "").strip() or None,
                     core_coverage_bp_median=_to_float_or_none(row, "core_coverage_bp_median"),
                     somatic_depth_ratio=_to_float_or_none(row, "somatic_depth_ratio"),
                     germline_depth_ratio=_to_float_or_none(row, "germline_depth_ratio"),
@@ -548,13 +571,19 @@ def parse_end_states_tsv(tsv_content: str | Path | TextIO) -> list[EndStateRecor
 
     if isinstance(tsv_content, Path):
         with open(tsv_content, encoding="utf-8") as f:
-            return _parse_reader(csv.DictReader(f, delimiter="\t"))
+            return _parse_reader(csv.DictReader(_clean_tsv_stream(f), delimiter="\t"))
     if isinstance(tsv_content, str):
-        if "\n" not in tsv_content and "\t" not in tsv_content and Path(tsv_content).is_file():
-            with open(tsv_content, encoding="utf-8") as f:
-                return _parse_reader(csv.DictReader(f, delimiter="\t"))
-        return _parse_reader(csv.DictReader(StringIO(tsv_content), delimiter="\t"))
-    return _parse_reader(csv.DictReader(tsv_content, delimiter="\t"))
+        if "\n" not in tsv_content and "\t" not in tsv_content:
+            stripped = tsv_content.strip()
+            if not stripped:
+                return []
+            p = Path(tsv_content)
+            if p.suffix in (".tsv", ".txt", ".tab") or "/" in tsv_content or "\\" in tsv_content or p.is_file():
+                with open(p, encoding="utf-8") as f:
+                    return _parse_reader(csv.DictReader(_clean_tsv_stream(f), delimiter="\t"))
+            return _parse_reader(csv.DictReader(StringIO(tsv_content), delimiter="\t"))
+        return _parse_reader(csv.DictReader(_clean_tsv_stream(StringIO(tsv_content)), delimiter="\t"))
+    return _parse_reader(csv.DictReader(_clean_tsv_stream(tsv_content), delimiter="\t"))
 
 
 def emit_junctions_tsv(
@@ -571,9 +600,10 @@ def emit_junctions_tsv(
         Formatted TSV content as a string.
     """
     buffer = StringIO()
-    buffer.write("\t".join(JUNCTION_TSV_COLUMNS) + "\n")
+    writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
+    writer.writerow(JUNCTION_TSV_COLUMNS)
     for rec in records:
-        buffer.write("\t".join(rec.to_tsv_row()) + "\n")
+        writer.writerow(rec.to_tsv_row())
     content = buffer.getvalue()
 
     if out_file is not None:
@@ -599,17 +629,20 @@ def parse_junctions_tsv(tsv_content: str | Path | TextIO) -> list[JunctionRecord
     def _parse_reader(reader: csv.DictReader[str]) -> list[JunctionRecord]:
         records: list[JunctionRecord] = []
         for row in reader:
-            if not row or not row.get("feature_id"):
+            if not row:
+                continue
+            fid = row.get("feature_id")
+            if not fid or fid.startswith("#"):
                 continue
             records.append(
                 JunctionRecord(
-                    feature_id=row["feature_id"],
-                    chrom=row["chrom"],
-                    side=row["side"],
-                    junction_class=JunctionClass(row["junction_class"]),
-                    stem_port=row["stem_port"],
-                    somatic_terminus_port=row.get("somatic_terminus_port") or None,
-                    germline_continuation_port=row.get("germline_continuation_port") or None,
+                    feature_id=fid.strip(),
+                    chrom=row["chrom"].strip(),
+                    side=row["side"].strip(),
+                    junction_class=JunctionClass(row["junction_class"].strip()),
+                    stem_port=row["stem_port"].strip(),
+                    somatic_terminus_port=(row.get("somatic_terminus_port") or "").strip() or None,
+                    germline_continuation_port=(row.get("germline_continuation_port") or "").strip() or None,
                     break_index=int(row.get("break_index", 1) or 1),
                     core_depth_ratio=_to_float_or_none(row, "core_depth_ratio"),
                     read_count=_to_int_or_none(row, "read_count"),
@@ -621,13 +654,19 @@ def parse_junctions_tsv(tsv_content: str | Path | TextIO) -> list[JunctionRecord
 
     if isinstance(tsv_content, Path):
         with open(tsv_content, encoding="utf-8") as f:
-            return _parse_reader(csv.DictReader(f, delimiter="\t"))
+            return _parse_reader(csv.DictReader(_clean_tsv_stream(f), delimiter="\t"))
     if isinstance(tsv_content, str):
-        if "\n" not in tsv_content and "\t" not in tsv_content and Path(tsv_content).is_file():
-            with open(tsv_content, encoding="utf-8") as f:
-                return _parse_reader(csv.DictReader(f, delimiter="\t"))
-        return _parse_reader(csv.DictReader(StringIO(tsv_content), delimiter="\t"))
-    return _parse_reader(csv.DictReader(tsv_content, delimiter="\t"))
+        if "\n" not in tsv_content and "\t" not in tsv_content:
+            stripped = tsv_content.strip()
+            if not stripped:
+                return []
+            p = Path(tsv_content)
+            if p.suffix in (".tsv", ".txt", ".tab") or "/" in tsv_content or "\\" in tsv_content or p.is_file():
+                with open(p, encoding="utf-8") as f:
+                    return _parse_reader(csv.DictReader(_clean_tsv_stream(f), delimiter="\t"))
+            return _parse_reader(csv.DictReader(StringIO(tsv_content), delimiter="\t"))
+        return _parse_reader(csv.DictReader(_clean_tsv_stream(StringIO(tsv_content)), delimiter="\t"))
+    return _parse_reader(csv.DictReader(_clean_tsv_stream(tsv_content), delimiter="\t"))
 
 
 def create_junction_record(
@@ -678,6 +717,16 @@ def create_junction_record(
     if getattr(call, "is_repeat_entry", False):
         final_notes = f"{notes}; repeat_entry" if notes else "repeat_entry"
 
+    core_depth_ratio: float | None = None
+    if getattr(call, "core_depth_ratio", 0.0) != 0.0:
+        core_depth_ratio = call.core_depth_ratio
+    elif getattr(call, "depth_ratio", 0.0) != 0.0:
+        core_depth_ratio = call.depth_ratio
+    elif getattr(call, "core_depth_ratio", None) is not None:
+        core_depth_ratio = call.core_depth_ratio
+    elif getattr(call, "depth_ratio", None) is not None:
+        core_depth_ratio = call.depth_ratio
+
     return JunctionRecord(
         feature_id=fid,
         chrom=chrom,
@@ -687,7 +736,7 @@ def create_junction_record(
         somatic_terminus_port=somatic_port,
         germline_continuation_port=germline_port,
         break_index=break_index,
-        core_depth_ratio=call.depth_ratio if getattr(call, "depth_ratio", None) is not None else None,
+        core_depth_ratio=core_depth_ratio,
         read_count=read_count,
         confidence_tier=confidence_tier,
         notes=final_notes,
