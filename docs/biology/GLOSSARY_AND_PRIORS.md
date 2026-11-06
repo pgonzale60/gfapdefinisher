@@ -14,9 +14,9 @@ When working on `gfapdefinisher`, **the definitions and rules below supersede al
 - **Somatic Diminution Boundary (PDE Junction)**:
   A fork in the assembly graph where a high-coverage somatic stem unitig transitions into two alternative paths:
   1. A somatic truncated terminus (ending abruptly or with somatic telomere addition).
-  2. A lower-coverage ($0.20\text{--}0.40\times$) germline-retained sequence (GRS) continuing the chromosome arm.
+  2. A lower-coverage ($0.04\text{--}0.40\times$) germline-retained sequence (GRS) continuing the chromosome arm.
 - **Germline-Retained Sequence (GRS)**:
-  Chromosomal material present only in germ cells and deleted from somatic lineages during development. In Hifiasm graphs constructed from mixed tissues, GRS segments have reduced read depth proportional to the germline cell fraction.
+  Chromosomal material present only in germ cells and deleted from somatic lineages during development. In Hifiasm graphs constructed from mixed tissues, GRS segments have reduced read depth proportional to the germline cell fraction ($0.04\text{--}0.40\times$).
 - **rDNA Cassette**:
   A repeating multi-copy array of 18S-5.8S-28S ribosomal RNA genes. In the graph, it forms a collapsed, high-depth tangle with multiple entry and exit dovetails.
 

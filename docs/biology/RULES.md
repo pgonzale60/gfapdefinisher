@@ -14,7 +14,7 @@ All classifiers, decision engines, and termination logic in `gfapdefinisher` mus
 ---
 
 ## BIO-002: Composition & Stoichiometry Over Arbitrary Length Cutoffs
-- **Statement**: Fork and terminus decisions must be driven by physical sequence composition (canonical telomeric motifs, internal telomeric repeat sequences, ribosomal RNA subunits) and quantitative read depth contrast ($rd_{\text{grs}} \sim 0.20\text{--}0.40 \times rd_{\text{stem}}$), never by arbitrary sequence length cutoffs.
+- **Statement**: Fork and terminus decisions must be driven by physical sequence composition (canonical telomeric motifs, internal telomeric repeat sequences, ribosomal RNA subunits) and quantitative read depth contrast ($rd_{\text{grs}} \sim 0.04\text{--}0.40 \times rd_{\text{stem}}$), never by arbitrary sequence length cutoffs.
 - **Rationale**: Arbitrary length cutoffs (e.g. `stub < 10 kb`) are fragile heuristics that fail across species with varying burst sizes and repeat lengths.
 - **Falsifiable Criterion**: No code in `src/gfapdefinisher/` may compare node length against a static literal threshold to decide whether a branch is somatic or germline.
 
