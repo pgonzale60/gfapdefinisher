@@ -64,9 +64,9 @@ class StoichiometryPolicy:
         provisional=True,
     )
     max_germline_depth_ratio: PolicyValue[float] = PolicyValue(
-        value=0.40,
-        justification="Upper bound for germline-retained depth relative to somatic stem depth in mixed worm tissue.",
-        provenance="ha_analyze_count k-mer peak calibration on reference benchmark; BIO-002",
+        value=0.33,
+        justification="Upper bound for germline-retained depth relative to somatic stem depth in mixed worm tissue (0.33x core somatic coverage C_core); ratified on Issue #26.",
+        provenance="Empirical reference benchmark data calibration ratified on Issue #26; BIO-002",
         provisional=True,
     )
 

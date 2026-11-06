@@ -120,6 +120,23 @@ def test_node_annotations_container():
     assert node.compleasm == [compleasm_hit]
 
 
+def test_tiara_is_contaminant_classes():
+    """Verify is_contaminant() recognizes all documented Tiara contaminant classes."""
+    for cls in ("prokarya", "contaminant", "bacteria", "archaea", "PROKARYA", "Contaminant"):
+        node = NodeAnnotations(
+            sequence_id="test",
+            tiara=TiaraHit(sequence_id="test", classification=cls),
+        )
+        assert node.is_contaminant(), f"Expected is_contaminant() to be True for {cls}"
+
+    for cls in ("eukarya", "organelle", "unknown", "plastid", "mitochondrion"):
+        node = NodeAnnotations(
+            sequence_id="test",
+            tiara=TiaraHit(sequence_id="test", classification=cls),
+        )
+        assert not node.is_contaminant(), f"Expected is_contaminant() to be False for {cls}"
+
+
 def test_load_tiara_mock(tmp_path: Path):
     """Verify load_tiara parser with mock TSV and gzipped TSV."""
     content = (
