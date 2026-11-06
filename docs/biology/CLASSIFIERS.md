@@ -116,9 +116,17 @@ In accordance with `BIO-006`, the PDE junction motif detector has been calibrate
 
 | Benchmark Junction | Stem Port | Somatic Branch Port | Somatic Depth (Ratio) | Germline Branch Port | GRS Depth (Ratio to C_core) | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `utg000001l:3p` | `utg000001l+` | `utg000142l-` | $46.0\times$ ($0.7302$) | `utg000101l+` | $6.0\times$ ($0.0952$) | `VALIDATED` |
+| `utg000001l:5p` | `utg000001l-` | `utg000076l+` | $27.0\times$ ($0.4286$) | `utg000039l+` | $7.0\times$ ($0.1111$) | `VALIDATED` |
+| `utg000002l:3p` | `utg000002l+` | `utg000194l+` | $47.0\times$ ($0.7344$) | `utg000115l+` | $8.0\times$ ($0.1270$) | `VALIDATED` |
+| `utg000002l:5p` | `utg000002l-` | `utg000093l-` | $48.0\times$ ($0.7500$) | `utg000103l+` | $11.0\times$ ($0.1746$) | `VALIDATED` |
 | `utg000009l:5p` | `utg000009l-` | `utg000211l-` | $27.0\times$ ($0.4355$) | `utg000069l+` | $6.0\times$ ($0.0952$) | `VALIDATED` |
+| `utg000013l:3p` | `utg000013l+` | `utg000167l+` | $60.0\times$ ($0.9524$) | `utg000033l-` | $8.0\times$ ($0.1270$) | `VALIDATED` |
+| `utg000027l:5p` | `utg000027l-` | `utg000154l-` | $60.0\times$ ($0.9231$) | `utg000189l-` | $8.0\times$ ($0.1270$) | `VALIDATED` |
 | `utg000016l:5p` | `utg000016l-` | `utg000088l+` | $45.0\times$ ($0.7143$) | `utg000096l+` | $7.0\times$ ($0.1111$) | `VALIDATED` |
 | `utg000019l:3p` | `utg000019l+` | `utg000200l-` | $39.0\times$ ($0.5909$) | `utg000071l+` | $7.0\times$ ($0.1111$) | `VALIDATED` |
+| `utg000019l:5p` | `utg000019l-` | `utg000129l-` | $37.0\times$ ($0.5606$) | `utg000145l+` | $4.0\times$ ($0.0635$) | `VALIDATED` |
 | `utg000021l:5p` | `utg000021l-` | `utg000051l+` | $51.0\times$ ($0.7969$) | `utg000071l-` | $7.0\times$ ($0.1111$) | `VALIDATED` |
+| `utg000027l:3p` | `utg000027l+` | `utg000209l+` | $66.0\times$ ($1.0154$) | `utg000145l-` | $4.0\times$ ($0.0635$) | `VALIDATED` |
 
 Per `BIO-006`, this decision logic uses pure topological connectivity and depth ratios without hardcoded unitig identifiers or species-specific parameters, ensuring unconditional transferability across held-out outcrossers (`JU1382`, `PS1017`, `PS2068`).
