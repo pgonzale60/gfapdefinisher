@@ -137,14 +137,17 @@ class RdnaCassetteResolver:
         """Check whether a segment or port qualifies as a distal telomeric cap."""
         if isinstance(seg_or_port, SegmentPort):
             port = seg_or_port
-        else:
+            ev = self._lookup_evidence(port)
+            if ev is not None:
+                return bool(ev.has_terminal_telomere)
+            return False
+
+        if seg_or_port.endswith(("+", "-")):
             port = self.graph._resolve_port(seg_or_port)
+            return self.is_distal_telomere_cap(port)
 
-        ev = self._lookup_evidence(port)
-        if ev is not None and ev.has_terminal_telomere:
-            return True
-
-        for e in self._ledger_by_name.get(port.name, []):
+        seg_name = seg_or_port
+        for e in self._ledger_by_name.get(seg_name, []):
             if e.has_terminal_telomere:
                 return True
 
@@ -154,19 +157,52 @@ class RdnaCassetteResolver:
         """Determine the 18S -> 5.8S -> 28S transcriptional strand of an rDNA unitig."""
         if self.annotations is not None and seg_name in self.annotations:
             hits = self.annotations[seg_name].barrnap_hits
-            h18 = [h for h in hits if "18S" in h.feature_name]
-            h28 = [h for h in hits if "28S" in h.feature_name]
-            if len(h18) > 0 and len(h28) > 0:
-                min_18 = min(h.start for h in h18)
-                min_28 = min(h.start for h in h28)
-                if min_18 < min_28:
-                    return Strand.FORWARD
-                elif min_28 < min_18:
-                    return Strand.REVERSE
+            pos_hits = [h for h in hits if h.strand == "+"]
+            neg_hits = [h for h in hits if h.strand == "-"]
 
-            pos_cnt = sum(1 for h in hits if h.strand == "+")
-            neg_cnt = sum(1 for h in hits if h.strand == "-")
-            if pos_cnt > neg_cnt:
+            # Check positive strand 18S -> 28S structure (increasing coordinates)
+            pos_18 = [h for h in pos_hits if "18S" in h.feature_name]
+            pos_28 = [h for h in pos_hits if "28S" in h.feature_name]
+            pos_ordered = False
+            pos_inverted = False
+            if len(pos_18) > 0 and len(pos_28) > 0:
+                min_18_pos = min(h.start for h in pos_18)
+                min_28_pos = min(h.start for h in pos_28)
+                if min_18_pos < min_28_pos:
+                    pos_ordered = True
+                elif min_28_pos < min_18_pos:
+                    pos_inverted = True
+
+            # Check negative strand 18S -> 28S structure (decreasing coordinates in unitig)
+            neg_18 = [h for h in neg_hits if "18S" in h.feature_name]
+            neg_28 = [h for h in neg_hits if "28S" in h.feature_name]
+            neg_ordered = False
+            neg_inverted = False
+            if len(neg_18) > 0 and len(neg_28) > 0:
+                min_18_neg = min(h.start for h in neg_18)
+                min_28_neg = min(h.start for h in neg_28)
+                if min_18_neg > min_28_neg:
+                    neg_ordered = True
+                elif min_28_neg > min_18_neg:
+                    neg_inverted = True
+
+            # Internal inversion on either strand cannot represent valid transcriptional tandem unit
+            if pos_inverted or neg_inverted:
+                return None
+
+            if pos_ordered and not neg_ordered:
+                return Strand.FORWARD
+            if neg_ordered and not pos_ordered:
+                return Strand.REVERSE
+
+            # Majority strand fallback when only one subunit is present
+            pos_cnt = len(pos_hits)
+            neg_cnt = len(neg_hits)
+            if pos_cnt > 0 and neg_cnt == 0:
+                return Strand.FORWARD
+            elif neg_cnt > 0 and pos_cnt == 0:
+                return Strand.REVERSE
+            elif pos_cnt > neg_cnt:
                 return Strand.FORWARD
             elif neg_cnt > pos_cnt:
                 return Strand.REVERSE
@@ -191,8 +227,23 @@ class RdnaCassetteResolver:
     def is_consistent_rdna_orientation(self, port: SegmentPort, previous_ports: Sequence[SegmentPort] = ()) -> bool:
         """Verify that port traversal maintains consistent head-to-tail orientation."""
         intrinsic = self.get_intrinsic_rdna_orientation(port.name)
-        if intrinsic is not None and port.strand != intrinsic:
-            return False
+        if intrinsic is not None:
+            if port.strand != intrinsic:
+                return False
+        else:
+            # If unitig carries Barrnap rDNA annotations but no coherent orientation, reject inversion/chimera
+            if self.annotations is not None and port.name in self.annotations:
+                if len(self.annotations[port.name].barrnap_hits) > 0:
+                    return False
+
+        # Verify agreement with existing rDNA copies traversed along the same path
+        if len(previous_ports) > 0:
+            prev_rdna = [p for p in previous_ports if self.is_rdna_unitig(p)]
+            if len(prev_rdna) > 0:
+                first_intrinsic = self.get_intrinsic_rdna_orientation(prev_rdna[0].name)
+                if first_intrinsic is not None and intrinsic is not None:
+                    if intrinsic != first_intrinsic:
+                        return False
 
         return True
 
@@ -202,13 +253,29 @@ class RdnaCassetteResolver:
         for seg_name in self.graph.segments:
             if self.is_rdna_unitig(seg_name):
                 continue
+            if self.is_distal_telomere_cap(seg_name):
+                continue
             for strand in (Strand.FORWARD, Strand.REVERSE):
                 port = SegmentPort(seg_name, strand)
                 outgoing = self.graph.get_outgoing(port)
                 if any(self.is_rdna_unitig(e.to_port) for e in outgoing):
                     entry_ports.append(port)
 
-        entry_ports.sort(key=lambda p: (p.name, p.strand.to_symbol()))
+        def rank_entry(p: SegmentPort) -> tuple[int, int, str, str]:
+            has_usco = 0
+            if self.annotations is not None and p.name in self.annotations:
+                if len(self.annotations[p.name].compleasm_hits) > 0:
+                    has_usco = 1
+            for ev in self._ledger_by_name.get(p.name, []):
+                if ev.usco_hit_count > 0:
+                    has_usco = 1
+                    break
+            seg = self.graph.segments.get(p.name)
+            seg_len = seg.length if seg is not None else 0
+            # Sort descending by USCO presence and length, with deterministic name/strand
+            return (-has_usco, -seg_len, p.name, p.strand.to_symbol())
+
+        entry_ports.sort(key=rank_entry)
         return entry_ports
 
     def identify_entry_anchor(self) -> SegmentPort | None:
@@ -239,10 +306,12 @@ class RdnaCassetteResolver:
                     continue
 
                 if self.is_distal_telomere_cap(nxt):
-                    new_path = list(path)
-                    new_path.append(nxt)
-                    cap_paths.append(new_path)
-                    advanced = True
+                    # Distal telomeric cap terminates an rDNA cassette only if rDNA was traversed
+                    if any(self.is_rdna_unitig(p) for p in path) or self.is_rdna_unitig(nxt):
+                        new_path = list(path)
+                        new_path.append(nxt)
+                        cap_paths.append(new_path)
+                        advanced = True
                     continue
 
                 if self.is_rdna_unitig(nxt):
@@ -277,9 +346,9 @@ class RdnaCassetteResolver:
         if len(cap_paths) == 0:
             return None
 
-        def score_path(p: list[SegmentPort]) -> tuple[int, int]:
+        def score_path(p: list[SegmentPort]) -> tuple[int, int, tuple[str, ...]]:
             rdna_count = sum(1 for port in p if self.is_rdna_unitig(port))
-            return (rdna_count, self.compute_path_length(p))
+            return (rdna_count, self.compute_path_length(p), tuple(port.to_symbol() for port in p))
 
         cap_paths.sort(key=score_path, reverse=True)
         return cap_paths[0]
@@ -309,9 +378,9 @@ class RdnaCassetteResolver:
         best_path: list[SegmentPort] = []
         if len(cap_paths) > 0:
 
-            def score_cap(p: list[SegmentPort]) -> tuple[int, int]:
+            def score_cap(p: list[SegmentPort]) -> tuple[int, int, tuple[str, ...]]:
                 cnt = sum(1 for port in p if self.is_rdna_unitig(port))
-                return (cnt, self.compute_path_length(p))
+                return (cnt, self.compute_path_length(p), tuple(port.to_symbol() for port in p))
 
             cap_paths.sort(key=score_cap, reverse=True)
             chosen = cap_paths[0]
@@ -321,9 +390,9 @@ class RdnaCassetteResolver:
                 best_path = [p for p in chosen if self.is_rdna_unitig(p)]
         elif len(rdna_paths) > 0:
 
-            def score_rdna(p: list[SegmentPort]) -> tuple[int, int]:
+            def score_rdna(p: list[SegmentPort]) -> tuple[int, int, tuple[str, ...]]:
                 cnt = sum(1 for port in p if self.is_rdna_unitig(port))
-                return (cnt, self.compute_path_length(p))
+                return (cnt, self.compute_path_length(p), tuple(port.to_symbol() for port in p))
 
             rdna_paths.sort(key=score_rdna, reverse=True)
             chosen = rdna_paths[0]
@@ -358,7 +427,10 @@ class RdnaCassetteResolver:
                 overlap = 0
                 for edge in self.graph.get_outgoing(prev_port):
                     if edge.to_port == port:
-                        overlap = edge.overlap_len
+                        if edge.cigar and edge.cigar != "*":
+                            overlap = cigar_query_consumption(edge.cigar)
+                        else:
+                            overlap = edge.overlap_len
                         break
                 total_bp += max(0, seg_len - overlap)
 
@@ -452,6 +524,10 @@ class RdnaCassetteResolver:
             anchor_seg = self.graph.segments.get(path_to_cap[0].name)
             if anchor_seg is not None and anchor_seg.depth > 0:
                 core_cov = anchor_seg.depth
+            else:
+                ev = self._lookup_evidence(path_to_cap[0])
+                if ev is not None and ev.depth > 0:
+                    core_cov = ev.depth
 
             quirk_record = QuirkRecord(
                 feature_id=feature_id_quirk,
@@ -515,6 +591,16 @@ class RdnaCassetteResolver:
         if notes:
             unresolved_end_notes = f"{unresolved_end_notes}; {notes}"
 
+        unresolved_cov: float | None = None
+        if resolved_entry is not None:
+            anchor_seg = self.graph.segments.get(resolved_entry.name)
+            if anchor_seg is not None and anchor_seg.depth > 0:
+                unresolved_cov = anchor_seg.depth
+            else:
+                ev = self._lookup_evidence(resolved_entry)
+                if ev is not None and ev.depth > 0:
+                    unresolved_cov = ev.depth
+
         quirk_record = QuirkRecord(
             feature_id=feature_id_quirk,
             chrom=chrom,
@@ -528,6 +614,7 @@ class RdnaCassetteResolver:
             agp_component_type="U",
             agp_linkage_evidence="unresolved-tangle",
             unitig_ids=all_unitigs,
+            core_coverage_bp_median=unresolved_cov,
             representative_sequence_selected=assembled_seq is not None,
             notes=unresolved_quirk_notes,
         )
