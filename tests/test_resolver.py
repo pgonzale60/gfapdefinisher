@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from gfapdefinisher.graph import BidirectedGraph
+from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.quirks import (
@@ -583,6 +584,8 @@ def test_resolve_somatic_dropout_spanning_rescue(tmp_path: Path):
     assert quirk_rec.right_anchor_port == p_grs.to_symbol()
     assert quirk_rec.agp_component_type == "W"
     assert quirk_rec.agp_linkage_evidence == "ont-spanning"
+    assert "unpolished" in quirk_rec.notes
+    assert "ONT-derived" in quirk_rec.notes
 
 
 def test_resolve_somatic_dropout_unbridged_retention(tmp_path: Path):
@@ -694,3 +697,76 @@ def test_resolve_somatic_dropout_nonexistent_paf():
     assert rep_seq is None
     assert quirk_rec.representative_sequence_selected is False
     assert quirk_rec.spanning_read_count == 0
+
+
+def test_resolve_somatic_dropout_distal_germline_cap_rescue(tmp_path: Path):
+    """Verify ONT reads spanning from stem to distal germline telomeric cap rescue somatic dropout."""
+    graph = BidirectedGraph()
+    graph.add_segment("utg_stem", length=100000, depth=60.0)
+    graph.add_segment("utg_som", length=15000, depth=1.0)
+    graph.add_segment("utg_germ_mid", length=20000, depth=8.0)
+    graph.add_segment("utg_germ_cap", length=30000, depth=8.0)
+
+    p_stem = SegmentPort("utg_stem", Strand.FORWARD)
+    p_som = SegmentPort("utg_som", Strand.REVERSE)
+    p_germ_mid = SegmentPort("utg_germ_mid", Strand.FORWARD)
+    p_germ_cap = SegmentPort("utg_germ_cap", Strand.FORWARD)
+
+    # Stem bifurcates into som and germ_mid
+    graph.add_edge(p_stem, p_som, cigar="100M")
+    graph.add_edge(p_stem, p_germ_mid, cigar="100M")
+    # germ_mid extends into germ_cap
+    graph.add_edge(p_germ_mid.invert(), p_germ_cap, cigar="100M")
+
+    ev_cap = EndEvidence(
+        segment_name="utg_germ_cap",
+        end="3p",
+        port=p_germ_cap,
+        length=30000,
+        depth=8.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=True,
+        telomere_canonical_count=150,
+    )
+    ledger = {p_germ_cap.to_symbol(): ev_cap}
+
+    # PAF contains spanning reads from utg_stem to distal cap utg_germ_cap (not utg_germ_mid)
+    paf_lines = [
+        _make_paf_line("distal_read1", 40000, 1000, 3000, "+", "utg_stem", 100000, 98000, 100000, alen=2000),
+        _make_paf_line("distal_read1", 40000, 4200, 6200, "+", "utg_germ_cap", 30000, 0, 2000, alen=2000),
+        _make_paf_line("distal_read2", 40000, 1000, 3000, "+", "utg_stem", 100000, 98000, 100000, alen=2000),
+        _make_paf_line("distal_read2", 40000, 4200, 6200, "+", "utg_germ_cap", 30000, 0, 2000, alen=2000),
+    ]
+    paf_file = tmp_path / "distal_cap.paf"
+    paf_file.write_text("\n".join(paf_lines) + "\n", encoding="utf-8")
+
+    reads_fasta = {
+        "distal_read1": "A" * 3000 + "G" * 1200 + "T" * 35800,
+        "distal_read2": "A" * 3000 + "G" * 1200 + "T" * 35800,
+    }
+
+    engine = OntBridgingEngine(graph=graph, ledger=ledger)
+    quirk_rec, end_rec, rep_seq = engine.resolve_somatic_dropout(
+        chrom="I",
+        side="3p",
+        stem_port=p_stem,
+        germline_port=p_germ_mid,
+        somatic_port=p_som,
+        paf_path=paf_file,
+        reads_fasta=reads_fasta,
+        core_coverage_bp_median=60.0,
+        somatic_depth_ratio=0.016,
+        germline_depth_ratio=0.133,
+    )
+
+    assert end_rec.state == EndState.END_COMPLETE
+    assert end_rec.resolved is True
+    assert end_rec.notes == "ONT-derived sequence resolved germline telomere"
+    assert end_rec.germline_port == p_germ_cap.to_symbol()
+    assert quirk_rec.representative_sequence_selected is True
+    assert quirk_rec.agp_linkage_evidence == "ont-spanning"
+    assert "unpolished" in quirk_rec.notes
+    assert "ONT-derived" in quirk_rec.notes
+    assert rep_seq == "G" * 1200

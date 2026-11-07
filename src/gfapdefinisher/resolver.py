@@ -296,8 +296,14 @@ class OntBridgingEngine:
         graph_or_policy: Any = DEFAULT_POLICY,
         ledger: Any | None = None,
         policy: Policy = DEFAULT_POLICY,
+        *,
+        graph: Any | None = None,
     ) -> None:
-        if isinstance(graph_or_policy, Policy):
+        if graph is not None:
+            self.graph = graph
+            self.ledger = ledger
+            self.policy = graph_or_policy if isinstance(graph_or_policy, Policy) else policy
+        elif isinstance(graph_or_policy, Policy):
             self.policy = graph_or_policy
             self.graph = None
             self.ledger = ledger
@@ -898,6 +904,31 @@ class OntBridgingEngine:
             distribution=dist,
         )
 
+    def _find_distal_germline_targets(self, germline_port: SegmentPort) -> list[SegmentPort]:
+        """Find candidate distal germline telomeric caps reachable from germline_port."""
+        if self.graph is None:
+            return []
+        distal_targets: list[SegmentPort] = []
+        visited = {germline_port.name}
+        queue = [germline_port]
+        while queue:
+            p = queue.pop(0)
+            exit_port = p.invert()
+            outgoing = self.graph.get_outgoing(exit_port)
+            for edge in outgoing:
+                nxt = edge.to_port
+                if nxt.name not in visited:
+                    visited.add(nxt.name)
+                    distal_targets.append(nxt)
+                    if self.graph.degree(nxt.invert()) > 0:
+                        queue.append(nxt)
+        orphan_caps = self.identify_orphan_caps()
+        for cap_seg, (_tel_port, inward_port) in orphan_caps.items():
+            if cap_seg not in visited:
+                p_name, p_strand = _parse_port_spec(inward_port)
+                distal_targets.append(SegmentPort(name=p_name, strand=p_strand))
+        return distal_targets
+
     def resolve_somatic_dropout(
         self,
         chrom: str,
@@ -950,27 +981,45 @@ class OntBridgingEngine:
         Returns:
             Tuple of (QuirkRecord, EndStateRecord, representative_sequence).
         """
+        cand_targets = [germline_port]
+        cand_targets.extend(self._find_distal_germline_targets(germline_port))
+
+        spanning_reads: list[SpanningRead] = []
+        resolved_germline_port = germline_port
+
         if isinstance(paf_path, str | Path):
             p = Path(paf_path)
-            if not p.exists():
-                spanning_reads: list[SpanningRead] = []
-            else:
-                spanning_reads = self.collect_spanning_reads(
-                    p,
+            if p.exists():
+                for target in cand_targets:
+                    reads = self.collect_spanning_reads(
+                        p,
+                        stem_port,
+                        target,
+                        reads_sequences=reads_fasta,
+                    )
+                    if reads:
+                        spanning_reads = reads
+                        resolved_germline_port = target
+                        break
+        else:
+            for target in cand_targets:
+                reads = self.collect_spanning_reads(
+                    paf_path,
                     stem_port,
-                    germline_port,
+                    target,
                     reads_sequences=reads_fasta,
                 )
-        else:
-            spanning_reads = self.collect_spanning_reads(
-                paf_path,
-                stem_port,
-                germline_port,
-                reads_sequences=reads_fasta,
-            )
+                if reads:
+                    spanning_reads = reads
+                    resolved_germline_port = target
+                    break
 
         stem_str = stem_port.to_symbol() if hasattr(stem_port, "to_symbol") else str(stem_port)
-        germline_str = germline_port.to_symbol() if hasattr(germline_port, "to_symbol") else str(germline_port)
+        germline_str = (
+            resolved_germline_port.to_symbol()
+            if hasattr(resolved_germline_port, "to_symbol")
+            else str(resolved_germline_port)
+        )
         somatic_str = somatic_port.to_symbol() if hasattr(somatic_port, "to_symbol") else str(somatic_port)
         somatic_name = getattr(somatic_port, "name", str(somatic_port))
 
@@ -998,7 +1047,8 @@ class OntBridgingEngine:
 
             quirk_notes = (
                 f"Rescued somatic dropout stub via {len(spanning_reads)} spanning ONT reads; "
-                f"representative sequence selected from {best_read.qname} closest to median gap {dist.median_bp} bp (BIO-004)"
+                f"unpolished ONT-derived representative sequence selected from {best_read.qname} "
+                f"closest to median gap {dist.median_bp} bp (BIO-004)"
             )
             if notes:
                 quirk_notes = f"{quirk_notes}; {notes}"
