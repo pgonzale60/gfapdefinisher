@@ -825,3 +825,133 @@ def test_benchmark_df5120_rdna_chains_eukaryotic_and_rejects_bacterial_contamina
     chain_symbols = [p.to_symbol() for p in chain]
     assert chain_symbols == ["utg000013l-", "utg000020l-", "utg000082l-"]
     assert not any(p.name in banned_bacterial for p in chain)
+
+
+def test_resolve_entry_stem_heuristic_orphan_cap_matching_and_rejection():
+    """Verify resolve_entry_stem populates distal_cap_port and capped_via_heuristic=True on matching orphan cap,
+
+    and rejects orphan caps with opposite rDNA orientation or contaminant classification.
+    """
+    # 1. Matching orphan cap test
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=20000, depth=60.0)
+    graph.add_segment("rdna_tangle_end", length=10000, depth=200.0)
+    graph.add_segment("orphan_cap", length=5000, depth=30.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_tangle = SegmentPort("rdna_tangle_end", Strand.FORWARD)
+    graph.add_edge(p_stem, p_tangle, cigar="100M")
+    # orphan_cap is completely disconnected (degree 0 at both ports)
+
+    annotations = {
+        "rdna_tangle_end": NodeAnnotations(
+            sequence_id="rdna_tangle_end",
+            barrnap_hits=[
+                BarrnapHit("rdna_tangle_end", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("rdna_tangle_end", 2500, 6000, "+", "28S_rRNA", 1e-60),
+            ],
+        ),
+        "orphan_cap": NodeAnnotations(
+            sequence_id="orphan_cap",
+            barrnap_hits=[
+                BarrnapHit("orphan_cap", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("orphan_cap", 2500, 4500, "+", "28S_rRNA", 1e-60),
+            ],
+        ),
+    }
+
+    ledger = {
+        "stem+": _make_evidence("stem", "3p"),
+        "rdna_tangle_end+": _make_evidence("rdna_tangle_end", "3p", rdna_hit_count=2),
+        "orphan_cap+": _make_evidence("orphan_cap", "3p", has_terminal_telomere=True, rdna_hit_count=2),
+        "orphan_cap-": _make_evidence("orphan_cap", "5p", has_terminal_telomere=False, rdna_hit_count=2),
+    }
+
+    resolver = RdnaCassetteResolver(graph, ledger, annotations=annotations)
+    res = resolver.resolve_entry_stem(p_stem, chrom="II", side="5p")
+
+    assert res.distal_cap_port == SegmentPort("orphan_cap", Strand.FORWARD)
+    assert res.capped_via_heuristic is True
+    assert res.reached_distal_cap is False
+    assert res.quirk_record.agp_component_type == "U"
+    assert res.quirk_record.agp_linkage_evidence == "rna_tangle"
+    assert res.quirk_record.right_anchor_port == "orphan_cap+"
+    assert res.end_state_record.resolved is False
+
+    # 2. Rejection of opposite rDNA orientation
+    graph_opp = BidirectedGraph()
+    graph_opp.add_segment("stem", length=20000, depth=60.0)
+    graph_opp.add_segment("rdna_tangle_end", length=10000, depth=200.0)
+    graph_opp.add_segment("orphan_cap_opp", length=5000, depth=30.0)
+    graph_opp.add_edge(p_stem, p_tangle, cigar="100M")
+
+    annotations_opp = {
+        "rdna_tangle_end": NodeAnnotations(
+            sequence_id="rdna_tangle_end",
+            barrnap_hits=[
+                BarrnapHit("rdna_tangle_end", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("rdna_tangle_end", 2500, 6000, "+", "28S_rRNA", 1e-60),
+            ],
+        ),
+        # Opposite orientation: intrinsic minus strand (decreasing coordinates: 18S at 4500, 28S at 100)
+        "orphan_cap_opp": NodeAnnotations(
+            sequence_id="orphan_cap_opp",
+            barrnap_hits=[
+                BarrnapHit("orphan_cap_opp", 4000, 4800, "-", "18S_rRNA", 1e-40),
+                BarrnapHit("orphan_cap_opp", 500, 2500, "-", "28S_rRNA", 1e-60),
+            ],
+        ),
+    }
+
+    ledger_opp = {
+        "stem+": _make_evidence("stem", "3p"),
+        "rdna_tangle_end+": _make_evidence("rdna_tangle_end", "3p", rdna_hit_count=2),
+        "orphan_cap_opp+": _make_evidence("orphan_cap_opp", "3p", has_terminal_telomere=True, rdna_hit_count=2),
+        "orphan_cap_opp-": _make_evidence("orphan_cap_opp", "5p", has_terminal_telomere=False, rdna_hit_count=2),
+    }
+
+    resolver_opp = RdnaCassetteResolver(graph_opp, ledger_opp, annotations=annotations_opp)
+    res_opp = resolver_opp.resolve_entry_stem(p_stem, chrom="II", side="5p")
+
+    assert res_opp.distal_cap_port is None
+    assert res_opp.capped_via_heuristic is False
+    assert res_opp.quirk_record.right_anchor_port is None
+
+    # 3. Rejection of contaminant classification
+    graph_contam = BidirectedGraph()
+    graph_contam.add_segment("stem", length=20000, depth=60.0)
+    graph_contam.add_segment("rdna_tangle_end", length=10000, depth=200.0)
+    graph_contam.add_segment("orphan_cap_contam", length=5000, depth=30.0)
+    graph_contam.add_edge(p_stem, p_tangle, cigar="100M")
+
+    annotations_contam = {
+        "rdna_tangle_end": NodeAnnotations(
+            sequence_id="rdna_tangle_end",
+            barrnap_hits=[
+                BarrnapHit("rdna_tangle_end", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("rdna_tangle_end", 2500, 6000, "+", "28S_rRNA", 1e-60),
+            ],
+        ),
+        "orphan_cap_contam": NodeAnnotations(
+            sequence_id="orphan_cap_contam",
+            barrnap_hits=[
+                BarrnapHit("orphan_cap_contam", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("orphan_cap_contam", 2500, 4500, "+", "28S_rRNA", 1e-60),
+            ],
+            tiara="bacteria",
+        ),
+    }
+
+    ledger_contam = {
+        "stem+": _make_evidence("stem", "3p"),
+        "rdna_tangle_end+": _make_evidence("rdna_tangle_end", "3p", rdna_hit_count=2),
+        "orphan_cap_contam+": _make_evidence("orphan_cap_contam", "3p", has_terminal_telomere=True, rdna_hit_count=2),
+        "orphan_cap_contam-": _make_evidence("orphan_cap_contam", "5p", has_terminal_telomere=False, rdna_hit_count=2),
+    }
+
+    resolver_contam = RdnaCassetteResolver(graph_contam, ledger_contam, annotations=annotations_contam)
+    res_contam = resolver_contam.resolve_entry_stem(p_stem, chrom="II", side="5p")
+
+    assert res_contam.distal_cap_port is None
+    assert res_contam.capped_via_heuristic is False
+    assert res_contam.quirk_record.right_anchor_port is None

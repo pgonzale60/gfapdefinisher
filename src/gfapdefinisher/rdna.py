@@ -46,6 +46,9 @@ class RdnaResolution:
     quirk_record: QuirkRecord
     path: list[SegmentPort]
     sequence: str | None = None
+    distal_cap_port: SegmentPort | None = None
+    capped_via_heuristic: bool = False
+    reached_distal_cap: bool = False
 
     def __iter__(self):
         """Enable tuple unpacking into (end_state_record, quirk_record)."""
@@ -140,16 +143,52 @@ class RdnaCassetteResolver:
 
         return False
 
+    def _is_contaminant_unitig(self, seg_name: str) -> bool:
+        """Check whether a unitig is flagged as contaminant (alias for _is_contaminant)."""
+        return self._is_contaminant(seg_name)
+
     def _get_usco_count(self, seg_name: str) -> int:
         """Retrieve total USCO hit count for segment."""
         clean_name = seg_name.rstrip("+-") if isinstance(seg_name, str) else seg_name.name
         count = 0
-        if self.annotations is not None and clean_name in self.annotations:
-            count += len(self.annotations[clean_name].compleasm_hits)
+        if self.annotations is not None:
+            if hasattr(self.annotations, "usco_counts"):
+                count += self.annotations.usco_counts.get(clean_name, 0)
+            elif hasattr(self.annotations, "get") and clean_name in self.annotations:
+                ann = self.annotations[clean_name]
+                if hasattr(ann, "compleasm_hits"):
+                    count += len(ann.compleasm_hits)
         for ev in self._ledger_by_name.get(clean_name, []):
             if ev.usco_hit_count > count:
                 count = ev.usco_hit_count
         return count
+
+    def _has_terminal_telomere(self, port: SegmentPort) -> bool:
+        """Check whether an oriented port carries a terminal telomere."""
+        ev = self._lookup_evidence(port)
+        if ev is not None:
+            return bool(ev.has_terminal_telomere)
+        end_str = "5p" if port.strand == Strand.MINUS else "3p"
+        for e in self._ledger_by_name.get(port.name, []):
+            if e.end == end_str:
+                return bool(e.has_terminal_telomere)
+        return False
+
+    def _get_rdna_hit_count(self, seg_id: str) -> int:
+        """Return the number of rDNA hits for a segment."""
+        if self.annotations is not None:
+            if hasattr(self.annotations, "rdna_hits"):
+                hits_map = self.annotations.rdna_hits
+                if hasattr(hits_map, "get"):
+                    return len(hits_map.get(seg_id, ()))
+            if hasattr(self.annotations, "get") and seg_id in self.annotations:
+                ann = self.annotations[seg_id]
+                if hasattr(ann, "barrnap_hits"):
+                    return len(ann.barrnap_hits)
+        for ev in self._ledger_by_name.get(seg_id, []):
+            if ev.rdna_hit_count > 0:
+                return ev.rdna_hit_count
+        return 0
 
     def _has_any_usco(self) -> bool:
         """Check if any segment in the graph or ledger has USCO hits."""
@@ -328,7 +367,11 @@ class RdnaCassetteResolver:
 
         return None
 
-    def is_consistent_rdna_orientation(self, port: SegmentPort, previous_ports: Sequence[SegmentPort] = ()) -> bool:
+    def is_consistent_rdna_orientation(
+        self,
+        port: SegmentPort,
+        previous_ports: Sequence[SegmentPort] | Strand | None = (),
+    ) -> bool:
         """Verify that port traversal maintains consistent head-to-tail orientation."""
         if not self.is_rdna_unitig(port):
             return False
@@ -339,12 +382,20 @@ class RdnaCassetteResolver:
                 return False
         else:
             # If unitig carries Barrnap rDNA annotations but no coherent orientation, reject inversion/chimera
-            if self.annotations is not None and port.name in self.annotations:
-                if len(self.annotations[port.name].barrnap_hits) > 0:
-                    return False
+            if self.annotations is not None:
+                if hasattr(self.annotations, "get") and port.name in self.annotations:
+                    ann = self.annotations[port.name]
+                    if hasattr(ann, "barrnap_hits") and len(ann.barrnap_hits) > 0:
+                        return False
+                elif hasattr(self.annotations, "rdna_hits"):
+                    hits_map = self.annotations.rdna_hits
+                    if hasattr(hits_map, "get") and len(hits_map.get(port.name, ())) > 0:
+                        return False
 
-        # Verify agreement with existing rDNA copies traversed along the same path
-        if len(previous_ports) > 0:
+        if isinstance(previous_ports, Strand):
+            if port.strand != previous_ports:
+                return False
+        elif previous_ports and isinstance(previous_ports, Sequence) and not isinstance(previous_ports, str | bytes):
             prev_rdna = [p for p in previous_ports if self.is_rdna_unitig(p)]
             if len(prev_rdna) > 0:
                 first_intrinsic = self.get_intrinsic_rdna_orientation(prev_rdna[0].name)
@@ -353,6 +404,52 @@ class RdnaCassetteResolver:
                         return False
 
         return True
+
+    def find_heuristic_rdna_cap(
+        self,
+        expected_dir: Strand | None,
+        visited_ids: set[str],
+    ) -> SegmentPort | None:
+        """Find an orphan rDNA-bearing telomeric cap unitig matching orientation and purity criteria."""
+        candidates: list[SegmentPort] = []
+        for seg_id in sorted(self.graph.segments.keys()):
+            if seg_id in visited_ids:
+                continue
+            if self._is_contaminant_unitig(seg_id):
+                continue
+            if not self.is_rdna_unitig(seg_id):
+                continue
+
+            p_fwd = SegmentPort(seg_id, Strand.FORWARD)
+            p_rev = SegmentPort(seg_id, Strand.REVERSE)
+            if self.graph.degree(p_fwd) != 0 or self.graph.degree(p_rev) != 0:
+                continue
+
+            if self._get_usco_count(seg_id) != 0:
+                continue
+
+            has_fwd = self._has_terminal_telomere(p_fwd)
+            has_rev = self._has_terminal_telomere(p_rev)
+            if has_fwd == has_rev:
+                continue
+
+            cand_port = SegmentPort(seg_id, Strand.FORWARD if has_fwd else Strand.REVERSE)
+            if not self.is_consistent_rdna_orientation(cand_port, expected_dir):
+                continue
+
+            candidates.append(cand_port)
+
+        if len(candidates) == 0:
+            return None
+
+        candidates.sort(
+            key=lambda p: (
+                -self._get_rdna_hit_count(p.name),
+                -(self.graph.segments[p.name].length if p.name in self.graph.segments else 0),
+                p.name,
+            )
+        )
+        return candidates[0]
 
     def _find_entry_stems(self) -> list[SegmentPort]:
         """Identify chromosome core stems connecting to rDNA-bearing unitigs."""
@@ -601,23 +698,16 @@ class RdnaCassetteResolver:
 
         return "".join(assembled_chunks)
 
-    def resolve_rdna_cassette(
+    def resolve_entry_stem(
         self,
+        entry_port: SegmentPort,
         chrom: str = "II",
         side: str = "5p",
-        entry_port: SegmentPort | str | None = None,
         gap_index: int = 1,
         notes: str = "",
     ) -> RdnaResolution:
-        """Assemble traversed rDNA path and emit EndStateRecord and QuirkRecord."""
-        resolved_entry: SegmentPort | None
-        if entry_port is None:
-            entries = self.find_rdna_entry_ports()
-            resolved_entry = entries[0] if len(entries) > 0 else None
-        else:
-            resolved_entry = entry_port if isinstance(entry_port, SegmentPort) else self.graph._resolve_port(entry_port)
-
-        path_to_cap = self.reach_distal_telomere_cap(resolved_entry) if resolved_entry is not None else None
+        """Resolve rDNA cassette walk from a core entry stem to a distal cap (graph-connected or heuristic)."""
+        path_to_cap = self.reach_distal_telomere_cap(entry_port)
 
         if path_to_cap is not None and len(path_to_cap) > 1:
             cap_port = path_to_cap[-1]
@@ -687,38 +777,59 @@ class RdnaCassetteResolver:
                 quirk_record=quirk_record,
                 path=path_to_cap,
                 sequence=assembled_seq,
+                distal_cap_port=cap_port,
+                capped_via_heuristic=False,
+                reached_distal_cap=True,
             )
 
         # Distal cap not reached
         feature_id_end = build_feature_id(EndState.END_SHARED_EXEMPT, chrom, side)
         feature_id_quirk = build_feature_id(IntervalQuirk.RDNA_CASSETTE, chrom, side, index=gap_index)
 
-        unresolved_path = (
-            self.traverse_rdna_cassette(resolved_entry, include_anchor=True) if resolved_entry is not None else []
-        )
+        unresolved_path = self.traverse_rdna_cassette(entry_port, include_anchor=True)
         all_unitigs = tuple(p.name for p in unresolved_path)
         path_len = self.compute_path_length(unresolved_path) if len(unresolved_path) > 0 else None
         assembled_seq = self.assemble_contiguous_path(unresolved_path) if len(unresolved_path) > 0 else None
 
-        left_str = resolved_entry.to_symbol() if resolved_entry is not None else None
+        left_str = entry_port.to_symbol()
 
-        unresolved_quirk_notes = "Unresolved rDNA cassette tangle: distal telomere cap not reached"
+        distal_cap_port: SegmentPort | None = None
+        capped_via_heuristic = False
+        chained = [p for p in unresolved_path if self.is_rdna_unitig(p)]
+        if len(chained) >= 1:
+            expected_dir = chained[0].strand
+            visited = {p.name for p in unresolved_path}
+            distal_cap_port = self.find_heuristic_rdna_cap(expected_dir, visited)
+            if distal_cap_port is not None:
+                capped_via_heuristic = True
+
+        if capped_via_heuristic and distal_cap_port is not None:
+            right_str = distal_cap_port.to_symbol()
+            agp_component = "U"
+            agp_evidence = "rna_tangle"
+            unresolved_quirk_notes = (
+                f"rDNA cassette tangle capped via heuristic at distal cap {distal_cap_port.to_symbol()}"
+            )
+            unresolved_end_notes = f"Shared exempt rDNA cassette capped via heuristic at {distal_cap_port.to_symbol()}"
+        else:
+            right_str = None
+            agp_component = "U"
+            agp_evidence = "unresolved-tangle"
+            unresolved_quirk_notes = "Unresolved rDNA cassette tangle: distal telomere cap not reached"
+            unresolved_end_notes = "Unresolved rDNA cassette end"
+
         if notes:
             unresolved_quirk_notes = f"{unresolved_quirk_notes}; {notes}"
-
-        unresolved_end_notes = "Unresolved rDNA cassette end"
-        if notes:
             unresolved_end_notes = f"{unresolved_end_notes}; {notes}"
 
         unresolved_cov: float | None = None
-        if resolved_entry is not None:
-            anchor_seg = self.graph.segments.get(resolved_entry.name)
-            if anchor_seg is not None and anchor_seg.depth > 0:
-                unresolved_cov = anchor_seg.depth
-            else:
-                ev = self._lookup_evidence(resolved_entry)
-                if ev is not None and ev.depth > 0:
-                    unresolved_cov = ev.depth
+        anchor_seg = self.graph.segments.get(entry_port.name)
+        if anchor_seg is not None and anchor_seg.depth > 0:
+            unresolved_cov = anchor_seg.depth
+        else:
+            ev = self._lookup_evidence(entry_port)
+            if ev is not None and ev.depth > 0:
+                unresolved_cov = ev.depth
 
         quirk_record = QuirkRecord(
             feature_id=feature_id_quirk,
@@ -729,9 +840,9 @@ class RdnaCassetteResolver:
             length_median_bp=path_len,
             length_max_bp=path_len,
             left_anchor_port=left_str,
-            right_anchor_port=None,
-            agp_component_type="U",
-            agp_linkage_evidence="unresolved-tangle",
+            right_anchor_port=right_str,
+            agp_component_type=agp_component,
+            agp_linkage_evidence=agp_evidence,
             unitig_ids=all_unitigs,
             core_coverage_bp_median=unresolved_cov,
             representative_sequence_selected=assembled_seq is not None,
@@ -743,7 +854,7 @@ class RdnaCassetteResolver:
             chrom=chrom,
             side=side,
             state=EndState.END_SHARED_EXEMPT,
-            shared_port=None,
+            shared_port=right_str,
             resolved=False,
             notes=unresolved_end_notes,
         )
@@ -756,6 +867,75 @@ class RdnaCassetteResolver:
             quirk_record=quirk_record,
             path=unresolved_path,
             sequence=assembled_seq,
+            distal_cap_port=distal_cap_port,
+            capped_via_heuristic=capped_via_heuristic,
+            reached_distal_cap=False,
+        )
+
+    def resolve_rdna_cassette(
+        self,
+        chrom: str = "II",
+        side: str = "5p",
+        entry_port: SegmentPort | str | None = None,
+        gap_index: int = 1,
+        notes: str = "",
+    ) -> RdnaResolution:
+        """Assemble traversed rDNA path and emit EndStateRecord and QuirkRecord."""
+        resolved_entry: SegmentPort | None
+        if entry_port is None:
+            entries = self.find_rdna_entry_ports()
+            resolved_entry = entries[0] if len(entries) > 0 else None
+        else:
+            resolved_entry = entry_port if isinstance(entry_port, SegmentPort) else self.graph._resolve_port(entry_port)
+
+        if resolved_entry is None:
+            feature_id_end = build_feature_id(EndState.END_SHARED_EXEMPT, chrom, side)
+            feature_id_quirk = build_feature_id(IntervalQuirk.RDNA_CASSETTE, chrom, side, index=gap_index)
+            quirk_record = QuirkRecord(
+                feature_id=feature_id_quirk,
+                chrom=chrom,
+                side=side,
+                quirk_type=IntervalQuirk.RDNA_CASSETTE,
+                length_min_bp=None,
+                length_median_bp=None,
+                length_max_bp=None,
+                left_anchor_port=None,
+                right_anchor_port=None,
+                agp_component_type="U",
+                agp_linkage_evidence="unresolved-tangle",
+                unitig_ids=(),
+                core_coverage_bp_median=None,
+                representative_sequence_selected=False,
+                notes="Unresolved rDNA cassette tangle: no entry anchor found" if not notes else notes,
+            )
+            end_state_record = EndStateRecord(
+                feature_id=feature_id_end,
+                chrom=chrom,
+                side=side,
+                state=EndState.END_SHARED_EXEMPT,
+                shared_port=None,
+                resolved=False,
+                notes="Unresolved rDNA cassette end: no entry anchor found" if not notes else notes,
+            )
+            return RdnaResolution(
+                chrom=chrom,
+                side=side,
+                state=EndState.END_SHARED_EXEMPT,
+                end_state_record=end_state_record,
+                quirk_record=quirk_record,
+                path=[],
+                sequence=None,
+                distal_cap_port=None,
+                capped_via_heuristic=False,
+                reached_distal_cap=False,
+            )
+
+        return self.resolve_entry_stem(
+            entry_port=resolved_entry,
+            chrom=chrom,
+            side=side,
+            gap_index=gap_index,
+            notes=notes,
         )
 
     def collect_unresolved_tangles(self, chained_segments: set[str] | Sequence[str] = ()) -> list[QuirkRecord]:

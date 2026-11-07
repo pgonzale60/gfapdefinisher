@@ -10,13 +10,18 @@ from gfapdefinisher.classifier import (
     classify_port,
 )
 from gfapdefinisher.emitter import (
+    AgpGapRow,
     AgpRecord,
+    FastaAgpEmitter,
     PathComponent,
+    ScaffoldPlan,
+    ScaffoldStep,
     SequenceProvenance,
     assemble_path_sequence,
     assemble_scaffold_sequence,
     emit_agp,
     emit_fasta,
+    emit_scaffold,
     parse_agp,
 )
 from gfapdefinisher.policy import (
@@ -50,10 +55,12 @@ def hello() -> str:
 
 
 __all__ = [
+    "AgpGapRow",
     "AgpRecord",
     "DEFAULT_POLICY",
     "EndState",
     "EndStateRecord",
+    "FastaAgpEmitter",
     "GapDistribution",
     "IntervalQuirk",
     "JunctionClass",
@@ -69,6 +76,8 @@ __all__ = [
     "RdnaCassetteResolver",
     "RdnaResolution",
     "SatelliteGapResolution",
+    "ScaffoldPlan",
+    "ScaffoldStep",
     "SequenceProvenance",
     "SpanningRead",
     "TerminalFeature",
@@ -79,6 +88,7 @@ __all__ = [
     "classify_port",
     "emit_agp",
     "emit_fasta",
+    "emit_scaffold",
     "hello",
     "parse_agp",
     "parse_paf_hits",

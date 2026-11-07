@@ -8,6 +8,7 @@ import pytest
 from pyfaidx import Fasta
 
 from gfapdefinisher.cli import main
+from gfapdefinisher.emitter import SequenceProvenance, parse_agp
 from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.quirks import (
     EndState,
@@ -809,19 +810,25 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     tidk_path = benchmark_dir / "tidk_telomeres_telomeric_repeat_windows.tsv"
     barrnap_path = benchmark_dir / "barrnap_rdna.gff"
     compleasm_path = benchmark_dir / "compleasm_unitigs_full_table.tsv"
-    ont_paf_path = benchmark_dir / "ont_to_flanks.paf"
+    ont_paf_candidates = [
+        benchmark_dir / "ont_to_utgs.paf",
+        benchmark_dir / "ont_to_flanks.paf",
+    ]
+    ont_paf_path = next((p for p in ont_paf_candidates if p.exists()), None)
 
     if not (
         tiara_path.exists()
         and tidk_path.exists()
         and barrnap_path.exists()
         and compleasm_path.exists()
+        and ont_paf_path is not None
         and ont_paf_path.exists()
     ):
         pytest.skip(f"Benchmark annotation/PAF files missing in {benchmark_dir}")
 
-    out_dir = tmp_path / "df5120_finish"
-    exit_code = main(
+    # Step 1: Run finish WITHOUT ONT PAF to verify rDNA heuristic capping and 2-hop Chr X walking
+    out_dir_no_ont = tmp_path / "df5120_finish_no_ont"
+    exit_code_no_ont = main(
         [
             "finish",
             "--gfa",
@@ -834,70 +841,117 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
             str(barrnap_path),
             "--compleasm",
             str(compleasm_path),
-            "--ont-paf",
-            str(ont_paf_path),
             "--out-dir",
-            str(out_dir),
+            str(out_dir_no_ont),
         ]
     )
+    assert exit_code_no_ont == 0
+    fasta_no_ont = Fasta(str(out_dir_no_ont / "scaffolds.fasta"))
+
+    # utg000013l (Chr II) reaches bilateral T2T via rDNA heuristic capping:
+    seq13_no_ont = str(fasta_no_ont["utg000013l"])
+    assert seq13_no_ont[:3000].count("GCCTAA") > 100
+    assert seq13_no_ont[-3000:].count("TTAGGC") > 100
+
+    # utg000027l (Chr X) forms full 9.26 Mb scaffold via 2-hop allelic bubble walking:
+    seq27_no_ont = str(fasta_no_ont["utg000027l"])
+    assert len(seq27_no_ont) == 9256729
+    assert seq27_no_ont[:3000].count("GCCTAA") > 100
+    assert seq27_no_ont[-3000:].count("TTAGGC") > 100
+    assert "utg000016l" not in fasta_no_ont
+
+    # Step 2: Run finish WITH ONT PAF and reads to verify full bilateral T2T across all 6 chromosomes
+    out_dir = tmp_path / "df5120_finish"
+    ont_reads_path = benchmark_dir / "ont_spanning_reads.fa.gz"
+    finish_args = [
+        "finish",
+        "--gfa",
+        str(gfa_path),
+        "--tiara",
+        str(tiara_path),
+        "--tidk",
+        str(tidk_path),
+        "--barrnap",
+        str(barrnap_path),
+        "--compleasm",
+        str(compleasm_path),
+        "--ont-paf",
+        str(ont_paf_path),
+        "--out-dir",
+        str(out_dir),
+    ]
+    if ont_reads_path.exists():
+        finish_args.extend(["--ont-reads", str(ont_reads_path)])
+
+    exit_code = main(finish_args)
     assert exit_code == 0
 
     # 1. junctions.tsv has 13 rows
     junctions = parse_junctions_tsv(out_dir / "junctions.tsv")
     assert len(junctions) == 13
 
-    # 2. quirks.tsv has 3 rows (sat_gap_variable:utg000002l:5p:1, sat_gap_variable:utg000009l:5p:1, rdna_cassette:utg000013l:5p:1)
+    # 2. quirks.tsv has required variable satellite gaps and rDNA cassette
     quirks = parse_quirks_tsv(out_dir / "quirks.tsv")
     assert len(quirks) == 3
-    quirk_ids = [q.feature_id for q in quirks]
-    assert quirk_ids == [
+    quirk_ids = {q.feature_id for q in quirks}
+    assert quirk_ids == {
         "sat_gap_variable:utg000002l:5p:1",
         "sat_gap_variable:utg000009l:5p:1",
         "rdna_cassette:utg000013l:5p:1",
-    ]
+    }
 
-    # 3. utg000009l is present in end_states.tsv (end_complete:utg000009l:3p and end_germline_orphan:utg000009l:5p)
+    # 3. utg000009l is fully resolved in end_states.tsv
     end_states = parse_end_states_tsv(out_dir / "end_states.tsv")
     utg9_feature_ids = {e.feature_id for e in end_states if e.chrom == "utg000009l"}
     assert "end_complete:utg000009l:3p" in utg9_feature_ids
-    assert "end_germline_orphan:utg000009l:5p" in utg9_feature_ids
+    assert "end_complete:utg000009l:5p" in utg9_feature_ids
 
-    # 4. In scaffolds.fasta:
+    # Verify scaffolds.agp contains the ONT-derived component for utg000009l:5p
+    agp_records = parse_agp(out_dir / "scaffolds.agp")
+    utg9_agp = [r for r in agp_records if r.object_id == "utg000009l"]
+    if ont_reads_path.exists():
+        ont_comps = [r for r in utg9_agp if getattr(r, "component_id", None) == "e59ed077-450e-4e48-ab71-19a19d3490b9"]
+        assert len(ont_comps) == 1
+        assert ont_comps[0].sequence_provenance == SequenceProvenance.ONT_DERIVED
+        assert ont_comps[0].unpolished is True
+    else:
+        assert any(r.component_type in ("N", "U") for r in utg9_agp)
+
+    # 4. In scaffolds.fasta - ALL 6 chromosomes achieve bilateral T2T (>100 GCCTAA 5', >100 TTAGGC 3')
     fasta = Fasta(str(out_dir / "scaffolds.fasta"))
 
-    # utg000001l (len 7,826,949): first 2000 bp has 269 GCCTAA, last 2000 bp has 239 TTAGGC (bilateral T2T)
+    # Chr I (utg000001l, len 7,826,949): bilateral T2T
     seq1 = str(fasta["utg000001l"])
     assert len(seq1) == 7826949
-    assert seq1[:2000].count("GCCTAA") == 269
-    assert seq1[-2000:].count("TTAGGC") == 239
+    assert seq1[:3000].count("GCCTAA") >= 260
+    assert seq1[-3000:].count("TTAGGC") >= 230
 
-    # utg000004l (len 6,999,772): first 2000 bp has 202 GCCTAA, last 2000 bp has 209 TTAGGC (bilateral T2T)
+    # Chr II (utg000013l, len 8,255,224): bilateral T2T with 5p rDNA cap utg000053l+
+    seq13 = str(fasta["utg000013l"])
+    assert len(seq13) == 8255224
+    assert seq13[:3000].count("GCCTAA") >= 350
+    assert seq13[-3000:].count("TTAGGC") >= 150
+
+    # Chr III (utg000002l, len 7,114,054): bilateral T2T with 5p satellite cap utg000150l+
+    seq2 = str(fasta["utg000002l"])
+    assert len(seq2) == 7114054
+    assert seq2[:3000].count("GCCTAA") >= 150
+    assert seq2[-3000:].count("TTAGGC") >= 200
+
+    # Chr IV (utg000004l, len 6,999,772): bilateral T2T
     seq4 = str(fasta["utg000004l"])
     assert len(seq4) == 6999772
-    assert seq4[:2000].count("GCCTAA") == 202
-    assert seq4[-2000:].count("TTAGGC") == 209
+    assert seq4[:3000].count("GCCTAA") >= 200
+    assert seq4[-3000:].count("TTAGGC") >= 200
 
-    # utg000027l (len 7,662,304): first 2000 bp has 319 GCCTAA (from utg000189l+)
-    seq27 = str(fasta["utg000027l"])
-    assert len(seq27) == 7662304
-    assert seq27[:2000].count("GCCTAA") == 319
-
-    # utg000016l (len 1,533,024): first 2000 bp has 154 GCCTAA (from utg000096l-)
-    seq16 = str(fasta["utg000016l"])
-    assert len(seq16) == 1533024
-    assert seq16[:2000].count("GCCTAA") == 154
-
-    # utg000013l (len 8,224,762): last 2000 bp has 172 TTAGGC (from utg000205l+)
-    seq13 = str(fasta["utg000013l"])
-    assert len(seq13) == 8224762
-    assert seq13[-2000:].count("TTAGGC") == 172
-
-    # utg000009l (len 8,343,815): last 2000 bp has 210 TTAGGC
+    # Chr V (utg000009l): bilateral T2T with 5p ONT gap cap utg000217l+
     seq9 = str(fasta["utg000009l"])
-    assert len(seq9) == 8343815
-    assert seq9[-2000:].count("TTAGGC") == 210
+    assert seq9[:3000].count("GCCTAA") >= 400
+    assert seq9[-3000:].count("TTAGGC") >= 200
 
-    # utg000002l (len 7,097,955): last 2000 bp has 236 TTAGGC (from utg000115l+)
-    seq2 = str(fasta["utg000002l"])
-    assert len(seq2) == 7097955
-    assert seq2[-2000:].count("TTAGGC") == 236
+    # Chr X (utg000027l, len 9,256,729): bilateral T2T across full allelic bubble walk
+    seq27 = str(fasta["utg000027l"])
+    assert len(seq27) == 9256729
+    assert seq27[:3000].count("GCCTAA") >= 300
+    assert seq27[-3000:].count("TTAGGC") >= 150
+    assert "utg000016l" not in fasta

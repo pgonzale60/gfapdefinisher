@@ -12,6 +12,7 @@ from gfapdefinisher.annotations import aggregate_node_annotations
 from gfapdefinisher.cigar import parse_dovetail_overlap_len
 from gfapdefinisher.classifier import _lookup_evidence, compute_core_coverage
 from gfapdefinisher.emitter import (
+    DEFAULT_AGP_POLICY,
     AgpRecord,
     PathComponent,
     SequenceProvenance,
@@ -39,7 +40,6 @@ from gfapdefinisher.resolver import (
     OntBridgingEngine,
     SatelliteGapResolution,
     _parse_port_spec,
-    load_reads_sequences,
     reverse_complement,
 )
 
@@ -143,6 +143,27 @@ def _find_overlap_len(graph: BidirectedGraph, from_port: SegmentPort, to_port: S
     return 0
 
 
+def _is_contam_unitig(ledger_map: Mapping[str, Any], name: str) -> bool:
+    contam_classes = ("bacteria", "archaea", "prokarya", "contaminant")
+    for key in (f"{name}+", f"{name}-", f"{name}:5p", f"{name}:3p", name):
+        ev = ledger_map.get(key)
+        if ev is not None:
+            if getattr(ev, "is_contaminant", False):
+                return True
+            cls_str = str(getattr(ev, "tiara_class", "")).lower().strip()
+            if cls_str in contam_classes:
+                return True
+    return False
+
+
+def _get_usco_count(ledger_map: Mapping[str, Any], name: str) -> int:
+    for key in (f"{name}+", f"{name}-", f"{name}:5p", f"{name}:3p", name):
+        ev = ledger_map.get(key)
+        if ev is not None and getattr(ev, "usco_hit_count", 0) > 0:
+            return ev.usco_hit_count
+    return 0
+
+
 def _trace_germline_chain(
     graph: BidirectedGraph,
     ledger_map: Mapping[str, Any],
@@ -150,26 +171,6 @@ def _trace_germline_chain(
     max_hops: int,
 ) -> list[SegmentPort]:
     """Trace outward germline continuation unitigs to an authentic terminal telomeric cap."""
-
-    def _is_contam(name: str) -> bool:
-        contam_classes = ("bacteria", "archaea", "prokarya", "contaminant")
-        for key in (f"{name}+", f"{name}-", f"{name}:5p", f"{name}:3p", name):
-            ev = ledger_map.get(key)
-            if ev is not None:
-                if getattr(ev, "is_contaminant", False):
-                    return True
-                cls_str = str(getattr(ev, "tiara_class", "")).lower().strip()
-                if cls_str in contam_classes:
-                    return True
-        return False
-
-    def _get_usco(name: str) -> int:
-        for key in (f"{name}+", f"{name}-", f"{name}:5p", f"{name}:3p", name):
-            ev = ledger_map.get(key)
-            if ev is not None and getattr(ev, "usco_hit_count", 0) > 0:
-                return ev.usco_hit_count
-        return 0
-
     ev = _lookup_evidence(ledger_map, germ_port)
     deg = graph.degree(germ_port) if germ_port.name in graph.segments else (ev.degree if ev else 0)
     if ev is not None and ev.has_terminal_telomere and deg == 0:
@@ -191,7 +192,7 @@ def _trace_germline_chain(
             nxt = e.to_port
             if nxt in visited:
                 continue
-            if _get_usco(nxt.name) != 0 or _is_contam(nxt.name):
+            if _get_usco_count(ledger_map, nxt.name) != 0 or _is_contam_unitig(ledger_map, nxt.name):
                 continue
 
             nxt_ev = _lookup_evidence(ledger_map, nxt)
@@ -226,12 +227,16 @@ def build_scaffolds(
             else:
                 rdna_3p[r.path[0].name] = r
 
-    gap_by_left: dict[str, SatelliteGapResolution] = {}
+    gap_by_left: dict[tuple[str, str], SatelliteGapResolution] = {}
+    gap_by_left_seg: dict[str, SatelliteGapResolution] = {}
     for g in gap_resolutions:
-        if g.representative_sequence and g.representative_read:
-            q = g.quirk_record
-            left_name = q.left_anchor_port.rstrip("+-") if q.left_anchor_port else g.chrom
-            gap_by_left[left_name] = g
+        q = g.quirk_record
+        if q and q.left_anchor_port:
+            l_name, l_strand = _parse_port_spec(q.left_anchor_port)
+            gap_by_left[(l_name, l_strand.value)] = g
+            gap_by_left_seg[l_name] = g
+        elif g.chrom:
+            gap_by_left_seg[g.chrom] = g
 
     dropout_by_anchor: dict[str, tuple[QuirkRecord, EndStateRecord, str]] = {}
     for qrec, erec, dseq in dropout_resolutions:
@@ -259,40 +264,127 @@ def build_scaffolds(
                 bridge_forward[stem_p] = (gp, next_stem_p)
                 has_incoming_bridge.add(next_stem_p)
 
-    chain_by_seg: dict[str, list[SegmentPort]] = {}
-    bridge_seg_names: set[str] = set()
-    seen_chain_segs: set[str] = set()
+    stem_names = {j.stem_port.rstrip("+-") for j in junctions}
 
-    for start_p in bridge_forward:
-        if start_p not in has_incoming_bridge:
-            if start_p.strand != Strand.FORWARD and any(
-                p.strand == Strand.FORWARD for p in bridge_forward if p not in has_incoming_bridge
-            ):
-                continue
-            chain: list[SegmentPort] = [start_p]
-            curr = start_p
-            visited_stems: set[str] = {start_p.name}
-            while curr in bridge_forward:
-                bridge_p, next_stem = bridge_forward[curr]
-                if next_stem.name in visited_stems:
-                    break
-                chain.append(bridge_p)
-                chain.append(next_stem)
-                bridge_seg_names.add(bridge_p.name)
-                visited_stems.add(next_stem.name)
-                curr = next_stem
-            seg_set = {p.name for p in chain}
-            if seg_set & seen_chain_segs:
-                continue
-            seen_chain_segs.update(seg_set)
-            for p in chain:
-                chain_by_seg[p.name] = chain
+    def _has_telomere(port: SegmentPort) -> bool:
+        ev = ledger_map.get(port.to_symbol())
+        return bool(ev and getattr(ev, "has_terminal_telomere", False))
+
+    def _is_core(name: str) -> bool:
+        return (name in stem_names or _get_usco_count(ledger_map, name) > 0) and not _is_contam_unitig(ledger_map, name)
 
     consumed: set[str] = set()
     for r in rdna_resolutions:
         if len(r.path) > 1:
             for p in r.path[1:]:
                 consumed.add(p.name)
+
+    def _step_forward(curr: SegmentPort, visited_stems: set[str]) -> list[SegmentPort] | None:
+        if curr in bridge_forward:
+            bridge_p, next_stem = bridge_forward[curr]
+            if next_stem.name not in visited_stems:
+                return [bridge_p, next_stem]
+        outgoing = [e.to_port for e in graph.get_outgoing(curr) if not _is_contam_unitig(ledger_map, e.to_port.name)]
+        cand_branches = [
+            p for p in outgoing if not _is_core(p.name) and not _has_telomere(p) and p.name not in visited_stems
+        ]
+        if 0 < len(cand_branches) <= 2 and len(cand_branches) == len(outgoing):
+            if len(cand_branches) == 1:
+                b = cand_branches[0]
+                b_outs = [e.to_port for e in graph.get_outgoing(b) if not _is_contam_unitig(ledger_map, e.to_port.name)]
+                core_outs = [p for p in b_outs if _is_core(p.name) and p.name not in visited_stems]
+                if len(core_outs) == 1:
+                    return [b, core_outs[0]]
+            elif len(cand_branches) == 2:
+                reconv_ports = set()
+                for b in cand_branches:
+                    b_outs = [
+                        e.to_port for e in graph.get_outgoing(b) if not _is_contam_unitig(ledger_map, e.to_port.name)
+                    ]
+                    if len(b_outs) == 1:
+                        reconv_ports.add(b_outs[0])
+                if len(reconv_ports) == 1:
+                    reconv_port = next(iter(reconv_ports))
+                    if (
+                        not _is_core(reconv_port.name)
+                        and not _has_telomere(reconv_port)
+                        and not _is_contam_unitig(ledger_map, reconv_port.name)
+                    ):
+                        reconv_outs = [
+                            e.to_port
+                            for e in graph.get_outgoing(reconv_port)
+                            if not _is_contam_unitig(ledger_map, e.to_port.name)
+                        ]
+                        core_outs = [p for p in reconv_outs if _is_core(p.name) and p.name not in visited_stems]
+                        if len(core_outs) == 1:
+                            best_branch = max(
+                                cand_branches,
+                                key=lambda b: (
+                                    graph.segments[b.name].depth or 0.0,
+                                    graph.segments[b.name].length,
+                                    b.name,
+                                ),
+                            )
+                            for b in cand_branches:
+                                consumed.add(b.name)
+                            consumed.add(reconv_port.name)
+                            return [best_branch, reconv_port, core_outs[0]]
+        return None
+
+    chain_by_seg: dict[str, list[SegmentPort]] = {}
+    bridge_seg_names: set[str] = set()
+    seen_chain_segs: set[str] = set()
+
+    all_stem_ports = sorted(
+        [p for p in bridge_forward if p not in has_incoming_bridge]
+        + [
+            SegmentPort(s, Strand.FORWARD)
+            for s in sorted(graph.segments.keys(), key=lambda s: (-graph.segments[s].length, s))
+            if _is_core(s)
+        ],
+        key=lambda p: (-graph.segments[p.name].length if p.name in graph.segments else 0, p.name),
+    )
+
+    for start_p in all_stem_ports:
+        if start_p.name in seen_chain_segs:
+            continue
+        chain: list[SegmentPort] = [start_p]
+        visited_stems: set[str] = {start_p.name}
+        curr = start_p
+        while True:
+            steps = _step_forward(curr, visited_stems)
+            if not steps:
+                break
+            for p in steps[:-1]:
+                bridge_seg_names.add(p.name)
+            next_stem = steps[-1]
+            visited_stems.add(next_stem.name)
+            chain.extend(steps)
+            curr = next_stem
+
+        # Also walk backward from start_p
+        curr_bwd = start_p.invert()
+        bwd_chain: list[SegmentPort] = []
+        while True:
+            steps = _step_forward(curr_bwd, visited_stems)
+            if not steps:
+                break
+            for p in steps[:-1]:
+                bridge_seg_names.add(p.name)
+            prev_stem_inv = steps[-1]
+            visited_stems.add(prev_stem_inv.name)
+            bwd_chain = [p.invert() for p in reversed(steps)] + bwd_chain
+            curr_bwd = prev_stem_inv
+
+        chain = bwd_chain + chain
+
+        if len(chain) > 1:
+            if chain[0].strand != Strand.FORWARD and any(p.strand == Strand.FORWARD for p in chain):
+                chain = [p.invert() for p in reversed(chain)]
+            seg_set = {p.name for p in chain}
+            seen_chain_segs.update(seg_set)
+            for p in chain:
+                chain_by_seg[p.name] = chain
 
     scaffolds: dict[str, str] = {}
     all_agp: list[AgpRecord] = []
@@ -320,6 +412,39 @@ def build_scaffolds(
         if first_port.name in rdna_5p:
             r = rdna_5p[first_port.name]
             twin_path = [p.invert() for p in reversed(r.path)]
+            if r.capped_via_heuristic and r.distal_cap_port is not None:
+                cap_port = r.distal_cap_port
+                cap_strand = cap_port.invert().strand.to_symbol()
+                cap_seg = graph.segments.get(cap_port.name)
+                cap_seq = (
+                    cap_seg.sequence
+                    if (cap_strand == "+" and cap_seg is not None)
+                    else reverse_complement(cap_seg.sequence if cap_seg is not None else "")
+                )
+                comps.append(
+                    PathComponent(
+                        component_id=cap_port.name,
+                        strand=cap_strand,
+                        sequence=cap_seq,
+                        overlap_to_next=0,
+                        provenance=SequenceProvenance.RDNA_CHAINED,
+                    )
+                )
+                consumed.add(cap_port.name)
+                comps.append(
+                    PathComponent(
+                        component_id="rdna_tangle_gap",
+                        strand="+",
+                        is_gap=True,
+                        gap_length=DEFAULT_AGP_POLICY.unknown_gap_bp.value,
+                        gap_type="repeat",
+                        linkage="yes",
+                        linkage_evidence="rna_tangle",
+                        overlap_to_next=0,
+                        gap_component_type="U",
+                    )
+                )
+
             for i, port in enumerate(twin_path[:-1]):
                 p_seg = graph.segments[port.name]
                 p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
@@ -332,7 +457,7 @@ def build_scaffolds(
                     )
                     else SequenceProvenance.HIFI_CORE
                 )
-                if i == 0:
+                if i == 0 and not (r.capped_via_heuristic and r.distal_cap_port is not None):
                     prov = SequenceProvenance.HIFI_GERMLINE
                 comps.append(
                     PathComponent(
@@ -354,20 +479,42 @@ def build_scaffolds(
                     gp_5p = _parse_port(j_5p.germline_continuation_port)
                     g_chain_5p = _trace_germline_chain(graph, ledger_map, gp_5p, max_hops)
 
-            # 5p ONT satellite gap resolution
-            gres_5p: SatelliteGapResolution | None = None
-            if g_chain_5p and g_chain_5p[-1].name in gap_by_left:
-                gres_5p = gap_by_left[g_chain_5p[-1].name]
-            elif not g_chain_5p and first_port.name in gap_by_left:
-                cand_5p = gap_by_left[first_port.name]
-                if cand_5p.quirk_record.side == "5p":
-                    gres_5p = cand_5p
+            # 5p ONT gap resolution (multi-hop and unpatched satellite gaps)
+            curr_out = g_chain_5p[-1] if g_chain_5p else first_port.invert()
+            gaps_5p: list[SatelliteGapResolution] = []
+            visited_5p_gaps: set[tuple[str, str]] = set()
+            while True:
+                key = (curr_out.name, curr_out.strand.value)
+                if key in visited_5p_gaps:
+                    break
+                gres = gap_by_left.get(key)
+                if gres is None:
+                    cand = gap_by_left_seg.get(curr_out.name)
+                    if cand is not None and cand.quirk_record and cand.quirk_record.side == "5p":
+                        gres = cand
+                if gres is None:
+                    break
+                visited_5p_gaps.add(key)
+                gaps_5p.append(gres)
+                if gres.right_flank_port:
+                    curr_out = gres.right_flank_port
+                elif gres.quirk_record and gres.quirk_record.right_anchor_port:
+                    r_name, r_strand = _parse_port_spec(gres.quirk_record.right_anchor_port)
+                    curr_out = SegmentPort(r_name, r_strand)
+                else:
+                    break
 
-            if gres_5p is not None and gres_5p.representative_sequence and gres_5p.representative_read:
-                qrec = gres_5p.quirk_record
-                r_name = qrec.right_anchor_port.rstrip("+-") if qrec.right_anchor_port else None
+            for gres in reversed(gaps_5p):
+                qrec = gres.quirk_record
+                r_name = (
+                    qrec.right_anchor_port.rstrip("+-")
+                    if (qrec and qrec.right_anchor_port)
+                    else (gres.right_flank_port.name if gres.right_flank_port else None)
+                )
                 r_strand = (
-                    Strand.FORWARD if (qrec.right_anchor_port and "+" in qrec.right_anchor_port) else Strand.REVERSE
+                    Strand.FORWARD
+                    if (qrec and qrec.right_anchor_port and "+" in qrec.right_anchor_port)
+                    else (gres.right_flank_port.strand if gres.right_flank_port else Strand.FORWARD)
                 )
                 r_strand_inv = r_strand.invert()
                 if r_name and r_name in graph.segments:
@@ -385,16 +532,39 @@ def build_scaffolds(
                         )
                     )
                     consumed.add(r_name)
-                comps.append(
-                    PathComponent(
-                        segment_id=gres_5p.representative_read.qname,
-                        strand="-",
-                        sequence=reverse_complement(gres_5p.representative_sequence or ""),
-                        overlap_to_next_bp=0,
-                        sequence_provenance=SequenceProvenance.ONT_DERIVED,
-                        unpolished=True,
+
+                if gres.representative_sequence and gres.representative_read:
+                    comps.append(
+                        PathComponent(
+                            segment_id=gres.representative_read.qname,
+                            strand="-",
+                            sequence=reverse_complement(gres.representative_sequence or ""),
+                            overlap_to_next_bp=0,
+                            sequence_provenance=SequenceProvenance.ONT_DERIVED,
+                            unpolished=True,
+                        )
                     )
-                )
+                else:
+                    gap_len = (
+                        int(round(gres.median_gap_bp))
+                        if gres.median_gap_bp
+                        else DEFAULT_AGP_POLICY.unknown_gap_bp.value
+                    )
+                    gap_type = "repeat" if (qrec and qrec.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE) else "scaffold"
+                    comp_type = "U" if gap_len == DEFAULT_AGP_POLICY.unknown_gap_bp.value else "N"
+                    comps.append(
+                        PathComponent(
+                            component_id=f"gap_{gres.chrom}_{gres.side}_{gres.gap_index}",
+                            strand="+",
+                            is_gap=True,
+                            gap_length=gap_len,
+                            gap_type=gap_type,
+                            linkage="yes",
+                            linkage_evidence="paired-ends",
+                            overlap_to_next=0,
+                            gap_component_type=comp_type,
+                        )
+                    )
 
             prefix_ports = [p.invert() for p in reversed(g_chain_5p)]
             for i, port in enumerate(prefix_ports):
@@ -442,7 +612,11 @@ def build_scaffolds(
                 p_seg = graph.segments[port.name]
                 p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
                 nxt_ov = _find_overlap_len(graph, port, r.path[i + 1]) if i < len(r.path) - 1 else 0
-                prov = SequenceProvenance.HIFI_GERMLINE if i == len(r.path) - 1 else SequenceProvenance.RDNA_CHAINED
+                prov = (
+                    SequenceProvenance.HIFI_GERMLINE
+                    if (i == len(r.path) - 1 and not (r.capped_via_heuristic and r.distal_cap_port is not None))
+                    else SequenceProvenance.RDNA_CHAINED
+                )
                 comps.append(
                     PathComponent(
                         segment_id=port.name,
@@ -453,6 +627,39 @@ def build_scaffolds(
                     )
                 )
                 consumed.add(port.name)
+
+            if r.capped_via_heuristic and r.distal_cap_port is not None:
+                cap_port = r.distal_cap_port
+                cap_seg = graph.segments.get(cap_port.name)
+                cap_strand = cap_port.strand.to_symbol()
+                cap_seq = (
+                    cap_seg.sequence
+                    if (cap_strand == "+" and cap_seg is not None)
+                    else reverse_complement(cap_seg.sequence if cap_seg is not None else "")
+                )
+                comps.append(
+                    PathComponent(
+                        component_id="rdna_tangle_gap",
+                        strand="+",
+                        is_gap=True,
+                        gap_length=DEFAULT_AGP_POLICY.unknown_gap_bp.value,
+                        gap_type="repeat",
+                        linkage="yes",
+                        linkage_evidence="rna_tangle",
+                        overlap_to_next=0,
+                        gap_component_type="U",
+                    )
+                )
+                comps.append(
+                    PathComponent(
+                        component_id=cap_port.name,
+                        strand=cap_strand,
+                        sequence=cap_seq,
+                        overlap_to_next=0,
+                        provenance=SequenceProvenance.HIFI_GERMLINE,
+                    )
+                )
+                consumed.add(cap_port.name)
         elif last_port.name in dropout_by_anchor:
             # Somatic dropout rescue
             dqrec, derec, dseq = dropout_by_anchor[last_port.name]
@@ -510,20 +717,24 @@ def build_scaffolds(
                     consumed.add(gp.name)
 
         # 3p gap resolution
-        cand_left = g_chain_3p[-1].name if g_chain_3p else last_port.name
-        gres = gap_by_left.get(cand_left)
-        if gres is not None and gres.quirk_record.side == "5p":
+        cand_left = g_chain_3p[-1] if g_chain_3p else last_port
+        gres = gap_by_left.get((cand_left.name, cand_left.strand.value))
+        if gres is not None and gres.quirk_record and gres.quirk_record.side == "5p":
             gres = None
-        if gres is None and cand_left != last_port.name:
-            cand_gres = gap_by_left.get(last_port.name)
-            if cand_gres is not None and cand_gres.quirk_record.side != "5p":
+        if gres is None:
+            cand_gres = gap_by_left_seg.get(cand_left.name)
+            if cand_gres is not None and cand_gres.quirk_record and cand_gres.quirk_record.side != "5p":
+                gres = cand_gres
+        if gres is None and cand_left != last_port:
+            cand_gres = gap_by_left.get((last_port.name, last_port.strand.value)) or gap_by_left_seg.get(last_port.name)
+            if cand_gres is not None and cand_gres.quirk_record and cand_gres.quirk_record.side != "5p":
                 gres = cand_gres
         if gres is None and not g_chain_3p:
-            for e in graph.get_outgoing(SegmentPort(seg_name, Strand.FORWARD)):
+            for e in graph.get_outgoing(last_port):
                 target_seg = e.to_port.name
-                if target_seg in gap_by_left:
-                    cand_gres = gap_by_left[target_seg]
-                    if cand_gres.quirk_record.side != "5p":
+                if (target_seg, e.to_port.strand.value) in gap_by_left or target_seg in gap_by_left_seg:
+                    cand_gres = gap_by_left.get((target_seg, e.to_port.strand.value)) or gap_by_left_seg.get(target_seg)
+                    if cand_gres is not None and cand_gres.quirk_record and cand_gres.quirk_record.side != "5p":
                         gres = cand_gres
                         e_ov = parse_dovetail_overlap_len(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
                         comps[-1].overlap_to_next_bp = e_ov
@@ -545,20 +756,48 @@ def build_scaffolds(
                         consumed.add(target_seg)
                         break
 
-        if gres is not None and gres.representative_sequence and gres.representative_read:
+        if gres is not None:
             qrec = gres.quirk_record
-            r_name = qrec.right_anchor_port.rstrip("+-") if qrec.right_anchor_port else None
-            r_strand = Strand.FORWARD if (qrec.right_anchor_port and "+" in qrec.right_anchor_port) else Strand.REVERSE
-            comps.append(
-                PathComponent(
-                    segment_id=gres.representative_read.qname,
-                    strand="+",
-                    sequence=gres.representative_sequence,
-                    overlap_to_next_bp=0,
-                    sequence_provenance=SequenceProvenance.ONT_DERIVED,
-                    unpolished=True,
-                )
+            r_name = (
+                qrec.right_anchor_port.rstrip("+-")
+                if (qrec and qrec.right_anchor_port)
+                else (gres.right_flank_port.name if gres.right_flank_port else None)
             )
+            r_strand = (
+                Strand.FORWARD
+                if (qrec and qrec.right_anchor_port and "+" in qrec.right_anchor_port)
+                else (gres.right_flank_port.strand if gres.right_flank_port else Strand.FORWARD)
+            )
+            if gres.representative_sequence and gres.representative_read:
+                comps.append(
+                    PathComponent(
+                        segment_id=gres.representative_read.qname,
+                        strand="+",
+                        sequence=gres.representative_sequence,
+                        overlap_to_next_bp=0,
+                        sequence_provenance=SequenceProvenance.ONT_DERIVED,
+                        unpolished=True,
+                    )
+                )
+            else:
+                gap_len = (
+                    int(round(gres.median_gap_bp)) if gres.median_gap_bp else DEFAULT_AGP_POLICY.unknown_gap_bp.value
+                )
+                gap_type = "repeat" if (qrec and qrec.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE) else "scaffold"
+                comp_type = "U" if gap_len == DEFAULT_AGP_POLICY.unknown_gap_bp.value else "N"
+                comps.append(
+                    PathComponent(
+                        component_id=f"gap_{gres.chrom}_{gres.side}_{gres.gap_index}",
+                        strand="+",
+                        is_gap=True,
+                        gap_length=gap_len,
+                        gap_type=gap_type,
+                        linkage="yes",
+                        linkage_evidence="paired-ends",
+                        overlap_to_next=0,
+                        gap_component_type=comp_type,
+                    )
+                )
             if r_name and r_name in graph.segments:
                 r_seg = graph.segments[r_name]
                 r_seq = r_seg.sequence if r_strand == Strand.FORWARD else reverse_complement(r_seg.sequence or "")
@@ -573,6 +812,8 @@ def build_scaffolds(
                 )
                 consumed.add(r_name)
 
+        for p in core_path:
+            consumed.add(p.name)
         scaff_id = f"{prefix}{seg_name}" if prefix else seg_name
         seq, agp_recs = assemble_scaffold_sequence(comps, scaffold_id=scaff_id)
         scaffolds[scaff_id] = seq
@@ -630,18 +871,7 @@ def run_finish(args: argparse.Namespace) -> None:
     engine = OntBridgingEngine(graph, ledger_map)
     orphan_caps = engine.identify_orphan_caps()
 
-    reads_dict: dict[str, str] | None = None
     if args.ont_paf is not None:
-        if args.ont_reads is not None:
-            target_ids = engine.collect_spanning_read_ids(args.ont_paf)
-            for er in end_state_records:
-                if er.state == EndState.END_SOMATIC_MISSING and er.somatic_port and er.germline_port:
-                    stem_p = SegmentPort(er.chrom, Strand.FORWARD if er.side == "3p" else Strand.REVERSE)
-                    g_name, g_strand = _parse_port_spec(er.germline_port)
-                    for sr in engine.collect_spanning_reads(args.ont_paf, stem_p, SegmentPort(g_name, g_strand)):
-                        target_ids.add(sr.qname)
-            reads_dict = load_reads_sequences(args.ont_reads, target_qnames=target_ids)
-
         pre_somatic: dict[tuple[str, str], tuple[str | None, float | None]] = {
             (rec.chrom, rec.side): (rec.somatic_port, rec.somatic_depth_ratio) for rec in end_state_records
         }
@@ -650,11 +880,16 @@ def run_finish(args: argparse.Namespace) -> None:
             paf_source=args.ont_paf,
             end_states=end_state_records,
             quirks=quirk_records,
-            reads_sequences=reads_dict,
+            reads_sequences=args.ont_reads,
         )
 
         for rec in end_state_records:
-            if rec.state == EndState.END_SOMATIC_MISSING and rec.somatic_port and rec.germline_port:
+            if (
+                rec.state == EndState.END_SOMATIC_MISSING
+                and rec.somatic_port
+                and rec.germline_port
+                and not engine._has_terminal_telomere(rec.germline_port)
+            ):
                 stem_p = SegmentPort(rec.chrom, Strand.FORWARD if rec.side == "3p" else Strand.REVERSE)
                 g_name, g_strand = _parse_port_spec(rec.germline_port)
                 s_name, s_strand = _parse_port_spec(rec.somatic_port)
@@ -665,7 +900,7 @@ def run_finish(args: argparse.Namespace) -> None:
                     germline_port=SegmentPort(g_name, g_strand),
                     somatic_port=SegmentPort(s_name, s_strand),
                     paf_path=args.ont_paf,
-                    reads_fasta=reads_dict,
+                    reads_fasta=args.ont_reads,
                     core_coverage_bp_median=rec.core_coverage_bp_median,
                     somatic_depth_ratio=rec.somatic_depth_ratio,
                     germline_depth_ratio=rec.germline_depth_ratio,
@@ -707,17 +942,23 @@ def run_finish(args: argparse.Namespace) -> None:
             for p in res.path[1:]:
                 rdna_chained_names.add(p.name)
 
-            new_ends: list[EndStateRecord] = []
-            replaced = False
-            for er in end_state_records:
-                if er.chrom == chrom and er.side == side:
-                    new_ends.append(res.end_state_record)
-                    replaced = True
-                else:
-                    new_ends.append(er)
-            if not replaced:
-                new_ends.append(res.end_state_record)
-            end_state_records = new_ends
+            if res.reached_distal_cap or res.capped_via_heuristic:
+                rec_to_add = res.end_state_record
+                if res.capped_via_heuristic and res.distal_cap_port is not None:
+                    rec_to_add.germline_port = res.distal_cap_port.to_symbol()
+                    rec_to_add.resolved = True
+
+                new_ends: list[EndStateRecord] = []
+                replaced = False
+                for er in end_state_records:
+                    if er.chrom == chrom and er.side == side:
+                        new_ends.append(rec_to_add)
+                        replaced = True
+                    else:
+                        new_ends.append(er)
+                if not replaced:
+                    new_ends.append(rec_to_add)
+                end_state_records = new_ends
 
             new_quirks: list[QuirkRecord] = []
             rep_q = False

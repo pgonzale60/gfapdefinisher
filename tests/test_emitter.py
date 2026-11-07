@@ -15,13 +15,18 @@ from pathlib import Path
 import pytest
 
 from gfapdefinisher.emitter import (
+    AgpGapRow,
     AgpRecord,
+    FastaAgpEmitter,
     PathComponent,
+    ScaffoldPlan,
+    ScaffoldStep,
     SequenceProvenance,
     assemble_path_sequence,
     assemble_scaffold_sequence,
     emit_agp,
     emit_fasta,
+    emit_scaffold,
     parse_agp,
 )
 from gfapdefinisher.models import SegmentPort, Strand
@@ -589,3 +594,64 @@ def test_resolver_satellite_gap_and_dropout_populate_ont_provenance_and_unpolish
     assert drop_quirk.sequence_provenance == "ONT-derived"
     assert drop_quirk.unpolished is True
     assert rep_seq is not None
+
+
+def test_fasta_agp_emitter_unknown_gap_rdna_tangle():
+    """Verify ScaffoldStep with is_unknown_gap=True emits 100 'N's in FASTA and U 100 repeat yes rna_tangle in AGP."""
+    emitter = FastaAgpEmitter()
+    step = ScaffoldStep(
+        segment_id="",
+        strand=Strand.FORWARD,
+        provenance=SequenceProvenance.RDNA_CHAINED,
+        is_unknown_gap=True,
+    )
+    plan = ScaffoldPlan(scaffold_id="chrII", steps=[step])
+    seq, agp_rows = emitter.emit_scaffold(plan)
+
+    assert seq == "N" * 100
+    assert len(agp_rows) == 1
+
+    row = agp_rows[0]
+    assert isinstance(row, AgpGapRow)
+    assert row.object_id == "chrII"
+    assert row.object_beg == 1
+    assert row.object_end == 100
+    assert row.part_number == 1
+    assert row.component_type == "U"
+    assert row.gap_length == 100
+    assert row.gap_type == "repeat"
+    assert row.linkage == "yes"
+    assert row.linkage_evidence == "rna_tangle"
+
+    line = row.to_line()
+    assert line == "chrII\t1\t100\t1\tU\t100\trepeat\tyes\trna_tangle"
+
+    # Verify convenience function emit_scaffold
+    conv_seq, conv_rows = emit_scaffold(plan)
+    assert conv_seq == "N" * 100
+    assert len(conv_rows) == 1
+
+    buf_fa = StringIO()
+    buf_agp = StringIO()
+    emitter.emit_scaffold(plan, fasta_output=buf_fa, agp_output=buf_agp)
+    assert buf_fa.getvalue() == ">chrII\n" + ("N" * 100) + "\n"
+    assert "chrII\t1\t100\t1\tU\t100\trepeat\tyes\trna_tangle\n" in buf_agp.getvalue()
+
+    # Multi-step plan with flanking unitigs
+    hifi_step = ScaffoldStep(
+        segment_id="stem_01",
+        strand="+",
+        sequence="A" * 500,
+        provenance=SequenceProvenance.HIFI_CORE,
+    )
+    cap_step = ScaffoldStep(
+        segment_id="cap_01",
+        strand="+",
+        sequence="T" * 300,
+        provenance=SequenceProvenance.RDNA_CHAINED,
+    )
+    full_plan = ScaffoldPlan(scaffold_id="chrII", steps=[hifi_step, step, cap_step])
+    full_seq, full_rows = emitter.emit_scaffold(full_plan)
+    assert full_seq == ("A" * 500) + ("N" * 100) + ("T" * 300)
+    assert len(full_rows) == 3
+    assert full_rows[1].to_line() == "chrII\t501\t600\t2\tU\t100\trepeat\tyes\trna_tangle"
