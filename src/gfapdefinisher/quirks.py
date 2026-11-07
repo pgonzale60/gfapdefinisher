@@ -30,22 +30,29 @@ from gfapdefinisher.policy import DEFAULT_POLICY, Policy
 __all__ = [
     "END_STATE_TSV_COLUMNS",
     "JUNCTION_TSV_COLUMNS",
+    "QUIRK_COLUMNS",
     "QUIRK_TSV_COLUMNS",
+    "RESOLUTION_COLUMNS",
+    "RESOLUTION_TSV_COLUMNS",
     "EndState",
     "EndStateRecord",
     "IntervalQuirk",
     "JunctionClass",
     "JunctionRecord",
     "QuirkRecord",
+    "ResolutionRecord",
+    "ResolutionType",
     "build_feature_id",
     "collect_features",
     "create_junction_record",
     "emit_end_states_tsv",
     "emit_junctions_tsv",
     "emit_quirks_tsv",
+    "emit_resolutions_tsv",
     "parse_end_states_tsv",
     "parse_junctions_tsv",
     "parse_quirks_tsv",
+    "parse_resolutions_tsv",
 ]
 
 
@@ -85,6 +92,12 @@ class IntervalQuirk(str, Enum):
     LOW_SUPPORT_STUB = "low_support_stub"
     BUBBLE_REJOINING = "bubble_rejoining"
     ITR = "itr"
+    SUBTELOMERIC_DUP = "subtelomeric_dup"
+    INTERCALARY_ELIMINATION_CANDIDATE = "intercalary_elimination_candidate"
+    SOMATIC_ALLELIC_BUBBLE = "somatic_allelic_bubble"
+    INTERCALARY_GRS_BRIDGE = "intercalary_grs_bridge"
+    PDE_TERMINAL_CAP = "pde_terminal_cap"
+    SUBTELOMERIC_SATELLITE_CAP = "subtelomeric_satellite_cap"
 
     # Lowercase aliases
     sat_gap_variable = "sat_gap_variable"
@@ -94,6 +107,12 @@ class IntervalQuirk(str, Enum):
     low_support_stub = "low_support_stub"
     bubble_rejoining = "bubble_rejoining"
     itr = "itr"
+    subtelomeric_dup = "subtelomeric_dup"
+    intercalary_elimination_candidate = "intercalary_elimination_candidate"
+    somatic_allelic_bubble = "somatic_allelic_bubble"
+    intercalary_grs_bridge = "intercalary_grs_bridge"
+    pde_terminal_cap = "pde_terminal_cap"
+    subtelomeric_satellite_cap = "subtelomeric_satellite_cap"
 
 
 def build_feature_id(
@@ -302,6 +321,9 @@ class QuirkRecord:
     sequence_provenance: str | None = None
     unpolished: bool = False
     notes: str = ""
+    agp_start: int | None = None
+    agp_end: int | None = None
+    excluded_unitig_ids: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not self.chrom:
@@ -312,6 +334,8 @@ class QuirkRecord:
             self.quirk_type = IntervalQuirk(self.quirk_type)
         if not isinstance(self.unitig_ids, tuple):
             self.unitig_ids = tuple(self.unitig_ids)
+        if not isinstance(self.excluded_unitig_ids, tuple):
+            self.excluded_unitig_ids = tuple(self.excluded_unitig_ids)
         if (
             self.length_min_bp is not None
             and self.length_max_bp is not None
@@ -320,12 +344,15 @@ class QuirkRecord:
             raise ValueError(
                 f"length_min_bp ({self.length_min_bp}) cannot exceed length_max_bp ({self.length_max_bp})."
             )
+        if self.agp_start is not None and self.agp_end is not None and self.agp_start > self.agp_end:
+            raise ValueError(f"agp_start ({self.agp_start}) cannot exceed agp_end ({self.agp_end}).")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize record to dictionary with string enum representations."""
         d = asdict(self)
         d["quirk_type"] = self.quirk_type.value
         d["unitig_ids"] = list(self.unitig_ids)
+        d["excluded_unitig_ids"] = list(self.excluded_unitig_ids)
         return d
 
     def to_tsv_row(self) -> list[str]:
@@ -354,6 +381,9 @@ class QuirkRecord:
             self.sequence_provenance or "",
             str(self.unpolished),
             self.notes,
+            str(self.agp_start) if self.agp_start is not None else "",
+            str(self.agp_end) if self.agp_end is not None else "",
+            ",".join(self.excluded_unitig_ids),
         ]
 
 
@@ -381,28 +411,66 @@ QUIRK_TSV_COLUMNS: list[str] = [
     "sequence_provenance",
     "unpolished",
     "notes",
+    "agp_start",
+    "agp_end",
+    "excluded_unitig_ids",
 ]
 
+QUIRK_COLUMNS: list[str] = QUIRK_TSV_COLUMNS
+RESOLUTION_COLUMNS: list[str] = QUIRK_COLUMNS
+RESOLUTION_TSV_COLUMNS: list[str] = QUIRK_TSV_COLUMNS
 
-def emit_quirks_tsv(records: Iterable[QuirkRecord], out_file: TextIO | Path | str) -> None:
-    """Emit a list or iterable of QuirkRecords as a standardized TSV file.
+ResolutionType = IntervalQuirk
+ResolutionRecord = QuirkRecord
+
+
+def _clean_tsv_stream(stream: Iterable[str]) -> list[str]:
+    """Filter comment and blank lines, normalizing commented headers."""
+    cleaned: list[str] = []
+    for line in stream:
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#") and "\t" in s and s.lstrip("#").strip().startswith("feature_id"):
+            cleaned.append(s.lstrip("#").strip() + "\n")
+            continue
+        if s.startswith("#"):
+            continue
+        cleaned.append(line)
+    return cleaned
+
+
+def emit_quirks_tsv(
+    records: Iterable[QuirkRecord],
+    out_file: TextIO | Path | str | None = None,
+) -> str:
+    """Emit a list or iterable of QuirkRecords as a standardized TSV string (and optional file).
 
     Args:
         records: Iterable of QuirkRecord objects.
-        out_file: Destination file path or open text file object.
+        out_file: Optional destination file path or open text file object.
+
+    Returns:
+        Formatted TSV content as a string.
     """
+    buffer = StringIO()
+    writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
+    writer.writerow(QUIRK_TSV_COLUMNS)
+    for rec in records:
+        writer.writerow(rec.to_tsv_row())
+    content = buffer.getvalue()
 
-    def _write_records(writer: Any) -> None:
-        csv_w = csv.writer(writer, delimiter="\t", lineterminator="\n")
-        csv_w.writerow(QUIRK_TSV_COLUMNS)
-        for rec in records:
-            csv_w.writerow(rec.to_tsv_row())
+    if out_file is not None:
+        if isinstance(out_file, str | Path):
+            with open(out_file, "w", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            out_file.write(content)
 
-    if isinstance(out_file, str | Path):
-        with open(out_file, "w", encoding="utf-8") as f:
-            _write_records(f)
-    else:
-        _write_records(out_file)
+    return content
+
+
+emit_resolutions_tsv = emit_quirks_tsv
 
 
 def _to_int_or_none(row: dict[str, str], key: str) -> int | None:
@@ -416,10 +484,10 @@ def _to_float_or_none(row: dict[str, str], key: str) -> float | None:
 
 
 def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
-    """Parse a standardized quirks.tsv file into a list of QuirkRecord objects.
+    """Parse a standardized quirks or resolutions TSV content string, stream, or file into a list of QuirkRecord objects.
 
     Args:
-        file: Input file path or open text stream.
+        file: Input file path, open text stream, or TSV content string.
 
     Returns:
         List of deserialized QuirkRecord instances.
@@ -428,8 +496,15 @@ def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
     def _parse_rows(reader: csv.DictReader[str]) -> list[QuirkRecord]:
         records: list[QuirkRecord] = []
         for row in reader:
+            if not row:
+                continue
+            fid = row.get("feature_id")
+            if not fid or fid.startswith("#"):
+                continue
             utg_str = row.get("unitig_ids", "")
             unitig_ids = tuple(x.strip() for x in utg_str.split(",") if x.strip())
+            excl_utg_str = row.get("excluded_unitig_ids", "")
+            excluded_unitig_ids = tuple(x.strip() for x in excl_utg_str.split(",") if x.strip())
             rep_sel_raw = row.get("representative_sequence_selected", "").lower()
             rep_sel = rep_sel_raw in ("true", "1")
             seq_prov = row.get("sequence_provenance", "").strip() or None
@@ -438,10 +513,10 @@ def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
 
             records.append(
                 QuirkRecord(
-                    feature_id=row["feature_id"],
-                    chrom=row["chrom"],
-                    side=row["side"],
-                    quirk_type=IntervalQuirk(row["quirk_type"]),
+                    feature_id=fid.strip(),
+                    chrom=row["chrom"].strip(),
+                    side=row["side"].strip(),
+                    quirk_type=IntervalQuirk(row["quirk_type"].strip()),
                     spanning_read_count=_to_int_or_none(row, "spanning_read_count"),
                     length_min_bp=_to_int_or_none(row, "length_min_bp"),
                     length_median_bp=_to_int_or_none(row, "length_median_bp"),
@@ -461,16 +536,31 @@ def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
                     sequence_provenance=seq_prov,
                     unpolished=unpolished,
                     notes=row.get("notes", ""),
+                    agp_start=_to_int_or_none(row, "agp_start"),
+                    agp_end=_to_int_or_none(row, "agp_end"),
+                    excluded_unitig_ids=excluded_unitig_ids,
                 )
             )
         return records
 
-    if isinstance(file, str | Path):
+    if isinstance(file, Path):
         with open(file, encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter="\t")
-            return _parse_rows(reader)
-    reader = csv.DictReader(file, delimiter="\t")
-    return _parse_rows(reader)
+            return _parse_rows(csv.DictReader(_clean_tsv_stream(f), delimiter="\t"))
+    if isinstance(file, str):
+        if "\n" not in file and "\t" not in file:
+            stripped = file.strip()
+            if not stripped:
+                return []
+            p = Path(file)
+            if p.suffix in (".tsv", ".txt", ".tab") or "/" in file or "\\" in file or p.is_file():
+                with open(p, encoding="utf-8") as f:
+                    return _parse_rows(csv.DictReader(_clean_tsv_stream(f), delimiter="\t"))
+            return _parse_rows(csv.DictReader(StringIO(file), delimiter="\t"))
+        return _parse_rows(csv.DictReader(_clean_tsv_stream(StringIO(file)), delimiter="\t"))
+    return _parse_rows(csv.DictReader(_clean_tsv_stream(file), delimiter="\t"))
+
+
+parse_resolutions_tsv = parse_quirks_tsv
 
 
 END_STATE_TSV_COLUMNS: list[str] = [
@@ -532,22 +622,6 @@ def emit_end_states_tsv(
             out_file.write(content)
 
     return content
-
-
-def _clean_tsv_stream(stream: Iterable[str]) -> list[str]:
-    """Filter comment and blank lines, normalizing commented headers."""
-    cleaned: list[str] = []
-    for line in stream:
-        s = line.strip()
-        if not s:
-            continue
-        if s.startswith("#") and "\t" in s and s.lstrip("#").strip().startswith("feature_id"):
-            cleaned.append(s.lstrip("#").strip() + "\n")
-            continue
-        if s.startswith("#"):
-            continue
-        cleaned.append(line)
-    return cleaned
 
 
 def parse_end_states_tsv(tsv_content: str | Path | TextIO) -> list[EndStateRecord]:
