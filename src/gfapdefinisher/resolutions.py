@@ -931,10 +931,8 @@ def _reaches_germline_telomere_cap(
         return 0
 
     ev_start = _lookup_evidence(ledger_by_port, start_port)
-    if ev_start is not None and ev_start.has_terminal_telomere:
-        deg = graph.degree(start_port) if start_port.name in graph.segments else ev_start.degree
-        if deg == 0:
-            return [start_port]
+    if ev_start is not None and getattr(ev_start, "has_terminal_telomere", False):
+        return [start_port]
 
     if start_port.name not in graph.segments:
         return None
@@ -960,8 +958,7 @@ def _reaches_germline_telomere_cap(
                 continue
 
             nxt_ev = _lookup_evidence(ledger_by_port, nxt)
-            nxt_deg = graph.degree(nxt) if nxt.name in graph.segments else (nxt_ev.degree if nxt_ev else 0)
-            if nxt_ev is not None and nxt_ev.has_terminal_telomere and nxt_deg == 0:
+            if nxt_ev is not None and getattr(nxt_ev, "has_terminal_telomere", False):
                 return [*path, nxt]
 
             visited.add(nxt)
