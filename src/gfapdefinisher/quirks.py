@@ -10,14 +10,22 @@ Ratified in Issue #26.
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from io import StringIO
 from pathlib import Path
 from typing import Any, TextIO
 
-from gfapdefinisher.classifier import PdeJunctionCall
+from gfapdefinisher.classifier import (
+    PdeJunctionCall,
+    _lookup_evidence,
+    classify_pde_junction,
+)
+from gfapdefinisher.graph import BidirectedGraph
+from gfapdefinisher.ledger import EndEvidence
+from gfapdefinisher.models import SegmentPort, Strand
+from gfapdefinisher.policy import DEFAULT_POLICY, Policy
 
 __all__ = [
     "END_STATE_TSV_COLUMNS",
@@ -30,6 +38,7 @@ __all__ = [
     "JunctionRecord",
     "QuirkRecord",
     "build_feature_id",
+    "collect_features",
     "create_junction_record",
     "emit_end_states_tsv",
     "emit_junctions_tsv",
@@ -741,3 +750,197 @@ def create_junction_record(
         confidence_tier=confidence_tier,
         notes=final_notes,
     )
+
+
+def collect_features(
+    graph: BidirectedGraph,
+    ledger: Sequence[EndEvidence] | Mapping[Any, EndEvidence],
+    core_coverage: float,
+    policy: Policy = DEFAULT_POLICY,
+) -> tuple[list[JunctionRecord], list[EndStateRecord], list[QuirkRecord]]:
+    """Aggregate Layer 1 EndStates, Layer 2 Junctions, and Layer 3 Quirks from graph evidence."""
+    ledger_list: list[EndEvidence]
+    ledger_by_port: dict[Any, EndEvidence] = {}
+    if isinstance(ledger, Sequence) and not isinstance(ledger, Mapping):
+        ledger_list = list(ledger)
+        for ev in ledger_list:
+            ledger_by_port[ev.port] = ev
+            ledger_by_port[ev.port.to_symbol()] = ev
+            ledger_by_port[f"{ev.segment_name}:{ev.end}"] = ev
+    else:
+        ledger_by_port = dict(ledger)
+        ledger_list = [ev for ev in ledger.values() if isinstance(ev, EndEvidence)]
+
+    ledger_list.sort(key=lambda e: (e.segment_name, e.end))
+
+    junction_records: list[JunctionRecord] = []
+    end_state_records: list[EndStateRecord] = []
+    quirk_records: list[QuirkRecord] = []
+
+    accounted_ports: set[str] = set()
+
+    # Step 1: Detect PDE junctions across all candidate ports
+    for ev in ledger_list:
+        pde_call = classify_pde_junction(
+            ev.port,
+            graph,
+            ledger_by_port,
+            policy=policy,
+            core_coverage=core_coverage,
+        )
+        if pde_call.is_pde_junction:
+            j_class = JunctionClass.PDE_TERMINAL if pde_call.somatic_port is not None else JunctionClass.PDE_INTERCALARY
+            j_rec = create_junction_record(
+                call=pde_call,
+                chrom=ev.segment_name,
+                side=ev.end,
+                junction_class=j_class,
+            )
+            junction_records.append(j_rec)
+
+            accounted_ports.add(ev.port.to_symbol())
+            if pde_call.somatic_port:
+                accounted_ports.add(pde_call.somatic_port.to_symbol())
+            if pde_call.germline_port:
+                accounted_ports.add(pde_call.germline_port.to_symbol())
+
+            som_capped = (not pde_call.is_somatic_dropout) and (pde_call.somatic_port is not None)
+            germ_ev = _lookup_evidence(ledger_by_port, pde_call.germline_port) if pde_call.germline_port else None
+            germ_capped = (
+                pde_call.germline_port is not None
+                and germ_ev is not None
+                and germ_ev.has_terminal_telomere
+                and (
+                    graph.degree(pde_call.germline_port) == 0
+                    if pde_call.germline_port.name in graph.segments
+                    else germ_ev.is_tip
+                )
+            )
+
+            if som_capped and germ_capped:
+                state = EndState.END_COMPLETE
+                resolved = True
+            elif som_capped and not germ_capped:
+                state = EndState.END_GERMLINE_ORPHAN
+                resolved = False
+            elif not som_capped and germ_capped:
+                state = EndState.END_SOMATIC_MISSING
+                resolved = False
+            else:
+                state = EndState.END_GERMLINE_ORPHAN
+                resolved = False
+
+            fid = build_feature_id(state, ev.segment_name, ev.end)
+            som_sym = pde_call.somatic_port.to_symbol() if pde_call.somatic_port else None
+            germ_sym = pde_call.germline_port.to_symbol() if pde_call.germline_port else None
+
+            som_seg = graph.segments.get(pde_call.somatic_port.name) if pde_call.somatic_port else None
+            som_depth = som_seg.depth if som_seg is not None else None
+            som_ratio = (som_depth / core_coverage) if (som_depth is not None and core_coverage > 0) else None
+            germ_ratio = (
+                pde_call.core_depth_ratio
+                if pde_call.core_depth_ratio > 0
+                else (pde_call.depth_ratio if pde_call.depth_ratio > 0 else None)
+            )
+
+            end_rec = EndStateRecord(
+                feature_id=fid,
+                chrom=ev.segment_name,
+                side=ev.end,
+                state=state,
+                somatic_port=som_sym,
+                germline_port=germ_sym,
+                core_coverage_bp_median=core_coverage,
+                somatic_depth_ratio=som_ratio,
+                germline_depth_ratio=germ_ratio,
+                resolved=resolved,
+                notes=f"PDE junction at {ev.port.to_symbol()}",
+            )
+            end_state_records.append(end_rec)
+
+            if not germ_capped:
+                q_fid = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, ev.segment_name, ev.end, index=1)
+                q_rec = QuirkRecord(
+                    feature_id=q_fid,
+                    chrom=ev.segment_name,
+                    side=ev.end,
+                    quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+                    left_anchor_port=germ_sym or ev.port.to_symbol(),
+                    agp_component_type="U",
+                    agp_linkage_evidence="unbridged",
+                    unitig_ids=(ev.segment_name,),
+                    core_coverage_bp_median=core_coverage,
+                    representative_sequence_selected=False,
+                    notes="Unbridged variable satellite gap",
+                )
+                quirk_records.append(q_rec)
+
+    # Step 2: Evaluate remaining ports for capped ends, orphan caps, and tips
+    for ev in ledger_list:
+        sym = ev.port.to_symbol()
+        if sym in accounted_ports:
+            continue
+
+        deg = graph.degree(ev.port) if ev.port.name in graph.segments else ev.degree
+        if deg == 0 and ev.has_terminal_telomere:
+            other_strand = Strand.FORWARD if ev.port.strand == Strand.MINUS else Strand.MINUS
+            other_port = SegmentPort(ev.segment_name, other_strand)
+            other_deg = graph.degree(other_port) if ev.segment_name in graph.segments else 0
+            other_ev = _lookup_evidence(ledger_by_port, other_port)
+
+            if other_deg == 0 and (other_ev is None or not other_ev.has_terminal_telomere):
+                # Orphan cap: inward end is open, telomere end is capped
+                pass
+            else:
+                if ev.rdna_hit_count > 0 or ev.has_terminal_rdna:
+                    state = EndState.END_SHARED_EXEMPT
+                    q_fid = build_feature_id(IntervalQuirk.RDNA_CASSETTE, ev.segment_name, ev.end, index=1)
+                    quirk_records.append(
+                        QuirkRecord(
+                            feature_id=q_fid,
+                            chrom=ev.segment_name,
+                            side=ev.end,
+                            quirk_type=IntervalQuirk.RDNA_CASSETTE,
+                            left_anchor_port=ev.port.to_symbol(),
+                            agp_component_type="W",
+                            agp_linkage_evidence="graph",
+                            unitig_ids=(ev.segment_name,),
+                            notes="rDNA cluster at chromosome terminus",
+                        )
+                    )
+                else:
+                    state = EndState.END_COMPLETE
+
+                fid = build_feature_id(state, ev.segment_name, ev.end)
+                end_state_records.append(
+                    EndStateRecord(
+                        feature_id=fid,
+                        chrom=ev.segment_name,
+                        side=ev.end,
+                        state=state,
+                        shared_port=ev.port.to_symbol(),
+                        core_coverage_bp_median=core_coverage,
+                        resolved=True,
+                        notes="Terminal telomeric cap",
+                    )
+                )
+        elif deg == 0 and not ev.has_terminal_telomere:
+            state = EndState.END_GERMLINE_ORPHAN
+            fid = build_feature_id(state, ev.segment_name, ev.end)
+            end_state_records.append(
+                EndStateRecord(
+                    feature_id=fid,
+                    chrom=ev.segment_name,
+                    side=ev.end,
+                    state=state,
+                    germline_port=ev.port.to_symbol(),
+                    core_coverage_bp_median=core_coverage,
+                    resolved=False,
+                    notes="Uncapped terminal tip",
+                )
+            )
+
+    junction_records.sort(key=lambda r: r.feature_id)
+    end_state_records.sort(key=lambda r: r.feature_id)
+    quirk_records.sort(key=lambda r: r.feature_id)
+    return junction_records, end_state_records, quirk_records

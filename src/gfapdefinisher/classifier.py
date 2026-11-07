@@ -14,6 +14,7 @@ and biological specifications BIO-001 through BIO-006:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -200,7 +201,7 @@ class _CoverageRecord:
 
 def compute_core_coverage(
     graph: BidirectedGraph,
-    ledger: dict[str, EndEvidence] | dict[Any, EndEvidence],
+    ledger: dict[str, EndEvidence] | dict[Any, EndEvidence] | Sequence[EndEvidence],
 ) -> float:
     """Calculate length-weighted median depth across nuclear chromosomal unitigs.
 
@@ -215,8 +216,19 @@ def compute_core_coverage(
     Returns:
         Length-weighted median depth as a float, or 0.0 if no eligible segments exist.
     """
+    ledger_by_port: dict[Any, EndEvidence] | dict[str, EndEvidence]
+    if isinstance(ledger, Sequence) and not isinstance(ledger, Mapping):
+        ledger_map: dict[Any, EndEvidence] = {}
+        for ev in ledger:
+            ledger_map[ev.port] = ev
+            ledger_map[ev.port.to_symbol()] = ev
+            ledger_map[f"{ev.segment_name}:{ev.end}"] = ev
+        ledger_by_port = ledger_map
+    else:
+        ledger_by_port = ledger
+
     seg_names: set[str] = set(graph.segments.keys())
-    for ev in ledger.values():
+    for ev in ledger_by_port.values():
         if isinstance(ev, EndEvidence) and ev.segment_name:
             seg_names.add(ev.segment_name)
 
@@ -224,8 +236,8 @@ def compute_core_coverage(
 
     for name in sorted(seg_names):
         seg = graph.segments.get(name)
-        ev_plus = _lookup_evidence(ledger, SegmentPort(name, Strand.FORWARD))
-        ev_minus = _lookup_evidence(ledger, SegmentPort(name, Strand.REVERSE))
+        ev_plus = _lookup_evidence(ledger_by_port, SegmentPort(name, Strand.FORWARD))
+        ev_minus = _lookup_evidence(ledger_by_port, SegmentPort(name, Strand.REVERSE))
 
         evs = [ev for ev in (ev_plus, ev_minus) if ev is not None]
 
@@ -352,7 +364,7 @@ def classify_port(
 def classify_pde_junction(
     port: SegmentPort | str,
     graph: BidirectedGraph,
-    ledger_by_port: dict[str, EndEvidence] | dict[Any, EndEvidence],
+    ledger_by_port: dict[str, EndEvidence] | dict[Any, EndEvidence] | Sequence[EndEvidence],
     policy: Policy = DEFAULT_POLICY,
     core_coverage: float | None = None,
 ) -> PdeJunctionCall:
@@ -379,6 +391,14 @@ def classify_pde_junction(
     Returns:
         PdeJunctionCall with somatic_port and germline_port references when identified.
     """
+    if isinstance(ledger_by_port, Sequence) and not isinstance(ledger_by_port, Mapping):
+        ledger_map: dict[Any, EndEvidence] = {}
+        for ev in ledger_by_port:
+            ledger_map[ev.port] = ev
+            ledger_map[ev.port.to_symbol()] = ev
+            ledger_map[f"{ev.segment_name}:{ev.end}"] = ev
+        ledger_by_port = ledger_map
+
     resolved_stem = _resolve_port(port)
 
     # Stem qualification 1: Stem must bifurcate or form a complex branch (deg >= 2)
