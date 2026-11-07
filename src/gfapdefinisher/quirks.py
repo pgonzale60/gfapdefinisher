@@ -299,6 +299,8 @@ class QuirkRecord:
     core_coverage_bp_median: float | None = None
     core_depth_ratio: float | None = None
     representative_sequence_selected: bool = False
+    sequence_provenance: str | None = None
+    unpolished: bool = False
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -349,6 +351,8 @@ class QuirkRecord:
             str(self.core_coverage_bp_median) if self.core_coverage_bp_median is not None else "",
             str(self.core_depth_ratio) if self.core_depth_ratio is not None else "",
             str(self.representative_sequence_selected),
+            self.sequence_provenance or "",
+            str(self.unpolished),
             self.notes,
         ]
 
@@ -374,6 +378,8 @@ QUIRK_TSV_COLUMNS: list[str] = [
     "core_coverage_bp_median",
     "core_depth_ratio",
     "representative_sequence_selected",
+    "sequence_provenance",
+    "unpolished",
     "notes",
 ]
 
@@ -426,6 +432,9 @@ def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
             unitig_ids = tuple(x.strip() for x in utg_str.split(",") if x.strip())
             rep_sel_raw = row.get("representative_sequence_selected", "").lower()
             rep_sel = rep_sel_raw in ("true", "1")
+            seq_prov = row.get("sequence_provenance", "").strip() or None
+            unpol_raw = row.get("unpolished", "").strip().lower()
+            unpolished = unpol_raw in ("true", "1")
 
             records.append(
                 QuirkRecord(
@@ -449,6 +458,8 @@ def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
                     core_coverage_bp_median=_to_float_or_none(row, "core_coverage_bp_median"),
                     core_depth_ratio=_to_float_or_none(row, "core_depth_ratio"),
                     representative_sequence_selected=rep_sel,
+                    sequence_provenance=seq_prov,
+                    unpolished=unpolished,
                     notes=row.get("notes", ""),
                 )
             )

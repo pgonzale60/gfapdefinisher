@@ -1,0 +1,390 @@
+"""Sequence and AGP assembly emitter with empirical provenance tracking.
+
+Stitches unitig paths, rDNA cassettes, and bridged gaps into finished FASTA
+and AGP v2.1 outputs with empirical provenance metadata and unpolished sequence flags.
+Implements BIO-004 (repeat preservation) and BIO-005 (lossless overlap trimming).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import TextIO
+
+from gfapdefinisher.models import Strand
+
+__all__ = [
+    "AgpRecord",
+    "PathComponent",
+    "SequenceProvenance",
+    "assemble_path_sequence",
+    "assemble_scaffold_sequence",
+    "emit_agp",
+    "emit_fasta",
+    "parse_agp",
+]
+
+
+class SequenceProvenance(str, Enum):
+    """Empirical sequence provenance and risk categorization for assembled components."""
+
+    HIFI_CORE = "HiFi-core"
+    HIFI_GERMLINE = "HiFi-germline"
+    HIFI_1X = "HiFi-1x"
+    ONT_DERIVED = "ONT-derived"
+    RDNA_CHAINED = "rDNA-chained"
+
+    # Lowercase aliases
+    hifi_core = "HiFi-core"
+    hifi_germline = "HiFi-germline"
+    hifi_1x = "HiFi-1x"
+    ont_derived = "ONT-derived"
+    rdna_chained = "rDNA-chained"
+
+
+@dataclass(slots=True)
+class PathComponent:
+    """Component of an assembled scaffold path.
+
+    Attributes:
+        segment_id: Assembly graph unitig or read identifier.
+        strand: Orientation along scaffold ('+' or '-').
+        sequence: Oriented nucleotide sequence of this component.
+        overlap_to_next_bp: Exact dovetail overlap length to next component in bp.
+        sequence_provenance: Empirical provenance category.
+        unpolished: Whether sequence is unpolished raw long-read data.
+    """
+
+    segment_id: str
+    strand: Strand | str
+    sequence: str
+    overlap_to_next_bp: int = 0
+    sequence_provenance: SequenceProvenance = SequenceProvenance.HIFI_CORE
+    unpolished: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.segment_id:
+            raise ValueError("segment_id cannot be empty.")
+        if isinstance(self.strand, Strand):
+            object.__setattr__(self, "strand", self.strand.value)
+        elif self.strand not in ("+", "-"):
+            raise ValueError(f"Invalid strand: {self.strand!r}. Must be '+' or '-'.")
+        if self.overlap_to_next_bp < 0:
+            raise ValueError(f"overlap_to_next_bp cannot be negative: {self.overlap_to_next_bp}")
+        if self.overlap_to_next_bp > len(self.sequence):
+            raise ValueError(
+                f"overlap_to_next_bp ({self.overlap_to_next_bp}) cannot exceed sequence length ({len(self.sequence)})."
+            )
+        if isinstance(self.sequence_provenance, str) and not isinstance(self.sequence_provenance, SequenceProvenance):
+            object.__setattr__(self, "sequence_provenance", SequenceProvenance(self.sequence_provenance))
+
+    @property
+    def is_unpolished(self) -> bool:
+        """Alias for unpolished flag."""
+        return self.unpolished
+
+
+@dataclass(slots=True)
+class AgpRecord:
+    """AGP v2.1 component record with empirical provenance metadata.
+
+    Attributes:
+        object_id: Scaffold or chromosome object identifier.
+        object_beg: 1-based start coordinate in the object.
+        object_end: 1-based end coordinate in the object.
+        part_number: 1-based order of this component in the object.
+        component_type: AGP component type (e.g. 'W' for sequence, 'N' or 'U' for gap).
+        component_id: Component identifier or gap length.
+        component_beg: 1-based start coordinate on component, or gap type.
+        component_end: 1-based end coordinate on component, or linkage.
+        orientation: Orientation ('+', '-') or linkage evidence.
+        sequence_provenance: Empirical provenance category.
+        unpolished: Whether component sequence is unpolished.
+        comment: Optional auxiliary comment text.
+    """
+
+    object_id: str
+    object_beg: int
+    object_end: int
+    part_number: int
+    component_type: str
+    component_id: str
+    component_beg: int | str
+    component_end: int | str
+    orientation: str
+    sequence_provenance: SequenceProvenance | str | None = None
+    unpolished: bool = False
+    comment: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.object_id:
+            raise ValueError("object_id cannot be empty.")
+        if self.object_beg < 1:
+            raise ValueError(f"object_beg must be >= 1, got {self.object_beg}")
+        if self.object_end < self.object_beg:
+            raise ValueError(f"object_end ({self.object_end}) cannot be less than object_beg ({self.object_beg})")
+        if self.part_number < 1:
+            raise ValueError(f"part_number must be >= 1, got {self.part_number}")
+        if isinstance(self.sequence_provenance, str) and not isinstance(self.sequence_provenance, SequenceProvenance):
+            try:
+                object.__setattr__(self, "sequence_provenance", SequenceProvenance(self.sequence_provenance))
+            except ValueError:
+                pass
+
+    @property
+    def is_unpolished(self) -> bool:
+        """Alias for unpolished flag."""
+        return self.unpolished
+
+    def to_tsv_row(self) -> list[str]:
+        """Serialize AGP record to ordered list of column strings."""
+        row = [
+            self.object_id,
+            str(self.object_beg),
+            str(self.object_end),
+            str(self.part_number),
+            self.component_type,
+            str(self.component_id),
+            str(self.component_beg),
+            str(self.component_end),
+            self.orientation,
+        ]
+        if self.sequence_provenance is not None:
+            prov_str = (
+                self.sequence_provenance.value
+                if isinstance(self.sequence_provenance, Enum)
+                else str(self.sequence_provenance)
+            )
+            tag = f"# provenance={prov_str};unpolished={self.unpolished}"
+            if self.comment:
+                tag = f"{tag}; {self.comment}"
+            row.append(tag)
+        elif self.comment:
+            row.append(f"# {self.comment}")
+        return row
+
+    def to_line(self) -> str:
+        """Format as a tab-delimited AGP v2.1 row with optional provenance comment."""
+        return "\t".join(self.to_tsv_row())
+
+
+def assemble_scaffold_sequence(
+    components: Sequence[PathComponent],
+    scaffold_id: str = "scaffold",
+) -> tuple[str, list[AgpRecord]]:
+    """Assemble oriented path components into a stitched scaffold sequence and AGP records.
+
+    Stitches oriented component sequences while trimming exact dovetail overlaps
+    between adjacent components according to overlap_to_next_bp (BIO-005).
+
+    Args:
+        components: Sequence of PathComponent objects along the scaffold path.
+        scaffold_id: Identifier for the assembled scaffold/chromosome object.
+
+    Returns:
+        Tuple of (assembled_nucleotide_sequence, list_of_agp_records).
+    """
+    if not components:
+        return "", []
+
+    current_scaffold_pos = 1
+    part_number = 1
+    chunks: list[str] = []
+    records: list[AgpRecord] = []
+    prev_overlap = 0
+
+    for comp in components:
+        strand_str = comp.strand if isinstance(comp.strand, str) else comp.strand.value
+        seq_len = len(comp.sequence)
+        prefix_trim = prev_overlap
+
+        if prefix_trim >= seq_len:
+            raise ValueError(
+                f"Overlap {prefix_trim} bp exceeds or equals component sequence length {seq_len} bp for {comp.segment_id}"
+            )
+
+        trimmed_seq = comp.sequence[prefix_trim:]
+        chunk_len = len(trimmed_seq)
+        chunks.append(trimmed_seq)
+
+        obj_beg = current_scaffold_pos
+        obj_end = current_scaffold_pos + chunk_len - 1
+        current_scaffold_pos = obj_end + 1
+
+        if strand_str == "+":
+            comp_beg = 1 + prefix_trim
+            comp_end = seq_len
+        else:
+            comp_beg = 1
+            comp_end = seq_len - prefix_trim
+
+        rec = AgpRecord(
+            object_id=scaffold_id,
+            object_beg=obj_beg,
+            object_end=obj_end,
+            part_number=part_number,
+            component_type="W",
+            component_id=comp.segment_id,
+            component_beg=comp_beg,
+            component_end=comp_end,
+            orientation=strand_str,
+            sequence_provenance=comp.sequence_provenance,
+            unpolished=comp.unpolished,
+        )
+        records.append(rec)
+        part_number += 1
+        prev_overlap = comp.overlap_to_next_bp
+
+    assembled_seq = "".join(chunks)
+    return assembled_seq, records
+
+
+# Semantic alias
+assemble_path_sequence = assemble_scaffold_sequence
+
+
+def emit_fasta(
+    scaffolds: Mapping[str, str],
+    output: Path | TextIO | str,
+    line_width: int | None = None,
+) -> None:
+    """Emit scaffold sequences to a FASTA format destination.
+
+    Args:
+        scaffolds: Mapping from scaffold/chromosome identifier to sequence.
+        output: Destination file path or open text stream.
+        line_width: Optional line wrap width (None for unwrapped).
+    """
+
+    def _write(writer: TextIO) -> None:
+        for scaffold_id, seq in scaffolds.items():
+            writer.write(f">{scaffold_id}\n")
+            if line_width is not None and line_width > 0:
+                for pos in range(0, len(seq), line_width):
+                    writer.write(f"{seq[pos : pos + line_width]}\n")
+            else:
+                writer.write(f"{seq}\n")
+
+    if isinstance(output, str | Path):
+        with open(output, "w", encoding="utf-8") as f:
+            _write(f)
+    else:
+        _write(output)
+
+
+def emit_agp(
+    records: Sequence[AgpRecord],
+    output: Path | TextIO | str,
+) -> None:
+    """Emit AGP v2.1 records with empirical provenance metadata tags.
+
+    Args:
+        records: Sequence of AgpRecord objects.
+        output: Destination file path or open text stream.
+    """
+
+    def _write(writer: TextIO) -> None:
+        writer.write("##agp-version 2.1\n")
+        for rec in records:
+            writer.write(rec.to_line() + "\n")
+
+    if isinstance(output, str | Path):
+        with open(output, "w", encoding="utf-8") as f:
+            _write(f)
+    else:
+        _write(output)
+
+
+def parse_agp(file: Path | TextIO | str) -> list[AgpRecord]:
+    """Parse an AGP v2.1 file or stream containing provenance metadata tags.
+
+    Args:
+        file: Destination file path, open text stream, or AGP string content.
+
+    Returns:
+        List of deserialized AgpRecord objects.
+    """
+
+    def _parse(stream: Iterable[str]) -> list[AgpRecord]:
+        records: list[AgpRecord] = []
+        for raw_line in stream:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            comment_str: str | None = None
+            prov: SequenceProvenance | None = None
+            unpolished = False
+
+            if "#" in line:
+                data_part, comment_part = line.split("#", 1)
+                data_tokens = [t.strip() for t in data_part.split("\t") if t.strip()]
+                c_text = comment_part.strip()
+                for chunk in c_text.split(";"):
+                    chunk = chunk.strip()
+                    if chunk.startswith("provenance="):
+                        prov_val = chunk.split("=", 1)[1].strip()
+                        prov = SequenceProvenance(prov_val)
+                    elif chunk.startswith("unpolished="):
+                        unpol_val = chunk.split("=", 1)[1].strip().lower()
+                        unpolished = unpol_val in ("true", "1")
+                    elif chunk:
+                        comment_str = chunk if comment_str is None else f"{comment_str}; {chunk}"
+            else:
+                data_tokens = [t.strip() for t in line.split("\t") if t.strip()]
+
+            (
+                obj_id,
+                obj_beg_s,
+                obj_end_s,
+                part_no_s,
+                comp_type,
+                comp_id,
+                comp_beg_s,
+                comp_end_s,
+                orientation,
+                *_,
+            ) = data_tokens
+
+            comp_beg: int | str
+            comp_end: int | str
+            try:
+                comp_beg = int(comp_beg_s)
+            except ValueError:
+                comp_beg = comp_beg_s
+            try:
+                comp_end = int(comp_end_s)
+            except ValueError:
+                comp_end = comp_end_s
+
+            records.append(
+                AgpRecord(
+                    object_id=obj_id,
+                    object_beg=int(obj_beg_s),
+                    object_end=int(obj_end_s),
+                    part_number=int(part_no_s),
+                    component_type=comp_type,
+                    component_id=comp_id,
+                    component_beg=comp_beg,
+                    component_end=comp_end,
+                    orientation=orientation,
+                    sequence_provenance=prov,
+                    unpolished=unpolished,
+                    comment=comment_str,
+                )
+            )
+        return records
+
+    if isinstance(file, Path):
+        with open(file, encoding="utf-8") as f:
+            return _parse(f)
+    if isinstance(file, str):
+        if "\n" not in file and "\t" not in file:
+            p = Path(file)
+            if p.is_file():
+                with open(p, encoding="utf-8") as f:
+                    return _parse(f)
+        return _parse(file.splitlines())
+    return _parse(file)
