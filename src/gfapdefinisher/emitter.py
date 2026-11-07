@@ -7,6 +7,7 @@ Implements BIO-004 (repeat preservation) and BIO-005 (lossless overlap trimming)
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -30,6 +31,7 @@ __all__ = [
     "assemble_path_sequence",
     "assemble_scaffold_sequence",
     "emit_agp",
+    "emit_excluded_fasta",
     "emit_fasta",
     "emit_scaffold",
     "parse_agp",
@@ -686,6 +688,64 @@ def emit_fasta(
             _write(f)
     else:
         _write(output)
+
+
+def emit_excluded_fasta(
+    graph: Any,
+    resolutions: Sequence[Any],
+    output: Path | TextIO | str,
+    line_width: int | None = None,
+) -> int:
+    """Emit all unitigs excluded from scaffolds via excluded_unitig_ids to FASTA format.
+
+    Headers include provenance tracking:
+    >{unitig_id} excluded_by={resolution_feature_ids} length={length}
+
+    Args:
+        graph: Populated assembly graph containing segment sequences.
+        resolutions: Sequence of ResolutionRecord objects.
+        output: Destination file path or open text stream.
+        line_width: Optional line wrap width (None for unwrapped).
+
+    Returns:
+        Number of distinct excluded unitigs written.
+    """
+    excluded_by: dict[str, list[str]] = defaultdict(list)
+    for rec in resolutions:
+        rec_fid = getattr(rec, "feature_id", str(rec))
+        for uid in getattr(rec, "excluded_unitig_ids", ()):
+            excluded_by[uid].append(rec_fid)
+
+    sorted_uids = sorted(excluded_by.keys())
+
+    def _write(writer: TextIO) -> None:
+        for uid in sorted_uids:
+            seq = ""
+            if hasattr(graph, "get_sequence"):
+                seq = graph.get_sequence(uid) or ""
+            if not seq and hasattr(graph, "segments") and uid in graph.segments:
+                seq = graph.segments[uid].sequence or ""
+            seq_len = (
+                len(seq)
+                if seq
+                else (graph.segments[uid].length if hasattr(graph, "segments") and uid in graph.segments else 0)
+            )
+            excl_str = ",".join(dict.fromkeys(excluded_by[uid]))
+            header = f">{uid} excluded_by={excl_str} length={seq_len}"
+            writer.write(f"{header}\n")
+            if line_width is not None and line_width > 0:
+                for pos in range(0, len(seq), line_width):
+                    writer.write(f"{seq[pos : pos + line_width]}\n")
+            else:
+                writer.write(f"{seq}\n")
+
+    if isinstance(output, str | Path):
+        with open(output, "w", encoding="utf-8") as f:
+            _write(f)
+    else:
+        _write(output)
+
+    return len(sorted_uids)
 
 
 def emit_agp(

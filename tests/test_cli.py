@@ -9,6 +9,7 @@ from pyfaidx import Fasta
 
 from gfapdefinisher.cli import main
 from gfapdefinisher.emitter import SequenceProvenance, parse_agp
+from gfapdefinisher.graph import load_gfa
 from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.resolutions import (
     EndState,
@@ -164,7 +165,7 @@ def test_finish_subcommand_synthetic_and_non_empty_tsvs(tmp_path: Path):
 
     res_recs = parse_resolutions_tsv(resolutions_file)
     assert len(res_recs) >= 1
-    assert any(q.resolution_type == ResolutionType.SAT_GAP_VARIABLE for q in res_recs)
+    assert any(q.resolution_type == ResolutionType.PDE_TERMINAL_CAP for q in res_recs)
 
 
 def test_finish_subcommand_with_ont_paf_bridging(tmp_path: Path):
@@ -354,12 +355,15 @@ def test_finish_subcommand_emits_fasta_and_agp_by_default(tmp_path: Path):
 
     fasta_content = fasta_file.read_text(encoding="utf-8")
     assert ">chr_stem" in fasta_content
-    assert ">chr_som" in fasta_content
+    assert ">chr_som" not in fasta_content
+    assert (out_dir / "excluded.fasta").is_file()
+    assert ">chr_som" in (out_dir / "excluded.fasta").read_text(encoding="utf-8")
 
     agp_content = agp_file.read_text(encoding="utf-8")
     assert agp_content.startswith("##agp-version 2.1\n")
     assert "chr_stem" in agp_content
-    assert "chr_som" in agp_content
+    assert "chr_grs" in agp_content
+    assert "chr_som" not in agp_content
 
 
 def test_finish_subcommand_custom_fasta_and_agp_options(tmp_path: Path):
@@ -392,10 +396,14 @@ def test_finish_subcommand_custom_fasta_and_agp_options(tmp_path: Path):
 
     fa_text = custom_fa.read_text(encoding="utf-8")
     assert ">TEST_chr_stem" in fa_text
-    assert ">TEST_chr_som" in fa_text
+    assert ">TEST_chr_som" not in fa_text
+    assert (out_dir / "excluded.fasta").is_file()
+    assert ">chr_som" in (out_dir / "excluded.fasta").read_text(encoding="utf-8")
 
     agp_text = custom_agp.read_text(encoding="utf-8")
     assert "TEST_chr_stem" in agp_text
+    assert "chr_grs" in agp_text
+    assert "chr_som" not in agp_text
 
 
 def test_finish_subcommand_rdna_cassette_wiring(tmp_path: Path):
@@ -969,3 +977,154 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     # Verify no non-contaminant 45S rDNA unitigs float in scaffolds.fasta
     for rdna_u in ["utg000098l", "utg000053l", "utg000020l", "utg000082l"]:
         assert rdna_u not in fasta
+
+
+def test_excluded_fasta_emission_and_conservation_law(tmp_path: Path):
+    """Verify excluded.fasta emission, header format, sorting, and 100% unitig conservation law."""
+    isolates = {
+        "DF5120": {
+            "gfa": Path("data/benchmark/DF5120/asm.p_utg.gfa.gz"),
+            "tidk": Path("data/benchmark/DF5120/tidk_telomeres_telomeric_repeat_windows.tsv"),
+            "barrnap": Path("data/benchmark/DF5120/barrnap_rdna.gff"),
+            "compleasm": Path("data/benchmark/DF5120/compleasm_unitigs_full_table.tsv"),
+            "tiara": Path("data/benchmark/DF5120/tiara_unitigs.txt"),
+        },
+        "JU1382": {
+            "gfa": Path("data/benchmark/JU1382/asm.p_utg.gfa.gz"),
+            "tidk": Path("data/benchmark/JU1382/tidk_telomeres_telomeric_repeat_windows.tsv"),
+            "barrnap": Path("data/benchmark/JU1382/barrnap_rdna.gff"),
+            "compleasm": Path("data/benchmark/JU1382/compleasm_unitigs_full_table.tsv"),
+            "tiara": Path("data/benchmark/JU1382/tiara_unitigs.txt"),
+        },
+        "PS1017": {
+            "gfa": Path("data/benchmark/PS1017/asm.p_utg.gfa.gz"),
+            "tidk": Path("data/benchmark/PS1017/tidk_telomeres_telomeric_repeat_windows.tsv"),
+            "barrnap": Path("data/benchmark/PS1017/barrnap_rdna.gff"),
+            "compleasm": Path("data/benchmark/PS1017/compleasm_unitigs_full_table.tsv"),
+            "tiara": Path("data/benchmark/PS1017/tiara_unitigs.txt"),
+        },
+        "PS2068": {
+            "gfa": Path("data/benchmark/PS2068/asm.p_utg.gfa.gz"),
+            "tidk": Path("data/benchmark/PS2068/tidk_telomeres_telomeric_repeat_windows.tsv"),
+            "barrnap": Path("data/benchmark/PS2068/barrnap_rdna.gff"),
+            "compleasm": Path("data/benchmark/PS2068/compleasm_unitigs_full_table.tsv"),
+            "tiara": Path("data/benchmark/PS2068/tiara_unitigs.txt"),
+        },
+    }
+
+    for name, p in isolates.items():
+        if not all(fp.exists() for fp in p.values()):
+            continue
+
+        out_dir = tmp_path / f"test_finish_{name}"
+        custom_excl = tmp_path / f"custom_excluded_{name}.fasta"
+
+        # Test with custom --excluded-fasta
+        rc = main(
+            [
+                "finish",
+                "--gfa",
+                str(p["gfa"]),
+                "--tidk",
+                str(p["tidk"]),
+                "--barrnap",
+                str(p["barrnap"]),
+                "--compleasm",
+                str(p["compleasm"]),
+                "--tiara",
+                str(p["tiara"]),
+                "--out-dir",
+                str(out_dir),
+                "--excluded-fasta",
+                str(custom_excl),
+            ]
+        )
+        assert rc == 0
+        assert custom_excl.exists()
+        assert (out_dir / "scaffolds.agp").exists()
+        assert (out_dir / "resolutions.tsv").exists()
+
+        # Parse GFA segments
+        graph = load_gfa(p["gfa"])
+        all_gfa_unitigs = set(graph.segments.keys())
+
+        # Parse AGP placed unitigs (W components matching GFA segment names)
+        agp_lines = (out_dir / "scaffolds.agp").read_text().splitlines()
+        placed_unitigs = set()
+        for line in agp_lines:
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 6 and parts[4] == "W":
+                comp_id = parts[5]
+                if comp_id in all_gfa_unitigs:
+                    placed_unitigs.add(comp_id)
+
+        # Parse excluded.fasta
+        excl_fasta = Fasta(str(custom_excl))
+        excl_unitigs = set(excl_fasta.keys())
+
+        # 100% unitig conservation law
+        assert placed_unitigs | excl_unitigs == all_gfa_unitigs, (
+            f"Missing unitigs in {name}: {all_gfa_unitigs - (placed_unitigs | excl_unitigs)}"
+        )
+        assert placed_unitigs & excl_unitigs == set(), f"Overlapping unitigs in {name}: {placed_unitigs & excl_unitigs}"
+
+        # Check deterministic sorted order
+        excl_keys = list(excl_fasta.keys())
+        assert excl_keys == sorted(excl_keys, key=lambda uid: uid)
+
+        # Check header format
+        excl_lines = custom_excl.read_text().splitlines()
+        header_lines = [line_str for line_str in excl_lines if line_str.startswith(">")]
+        for h in header_lines:
+            # Format: >{uid} excluded_by={feat_ids} length={length}
+            parts = h[1:].split()
+            assert len(parts) == 3
+            uid = parts[0]
+            assert uid in all_gfa_unitigs
+            assert parts[1].startswith("excluded_by=")
+            assert len(parts[1][len("excluded_by=") :]) > 0
+            assert parts[2].startswith("length=")
+            expected_len = graph.segments[uid].length
+            assert int(parts[2][len("length=") :]) == expected_len
+
+        # Specific metadata checks for PS1017
+        if name == "PS1017":
+            resolutions = parse_resolutions_tsv(out_dir / "resolutions.tsv")
+            # Verify no redundant sat_gap_variable for utg000032l:5p
+            pde_32 = [r for r in resolutions if r.chrom == "utg000032l" and r.side == "5p"]
+            assert len(pde_32) == 1
+            assert pde_32[0].resolution_type == ResolutionType.PDE_TERMINAL_CAP
+            assert pde_32[0].unitig_ids == ("utg000076l",)
+            assert pde_32[0].excluded_unitig_ids == ("utg000186l",)
+
+            # Verify utg000052l terminal cap places utg000049l
+            pde_52 = [r for r in resolutions if r.chrom == "utg000052l" and r.side == "5p"]
+            assert len(pde_52) == 1
+            assert pde_52[0].unitig_ids == ("utg000049l",)
+            assert pde_52[0].right_anchor_port == "utg000049l-"
+            assert pde_52[0].excluded_unitig_ids == ("utg000146l",)
+
+            # Verify utg000061l terminal cap places multi-unitig continuation utg000070l,utg000126l from agp_start 1
+            pde_61 = [r for r in resolutions if r.chrom == "utg000061l" and r.side == "5p"]
+            assert len(pde_61) == 1
+            assert pde_61[0].unitig_ids == ("utg000070l", "utg000126l")
+            assert pde_61[0].agp_start == 1
+            assert pde_61[0].agp_end == 128490
+            assert pde_61[0].right_anchor_port == "utg000070l-"
+            assert pde_61[0].excluded_unitig_ids == ("utg000196l",)
+
+            # Verify all terminal PDE junctions are PDE_TERMINAL_CAP and exclude somatic stubs
+            pde_caps = [r for r in resolutions if r.resolution_type == ResolutionType.PDE_TERMINAL_CAP]
+            assert len(pde_caps) == 13
+            for pcap in pde_caps:
+                assert len(pcap.excluded_unitig_ids) >= 1
+                assert pcap.left_anchor_port is not None and len(pcap.left_anchor_port) > 0
+                assert pcap.right_anchor_port is not None and len(pcap.right_anchor_port) > 0
+                stem_seg = pcap.left_anchor_port.rstrip("+-")
+                assert stem_seg not in pcap.unitig_ids
+
+            # Verify sat_gap_variable is only emitted when bridged (0 without ONT PAF)
+            sat_vars = [r for r in resolutions if r.resolution_type == ResolutionType.SAT_GAP_VARIABLE]
+            assert len(sat_vars) == 0

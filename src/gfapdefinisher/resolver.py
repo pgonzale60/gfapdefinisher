@@ -619,6 +619,33 @@ class OntBridgingEngine:
                 if hasattr(er, "segment_id"):
                     resolved_end_keys.add((er.segment_id, er.side))
 
+        telo_capped_ends = {
+            (qr.chrom, qr.side)
+            for qr in quirks
+            if qr.resolution_type == ResolutionType.PDE_TERMINAL_CAP
+            and qr.right_anchor_port
+            and self._has_terminal_telomere(qr.right_anchor_port)
+        } | {
+            (qr.left_anchor_port.rstrip("+-"), qr.side)
+            for qr in quirks
+            if qr.resolution_type == ResolutionType.PDE_TERMINAL_CAP
+            and qr.left_anchor_port
+            and qr.right_anchor_port
+            and self._has_terminal_telomere(qr.right_anchor_port)
+        }
+        resolved_end_keys.update(telo_capped_ends)
+        quirks = [
+            q
+            for q in quirks
+            if not (
+                q.resolution_type == ResolutionType.SAT_GAP_VARIABLE
+                and (
+                    (q.chrom, q.side) in telo_capped_ends
+                    or (q.left_anchor_port and (q.left_anchor_port.rstrip("+-"), q.side) in telo_capped_ends)
+                )
+            )
+        ]
+
         hits_by_read: dict[str, list[PafHit]] = defaultdict(list)
         source_iterable: Iterable[str | PafHit]
         if isinstance(paf_source, str | Path | TextIO):
@@ -1462,7 +1489,6 @@ class OntBridgingEngine:
 
         left_str = left_port.to_symbol() if hasattr(left_port, "to_symbol") else str(left_port)
         right_str = right_port.to_symbol() if hasattr(right_port, "to_symbol") else str(right_port)
-        left_name = getattr(left_port, "name", str(left_port))
         right_name = getattr(right_port, "name", str(right_port))
 
         actual_somatic_port = left_str
@@ -1542,7 +1568,7 @@ class OntBridgingEngine:
                 right_anchor_port=right_str,
                 agp_component_type="W",
                 agp_linkage_evidence="ont-spanning",
-                unitig_ids=(left_name, right_name),
+                unitig_ids=(right_name, best_read.qname) if rep_seq is not None else (right_name,),
                 read_count=len(reads_list),
                 core_coverage_bp_median=core_coverage_bp_median,
                 core_depth_ratio=core_depth_ratio,
@@ -1610,7 +1636,7 @@ class OntBridgingEngine:
             right_anchor_port=right_str,
             agp_component_type="U",
             agp_linkage_evidence="unbridged",
-            unitig_ids=(left_name, right_name),
+            unitig_ids=(right_name,) if right_name else (),
             read_count=len(reads_list),
             core_coverage_bp_median=core_coverage_bp_median,
             core_depth_ratio=core_depth_ratio,

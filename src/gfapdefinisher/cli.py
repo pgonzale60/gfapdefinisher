@@ -19,6 +19,7 @@ from gfapdefinisher.emitter import (
     SequenceProvenance,
     assemble_scaffold_sequence,
     emit_agp,
+    emit_excluded_fasta,
     emit_fasta,
 )
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
@@ -120,6 +121,14 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         dest="emit_agp",
         help="Optional path to emit AGP v2.1 records (default: <out_dir>/scaffolds.agp)",
+    )
+    finish_parser.add_argument(
+        "--excluded-fasta",
+        nargs="?",
+        const=True,
+        default=None,
+        dest="excluded_fasta",
+        help="Optional path to emit excluded unitigs FASTA (default: <out_dir>/excluded.fasta)",
     )
     finish_parser.add_argument(
         "--resolutions",
@@ -343,22 +352,37 @@ def build_scaffolds(
                     active_resolutions.append(bridge_rec)
 
     if active_resolutions is not None:
+        existing_pde_caps: dict[tuple[str, str], ResolutionRecord] = {}
+        for rec in active_resolutions:
+            if rec.resolution_type == ResolutionType.PDE_TERMINAL_CAP:
+                if rec.left_anchor_port:
+                    existing_pde_caps[(rec.left_anchor_port.rstrip("+-"), rec.side)] = rec
+                existing_pde_caps[(rec.chrom, rec.side)] = rec
+
         for j in junctions:
+            if not j.germline_continuation_port:
+                continue
+            gp = _parse_port(j.germline_continuation_port)
+            if gp.invert().to_symbol() in junctions_by_germ:
+                continue
+            cap_path = _trace_germline_chain(graph, ledger_map, gp, max_hops)
+            has_telo = bool(cap_path and _has_telomere(cap_path[-1]))
+            target_ports = cap_path if has_telo else [gp]
+            som_excl = (j.somatic_terminus_port.rstrip("+-"),) if j.somatic_terminus_port else ()
+
             j_key = (j.chrom, j.side)
             stem_key = (j.stem_port.rstrip("+-"), j.side)
-            if j_key not in seen_pde_stems and stem_key not in seen_pde_stems and j.germline_continuation_port:
-                gp = _parse_port(j.germline_continuation_port)
-                if gp.invert().to_symbol() in junctions_by_germ:
-                    continue
-                cap_path = _trace_germline_chain(graph, ledger_map, gp, max_hops)
-                has_telo = bool(cap_path and _has_telomere(cap_path[-1]))
-                is_gap_resolved = bool(gp.name in gap_by_left_seg or (gp.name, gp.strand.value) in gap_by_left)
-                if not (has_telo or is_gap_resolved):
-                    continue
+            ex_rec = existing_pde_caps.get(j_key) or existing_pde_caps.get(stem_key)
+
+            if ex_rec is not None:
+                # Update existing record with the full multi-hop chain
+                ex_rec.unitig_ids = tuple(p.name for p in target_ports)
+                ex_rec.right_anchor_port = target_ports[-1].to_symbol()
+                if som_excl and not ex_rec.excluded_unitig_ids:
+                    ex_rec.excluded_unitig_ids = som_excl
+            elif j_key not in seen_pde_stems and stem_key not in seen_pde_stems:
                 seen_pde_stems.add(j_key)
                 seen_pde_stems.add(stem_key)
-                target_ports = cap_path if has_telo else [gp]
-                som_excl = (j.somatic_terminus_port.rstrip("+-"),) if j.somatic_terminus_port else ()
                 j_fid = build_feature_id(ResolutionType.PDE_TERMINAL_CAP, j.chrom, j.side, index=1)
                 j_rec = ResolutionRecord(
                     feature_id=j_fid,
@@ -375,12 +399,14 @@ def build_scaffolds(
                         f"{' -> '.join(p.to_symbol() for p in target_ports)} to telomeric cap "
                         f"{target_ports[-1].to_symbol()}; dismissed somatic sister stub "
                         f"{j.somatic_terminus_port or ''}"
-                        if has_telo and target_ports[-1] != gp
+                        if has_telo and len(target_ports) > 1
                         else f"Resolved terminal PDE junction via germline continuation {gp.to_symbol()}; "
                         f"dismissed somatic sister stub {j.somatic_terminus_port or ''}"
                     ),
                 )
                 active_resolutions.append(j_rec)
+                existing_pde_caps[j_key] = j_rec
+                existing_pde_caps[stem_key] = j_rec
 
     consumed: set[str] = set()
     if active_resolutions is not None:
@@ -1245,30 +1271,82 @@ def build_scaffolds(
                 component_spans[(scaf_id, c_id)].append((beg, end))
 
         retained: list[ResolutionRecord] = []
-        for rec in active_resolutions:
+        for rec in list(active_resolutions):
+            if (
+                rec.resolution_type == ResolutionType.SAT_GAP_VARIABLE
+                and rec.agp_linkage_evidence == "unbridged"
+                and (rec.read_count is None or rec.read_count == 0)
+                and rec.spanning_read_count is None
+            ):
+                continue
             target_scaf: str | None = None
+            if rec.left_anchor_port:
+                l_u = rec.left_anchor_port.rstrip("+-")
+                if l_u in component_to_scaf:
+                    target_scaf = component_to_scaf[l_u]
+            if target_scaf is None and rec.chrom in scaffolds:
+                target_scaf = rec.chrom
+
             spans: list[tuple[int, int]] = []
+            placed_uids: list[str] = []
 
-            for u in rec.unitig_ids:
-                if u in component_to_scaf:
-                    s_id = component_to_scaf[u]
-                    if target_scaf is None:
+            if rec.resolution_type == ResolutionType.PDE_TERMINAL_CAP and target_scaf is not None:
+                scaf_comps = [r for r in all_agp if r.object_id == target_scaf and r.component_type == "W"]
+                stem_u = rec.left_anchor_port.rstrip("+-") if rec.left_anchor_port else rec.chrom
+                comp_ids = [c.component_id for c in scaf_comps]
+                if stem_u in comp_ids:
+                    stem_idx = comp_ids.index(stem_u)
+                    if rec.side == "5p" and stem_idx > 0:
+                        distal_comps = scaf_comps[:stem_idx]
+                        if any(c.component_id in rec.unitig_ids for c in distal_comps):
+                            distal_ids = {c.component_id for c in distal_comps}
+                            # Preserve chain order from rec.unitig_ids where available, prepend any new distal unitigs
+                            new_distal = [c.component_id for c in distal_comps if c.component_id not in rec.unitig_ids]
+                            existing_kept = [u for u in rec.unitig_ids if u in distal_ids]
+                            placed_uids = new_distal + existing_kept
+                            spans = [(c.object_beg, c.object_end) for c in distal_comps]
+                            rec.unitig_ids = tuple(placed_uids)
+                            if (
+                                new_distal
+                                or not rec.right_anchor_port
+                                or rec.right_anchor_port.rstrip("+-") not in distal_ids
+                            ):
+                                rec.right_anchor_port = f"{distal_comps[0].component_id}-"
+                    elif rec.side == "3p" and stem_idx < len(scaf_comps) - 1:
+                        distal_comps = scaf_comps[stem_idx + 1 :]
+                        if any(c.component_id in rec.unitig_ids for c in distal_comps):
+                            distal_ids = {c.component_id for c in distal_comps}
+                            existing_kept = [u for u in rec.unitig_ids if u in distal_ids]
+                            new_distal = [c.component_id for c in distal_comps if c.component_id not in rec.unitig_ids]
+                            placed_uids = existing_kept + new_distal
+                            spans = [(c.object_beg, c.object_end) for c in distal_comps]
+                            rec.unitig_ids = tuple(placed_uids)
+                            if (
+                                new_distal
+                                or not rec.right_anchor_port
+                                or rec.right_anchor_port.rstrip("+-") not in distal_ids
+                            ):
+                                rec.right_anchor_port = f"{distal_comps[-1].component_id}{distal_comps[-1].orientation}"
+
+            if not spans:
+                for u in rec.unitig_ids:
+                    if (target_scaf, u) in component_spans:
+                        spans.extend(component_spans[(target_scaf, u)])
+                        placed_uids.append(u)
+                    elif target_scaf is None and u in component_to_scaf:
+                        s_id = component_to_scaf[u]
                         target_scaf = s_id
-                    if s_id == target_scaf:
                         spans.extend(component_spans[(s_id, u)])
+                        placed_uids.append(u)
 
-            if target_scaf is None:
-                if rec.left_anchor_port:
-                    l_u = rec.left_anchor_port.rstrip("+-")
-                    if l_u in component_to_scaf:
-                        target_scaf = component_to_scaf[l_u]
-                if target_scaf is None and rec.right_anchor_port:
-                    r_u = rec.right_anchor_port.rstrip("+-")
-                    if r_u in component_to_scaf:
-                        target_scaf = component_to_scaf[r_u]
+            if target_scaf is None and rec.right_anchor_port:
+                r_u = rec.right_anchor_port.rstrip("+-")
+                if r_u in component_to_scaf:
+                    target_scaf = component_to_scaf[r_u]
 
             if target_scaf is not None and spans:
                 rec.chrom = target_scaf
+                rec.unitig_ids = tuple(placed_uids)
                 rec.agp_start = min(s[0] for s in spans)
                 rec.agp_end = max(s[1] for s in spans)
                 scaf_len = len(scaffolds[target_scaf]) if target_scaf in scaffolds else None
@@ -1277,6 +1355,12 @@ def build_scaffolds(
                         rec.side = "3p"
                     elif rec.agp_start == 1 and rec.agp_end < scaf_len:
                         rec.side = "5p"
+                    rec.feature_id = build_feature_id(
+                        rec.resolution_type,
+                        rec.left_anchor_port.rstrip("+-") if rec.left_anchor_port else rec.chrom,
+                        rec.side,
+                        index=1,
+                    )
                 if rec.resolution_type == ResolutionType.INTERCALARY_GRS_BRIDGE:
                     if rec.left_anchor_port and rec.right_anchor_port:
                         l_u = rec.left_anchor_port.rstrip("+-")
@@ -1294,7 +1378,17 @@ def build_scaffolds(
                                     rec.resolution_type, rec.left_anchor_port.rstrip("+-"), rec.side, index=1
                                 )
                 retained.append(rec)
-            elif target_scaf is not None and not spans:
+            elif target_scaf is not None and not spans and rec.resolution_type != ResolutionType.SAT_GAP_VARIABLE:
+                other_scafs = {
+                    u: component_to_scaf[u]
+                    for u in rec.unitig_ids
+                    if u in component_to_scaf and component_to_scaf[u] != target_scaf and component_to_scaf[u] != u
+                }
+                filtered_uids = tuple(u for u in rec.unitig_ids if u not in other_scafs)
+                if filtered_uids and filtered_uids != rec.unitig_ids:
+                    rec.unitig_ids = filtered_uids
+                    if rec.right_anchor_port and rec.right_anchor_port.rstrip("+-") not in filtered_uids:
+                        rec.right_anchor_port = f"{filtered_uids[-1]}-"
                 anchor_spans: list[tuple[int, int]] = []
                 if rec.left_anchor_port:
                     l_u = rec.left_anchor_port.rstrip("+-")
@@ -1312,8 +1406,14 @@ def build_scaffolds(
                     if scaf_len is not None and rec.side in ("5p", "3p"):
                         if rec.agp_end == scaf_len and rec.agp_start > 1:
                             rec.side = "3p"
-                        elif rec.agp_start == 1 and rec.agp_end < scaf_len:
+                        elif rec.agp_start == 1:
                             rec.side = "5p"
+                        rec.feature_id = build_feature_id(
+                            rec.resolution_type,
+                            rec.left_anchor_port.rstrip("+-") if rec.left_anchor_port else rec.chrom,
+                            rec.side,
+                            index=1,
+                        )
                     retained.append(rec)
 
         active_resolutions.clear()
@@ -1509,6 +1609,14 @@ def run_finish(args: argparse.Namespace) -> None:
 
     emit_fasta(scaffolds, fasta_target)
     emit_agp(agp_records, agp_target)
+
+    excluded_target: Path
+    if args.excluded_fasta is not None and not isinstance(args.excluded_fasta, bool):
+        excluded_target = Path(args.excluded_fasta)
+    else:
+        excluded_target = args.out_dir / "excluded.fasta"
+
+    emit_excluded_fasta(graph, resolution_records, excluded_target)
 
     emit_tsv_ledger(ledger, args.out_dir / "ledger.tsv")
     emit_junctions_tsv(junction_records, args.out_dir / "junctions.tsv")
