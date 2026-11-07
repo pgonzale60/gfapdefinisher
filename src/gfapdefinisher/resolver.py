@@ -897,3 +897,197 @@ class OntBridgingEngine:
             representative_sequence=None,
             distribution=dist,
         )
+
+    def resolve_somatic_dropout(
+        self,
+        chrom: str,
+        side: str,
+        stem_port: SegmentPort,
+        germline_port: SegmentPort,
+        somatic_port: SegmentPort,
+        paf_path: str | Path,
+        reads_fasta: dict[str, str] | None = None,
+        *,
+        core_coverage_bp_median: float | None = None,
+        somatic_depth_ratio: float | None = None,
+        germline_depth_ratio: float | None = None,
+        core_depth_ratio: float | None = None,
+        gap_index: int = 1,
+        notes: str = "",
+    ) -> tuple[QuirkRecord, EndStateRecord, str | None]:
+        """Resolve a somatic dropout chromosome end via spanning ONT reads.
+
+        At chromosome ends where the somatic branch suffers a sequencing dropout,
+        searches for spanning ONT reads bridging the stem port into the germline
+        cap unitig (or through to the distal germline telomeric cap). If spanning
+        reads exist:
+        - Extracts representative sequence from candidate read closest to empirical
+          median gap length (BIO-004).
+        - Resolves chromosome end state to EndState.END_COMPLETE (resolved=True),
+          setting notes="ONT-derived sequence resolved germline telomere".
+        - Emits QuirkRecord documenting the rescued dropout stub
+          (IntervalQuirk.LOW_SUPPORT_STUB), with representative_sequence_selected=True.
+
+        If no spanning reads exist:
+        - Retains EndState.END_SOMATIC_MISSING (resolved=False).
+        - Emits QuirkRecord with representative_sequence_selected=False.
+
+        Args:
+            chrom: Chromosome name (e.g. 'IV', 'V').
+            side: Arm end ('5p' or '3p').
+            stem_port: Stem unitig port entering the bifurcation.
+            germline_port: Intact germline cap or continuation unitig port.
+            somatic_port: Somatic dropout stub unitig port.
+            paf_path: PAF file path or stream to extract spanning reads.
+            reads_fasta: Optional dictionary mapping read ID to nucleotide sequence.
+            core_coverage_bp_median: Somatic core reference depth ($C_{core}$).
+            somatic_depth_ratio: Somatic cap depth ratio relative to core.
+            germline_depth_ratio: Germline cap depth ratio relative to core.
+            core_depth_ratio: Feature depth relative to somatic core coverage.
+            gap_index: 1-based occurrence index for quirk feature identifier.
+            notes: Contextual provenance notes.
+
+        Returns:
+            Tuple of (QuirkRecord, EndStateRecord, representative_sequence).
+        """
+        if isinstance(paf_path, str | Path):
+            p = Path(paf_path)
+            if not p.exists():
+                spanning_reads: list[SpanningRead] = []
+            else:
+                spanning_reads = self.collect_spanning_reads(
+                    p,
+                    stem_port,
+                    germline_port,
+                    reads_sequences=reads_fasta,
+                )
+        else:
+            spanning_reads = self.collect_spanning_reads(
+                paf_path,
+                stem_port,
+                germline_port,
+                reads_sequences=reads_fasta,
+            )
+
+        stem_str = stem_port.to_symbol() if hasattr(stem_port, "to_symbol") else str(stem_port)
+        germline_str = germline_port.to_symbol() if hasattr(germline_port, "to_symbol") else str(germline_port)
+        somatic_str = somatic_port.to_symbol() if hasattr(somatic_port, "to_symbol") else str(somatic_port)
+        somatic_name = getattr(somatic_port, "name", str(somatic_port))
+
+        feature_id_quirk = build_feature_id(IntervalQuirk.LOW_SUPPORT_STUB, chrom, side, index=gap_index)
+        core_ratio = core_depth_ratio if core_depth_ratio is not None else somatic_depth_ratio
+
+        if spanning_reads:
+            dist = self.compute_distribution(spanning_reads)
+            best_read = min(
+                spanning_reads,
+                key=lambda c: (abs(c.gap_length - dist.median_bp), c.gap_length, c.qname),
+            )
+
+            rep_seq = best_read.sequence
+            if rep_seq is None and reads_fasta and best_read.qname in reads_fasta:
+                raw_seq = reads_fasta[best_read.qname][best_read.q_from : best_read.q_to]
+                rep_seq = reverse_complement(raw_seq) if best_read.strand == "-" else raw_seq
+
+            state = EndState.END_COMPLETE
+            feature_id_end = build_feature_id(state, chrom, side)
+
+            end_notes = "ONT-derived sequence resolved germline telomere"
+            if notes:
+                end_notes = f"{end_notes}; {notes}"
+
+            quirk_notes = (
+                f"Rescued somatic dropout stub via {len(spanning_reads)} spanning ONT reads; "
+                f"representative sequence selected from {best_read.qname} closest to median gap {dist.median_bp} bp (BIO-004)"
+            )
+            if notes:
+                quirk_notes = f"{quirk_notes}; {notes}"
+
+            quirk_record = QuirkRecord(
+                feature_id=feature_id_quirk,
+                chrom=chrom,
+                side=side,
+                quirk_type=IntervalQuirk.LOW_SUPPORT_STUB,
+                spanning_read_count=len(spanning_reads),
+                length_min_bp=dist.min_bp,
+                length_median_bp=dist.median_bp,
+                length_max_bp=dist.max_bp,
+                length_iqr_bp=dist.iqr_bp,
+                left_anchor_port=stem_str,
+                right_anchor_port=germline_str,
+                agp_component_type="W",
+                agp_linkage_evidence="ont-spanning",
+                unitig_ids=(somatic_name,),
+                read_count=len(spanning_reads),
+                core_coverage_bp_median=core_coverage_bp_median,
+                core_depth_ratio=core_ratio,
+                representative_sequence_selected=True,
+                notes=quirk_notes,
+            )
+
+            end_state_record = EndStateRecord(
+                feature_id=feature_id_end,
+                chrom=chrom,
+                side=side,
+                state=state,
+                somatic_port=somatic_str,
+                germline_port=germline_str,
+                shared_port=None,
+                core_coverage_bp_median=core_coverage_bp_median,
+                somatic_depth_ratio=somatic_depth_ratio,
+                germline_depth_ratio=germline_depth_ratio,
+                resolved=True,
+                notes=end_notes,
+            )
+
+            return quirk_record, end_state_record, rep_seq
+
+        state = EndState.END_SOMATIC_MISSING
+        feature_id_end = build_feature_id(state, chrom, side)
+
+        end_notes = f"Unrescued somatic dropout at {chrom}:{side}; insufficient ONT spanning support"
+        if notes:
+            end_notes = f"{end_notes}; {notes}"
+
+        quirk_notes = f"Unrescued somatic dropout stub at {chrom}:{side}; no spanning ONT reads found"
+        if notes:
+            quirk_notes = f"{quirk_notes}; {notes}"
+
+        quirk_record = QuirkRecord(
+            feature_id=feature_id_quirk,
+            chrom=chrom,
+            side=side,
+            quirk_type=IntervalQuirk.LOW_SUPPORT_STUB,
+            spanning_read_count=0,
+            length_min_bp=None,
+            length_median_bp=None,
+            length_max_bp=None,
+            length_iqr_bp=None,
+            left_anchor_port=stem_str,
+            right_anchor_port=germline_str,
+            agp_component_type="U",
+            agp_linkage_evidence="unbridged",
+            unitig_ids=(somatic_name,),
+            read_count=0,
+            core_coverage_bp_median=core_coverage_bp_median,
+            core_depth_ratio=core_ratio,
+            representative_sequence_selected=False,
+            notes=quirk_notes,
+        )
+
+        end_state_record = EndStateRecord(
+            feature_id=feature_id_end,
+            chrom=chrom,
+            side=side,
+            state=state,
+            somatic_port=None,
+            germline_port=germline_str,
+            shared_port=None,
+            core_coverage_bp_median=core_coverage_bp_median,
+            somatic_depth_ratio=somatic_depth_ratio,
+            germline_depth_ratio=germline_depth_ratio,
+            resolved=False,
+            notes=end_notes,
+        )
+
+        return quirk_record, end_state_record, None

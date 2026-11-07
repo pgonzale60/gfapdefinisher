@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from gfapdefinisher.graph import BidirectedGraph
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.quirks import (
@@ -502,3 +503,194 @@ def test_resolve_satellite_gap_sequence_population_and_index():
     assert res.representative_read is not None
     assert res.representative_read.sequence == "G" * 1000
     assert res.end_state_record.somatic_depth_ratio == 0.98
+
+
+def test_resolve_somatic_dropout_spanning_rescue(tmp_path: Path):
+    """Verify ONT-mediated rescue transitions END_SOMATIC_MISSING to END_COMPLETE."""
+    # Synthetic assembly graph: Chr V 3p architecture
+    # utg000004l+ stem bifurcates into utg000179l- (dropout stub) and utg000139l+ (germline)
+    graph = BidirectedGraph()
+    graph.add_segment("utg000004l", length=6949969, depth=64.0)
+    graph.add_segment("utg000179l", length=19005, depth=1.0)
+    graph.add_segment("utg000139l", length=53655, depth=8.0)
+
+    p_stem = SegmentPort("utg000004l", Strand.FORWARD)
+    p_som = SegmentPort("utg000179l", Strand.REVERSE)
+    p_grs = SegmentPort("utg000139l", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_som, cigar="100M")
+    graph.add_edge(p_stem, p_grs, cigar="100M")
+
+    # 3 candidate spanning reads with distinct gap lengths: 1000, 1500, 2000 bp
+    # Median gap length is 1500 bp (read_b)
+    paf_lines = [
+        # read_a: gap = 1000 bp
+        _make_paf_line("read_a", 25000, 1000, 3000, "+", "utg000004l", 6949969, 6947969, 6949969, alen=2000),
+        _make_paf_line("read_a", 25000, 4000, 6000, "+", "utg000139l", 53655, 0, 2000, alen=2000),
+        # read_b: gap = 1500 bp (median candidate)
+        _make_paf_line("read_b", 25000, 1000, 3000, "+", "utg000004l", 6949969, 6947969, 6949969, alen=2000),
+        _make_paf_line("read_b", 25000, 4500, 6500, "+", "utg000139l", 53655, 0, 2000, alen=2000),
+        # read_c: gap = 2000 bp
+        _make_paf_line("read_c", 25000, 1000, 3000, "+", "utg000004l", 6949969, 6947969, 6949969, alen=2000),
+        _make_paf_line("read_c", 25000, 5000, 7000, "+", "utg000139l", 53655, 0, 2000, alen=2000),
+    ]
+
+    paf_file = tmp_path / "spanning_dropout.paf"
+    paf_file.write_text("\n".join(paf_lines) + "\n", encoding="utf-8")
+
+    rep_expected = "CATG" * 375  # 1500 bp
+    reads_fasta = {
+        "read_a": "A" * 3000 + ("T" * 1000) + "G" * 21000,
+        "read_b": "A" * 3000 + rep_expected + "G" * 20500,
+        "read_c": "A" * 3000 + ("C" * 2000) + "G" * 20000,
+    }
+
+    engine = OntBridgingEngine()
+    quirk_rec, end_rec, rep_seq = engine.resolve_somatic_dropout(
+        chrom="V",
+        side="3p",
+        stem_port=p_stem,
+        germline_port=p_grs,
+        somatic_port=p_som,
+        paf_path=paf_file,
+        reads_fasta=reads_fasta,
+        core_coverage_bp_median=64.0,
+        somatic_depth_ratio=0.015,
+        germline_depth_ratio=0.125,
+    )
+
+    # 1. End state transitions from END_SOMATIC_MISSING to END_COMPLETE with resolved=True
+    assert end_rec.state == EndState.END_COMPLETE
+    assert end_rec.resolved is True
+    assert end_rec.notes == "ONT-derived sequence resolved germline telomere"
+    assert end_rec.somatic_port == p_som.to_symbol()
+    assert end_rec.germline_port == p_grs.to_symbol()
+    assert end_rec.shared_port is None
+    assert end_rec.core_coverage_bp_median == 64.0
+
+    # 2. Representative sequence selected matching median candidate read
+    assert rep_seq == rep_expected
+    assert len(rep_seq) == 1500
+
+    # 3. Quirk record emitted documenting LOW_SUPPORT_STUB with representative_sequence_selected=True
+    assert quirk_rec.quirk_type == IntervalQuirk.LOW_SUPPORT_STUB
+    assert quirk_rec.feature_id == "low_support_stub:V:3p:1"
+    assert quirk_rec.unitig_ids == ("utg000179l",)
+    assert quirk_rec.representative_sequence_selected is True
+    assert quirk_rec.spanning_read_count == 3
+    assert quirk_rec.length_median_bp == 1500
+    assert quirk_rec.left_anchor_port == p_stem.to_symbol()
+    assert quirk_rec.right_anchor_port == p_grs.to_symbol()
+    assert quirk_rec.agp_component_type == "W"
+    assert quirk_rec.agp_linkage_evidence == "ont-spanning"
+
+
+def test_resolve_somatic_dropout_unbridged_retention(tmp_path: Path):
+    """Verify unbridged somatic dropout retains END_SOMATIC_MISSING with resolved=False."""
+    graph = BidirectedGraph()
+    graph.add_segment("utg000004l", length=6949969, depth=64.0)
+    graph.add_segment("utg000179l", length=19005, depth=1.0)
+    graph.add_segment("utg000139l", length=53655, depth=8.0)
+
+    p_stem = SegmentPort("utg000004l", Strand.FORWARD)
+    p_som = SegmentPort("utg000179l", Strand.REVERSE)
+    p_grs = SegmentPort("utg000139l", Strand.FORWARD)
+
+    # Empty PAF file (no spanning reads)
+    empty_paf = tmp_path / "empty.paf"
+    empty_paf.write_text("", encoding="utf-8")
+
+    engine = OntBridgingEngine()
+    quirk_rec, end_rec, rep_seq = engine.resolve_somatic_dropout(
+        chrom="V",
+        side="3p",
+        stem_port=p_stem,
+        germline_port=p_grs,
+        somatic_port=p_som,
+        paf_path=empty_paf,
+        core_coverage_bp_median=64.0,
+        somatic_depth_ratio=0.015,
+        germline_depth_ratio=0.125,
+    )
+
+    # 1. Retains END_SOMATIC_MISSING with resolved=False
+    assert end_rec.state == EndState.END_SOMATIC_MISSING
+    assert end_rec.resolved is False
+    assert end_rec.somatic_port is None
+    assert end_rec.germline_port == p_grs.to_symbol()
+    assert "Unrescued somatic dropout" in end_rec.notes
+
+    # 2. No sequence extracted
+    assert rep_seq is None
+
+    # 3. Quirk record documents unrescued stub with representative_sequence_selected=False
+    assert quirk_rec.quirk_type == IntervalQuirk.LOW_SUPPORT_STUB
+    assert quirk_rec.feature_id == "low_support_stub:V:3p:1"
+    assert quirk_rec.unitig_ids == ("utg000179l",)
+    assert quirk_rec.representative_sequence_selected is False
+    assert quirk_rec.spanning_read_count == 0
+    assert quirk_rec.agp_component_type == "U"
+    assert quirk_rec.agp_linkage_evidence == "unbridged"
+
+
+def test_resolve_somatic_dropout_reverse_strand_extraction(tmp_path: Path):
+    """Verify representative sequence extracted on reverse strand is reverse-complemented."""
+    p_stem = SegmentPort("utg_stem", Strand.FORWARD)
+    p_som = SegmentPort("utg_som", Strand.REVERSE)
+    p_grs = SegmentPort("utg_grs", Strand.FORWARD)
+
+    expected_gap_fwd = "AAGCTTCC" * 125  # 1000 bp
+    expected_gap_rc = reverse_complement(expected_gap_fwd)
+
+    # Negative strand walk: Right hit precedes Left hit
+    paf_lines = [
+        _make_paf_line("rev_read", 20000, 2000, 4000, "-", "utg_grs", 50000, 0, 2000, alen=2000),
+        _make_paf_line("rev_read", 20000, 5000, 7000, "-", "utg_stem", 50000, 48000, 50000, alen=2000),
+    ]
+
+    paf_file = tmp_path / "rev.paf"
+    paf_file.write_text("\n".join(paf_lines) + "\n", encoding="utf-8")
+
+    reads_fasta = {
+        "rev_read": "N" * 4000 + expected_gap_rc + "N" * 15000,
+    }
+
+    engine = OntBridgingEngine()
+    quirk_rec, end_rec, rep_seq = engine.resolve_somatic_dropout(
+        chrom="IV",
+        side="5p",
+        stem_port=p_stem,
+        germline_port=p_grs,
+        somatic_port=p_som,
+        paf_path=paf_file,
+        reads_fasta=reads_fasta,
+    )
+
+    assert end_rec.state == EndState.END_COMPLETE
+    assert end_rec.resolved is True
+    assert quirk_rec.representative_sequence_selected is True
+    assert rep_seq == expected_gap_fwd
+    assert len(rep_seq) == 1000
+
+
+def test_resolve_somatic_dropout_nonexistent_paf():
+    """Verify nonexistent PAF path cleanly retains END_SOMATIC_MISSING without crashing."""
+    p_stem = SegmentPort("utg_stem", Strand.FORWARD)
+    p_som = SegmentPort("utg_som", Strand.REVERSE)
+    p_grs = SegmentPort("utg_grs", Strand.FORWARD)
+
+    engine = OntBridgingEngine()
+    quirk_rec, end_rec, rep_seq = engine.resolve_somatic_dropout(
+        chrom="X",
+        side="3p",
+        stem_port=p_stem,
+        germline_port=p_grs,
+        somatic_port=p_som,
+        paf_path="nonexistent_file_path_12345.paf",
+    )
+
+    assert end_rec.state == EndState.END_SOMATIC_MISSING
+    assert end_rec.resolved is False
+    assert rep_seq is None
+    assert quirk_rec.representative_sequence_selected is False
+    assert quirk_rec.spanning_read_count == 0
