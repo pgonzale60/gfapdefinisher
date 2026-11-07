@@ -332,3 +332,149 @@ def test_finish_subcommand_with_fastq_reads(tmp_path: Path):
     sat_quirks = [q for q in quirk_recs if q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE]
     assert len(sat_quirks) >= 1
     assert sat_quirks[0].representative_sequence_selected is True
+
+
+def test_finish_subcommand_emits_fasta_and_agp_by_default(tmp_path: Path):
+    """Verify finish subcommand emits scaffolds.fasta and scaffolds.agp by default."""
+    gfa_path = tmp_path / "test.gfa"
+    _build_synthetic_gfa(gfa_path)
+    out_dir = tmp_path / "finish_default_emission"
+
+    exit_code = main(["finish", "--gfa", str(gfa_path), "--out-dir", str(out_dir)])
+    assert exit_code == 0
+
+    fasta_file = out_dir / "scaffolds.fasta"
+    agp_file = out_dir / "scaffolds.agp"
+
+    assert fasta_file.is_file()
+    assert agp_file.is_file()
+
+    fasta_content = fasta_file.read_text(encoding="utf-8")
+    assert ">chr_stem" in fasta_content
+    assert ">chr_som" in fasta_content
+
+    agp_content = agp_file.read_text(encoding="utf-8")
+    assert agp_content.startswith("##agp-version 2.1\n")
+    assert "chr_stem" in agp_content
+    assert "chr_som" in agp_content
+
+
+def test_finish_subcommand_custom_fasta_and_agp_options(tmp_path: Path):
+    """Verify finish subcommand respects custom --emit-fasta, --emit-agp, and --prefix options."""
+    gfa_path = tmp_path / "test.gfa"
+    _build_synthetic_gfa(gfa_path)
+    out_dir = tmp_path / "finish_custom_emission"
+    custom_fa = tmp_path / "custom_scaffolds.fa"
+    custom_agp = tmp_path / "custom_scaffolds.agp"
+
+    exit_code = main(
+        [
+            "finish",
+            "--gfa",
+            str(gfa_path),
+            "--out-dir",
+            str(out_dir),
+            "--emit-fasta",
+            str(custom_fa),
+            "--emit-agp",
+            str(custom_agp),
+            "--prefix",
+            "TEST_",
+        ]
+    )
+    assert exit_code == 0
+
+    assert custom_fa.is_file()
+    assert custom_agp.is_file()
+
+    fa_text = custom_fa.read_text(encoding="utf-8")
+    assert ">TEST_chr_stem" in fa_text
+    assert ">TEST_chr_som" in fa_text
+
+    agp_text = custom_agp.read_text(encoding="utf-8")
+    assert "TEST_chr_stem" in agp_text
+
+
+def test_finish_subcommand_rdna_cassette_wiring(tmp_path: Path):
+    """Verify finish subcommand resolves rDNA cassette, chains copies, and stitches scaffold."""
+    motif = DEFAULT_POLICY.telomere.motif_forward.value
+    # chr_arm: 40 kb core chromosome arm
+    seq_arm = "A" * 40000
+    # rdna_unitig: 15 kb rDNA unitig with Barrnap hits
+    seq_rdna = "C" * 15000
+    # distal_cap: 8 kb unitig ending with 35x telomere repeats (210 bp cap)
+    seq_cap = ("G" * 7790) + (motif * 35)
+
+    gfa_path = tmp_path / "rdna_test.gfa"
+    lines = [
+        "H\tVN:Z:1.0",
+        f"S\tchr_arm\t{seq_arm}\tLN:i:40000\tdp:f:60.0",
+        f"S\trdna_unitig\t{seq_rdna}\tLN:i:15000\tdp:f:250.0",
+        f"S\tdistal_cap\t{seq_cap}\tLN:i:8000\tdp:f:55.0",
+        # Traversal: chr_arm+ -> rdna_unitig+ (50 bp overlap) -> distal_cap+ (50 bp overlap)
+        "L\tchr_arm\t+\trdna_unitig\t+\t50M",
+        "L\trdna_unitig\t+\tdistal_cap\t+\t50M",
+    ]
+    gfa_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Barrnap GFF3 annotating rdna_unitig with 18S and 28S rRNA genes
+    barrnap_path = tmp_path / "barrnap.gff"
+    barrnap_lines = [
+        "##gff-version 3",
+        "rdna_unitig\tbarrnap:0.9\trRNA\t1000\t2800\t0.0\t+\t.\tName=18S_rRNA",
+        "rdna_unitig\tbarrnap:0.9\trRNA\t5000\t8500\t0.0\t+\t.\tName=28S_rRNA",
+    ]
+    barrnap_path.write_text("\n".join(barrnap_lines) + "\n", encoding="utf-8")
+
+    # TIDK telomeric repeat table for distal_cap
+    tidk_path = tmp_path / "tidk.tsv"
+    tidk_lines = [
+        "sequence\tstart\tend\tForward_Matches\tReverse_Matches",
+        "distal_cap\t7500\t8000\t35\t0",
+    ]
+    tidk_path.write_text("\n".join(tidk_lines) + "\n", encoding="utf-8")
+
+    out_dir = tmp_path / "finish_rdna_out"
+    exit_code = main(
+        [
+            "finish",
+            "--gfa",
+            str(gfa_path),
+            "--out-dir",
+            str(out_dir),
+            "--barrnap",
+            str(barrnap_path),
+            "--tidk",
+            str(tidk_path),
+        ]
+    )
+    assert exit_code == 0
+
+    end_states = parse_end_states_tsv(out_dir / "end_states.tsv")
+    shared_ends = [e for e in end_states if e.state == EndState.END_SHARED_EXEMPT]
+    assert len(shared_ends) >= 1
+    assert any(e.chrom == "chr_arm" for e in shared_ends)
+
+    quirks = parse_quirks_tsv(out_dir / "quirks.tsv")
+    rdna_quirks = [q for q in quirks if q.quirk_type == IntervalQuirk.RDNA_CASSETTE]
+    assert len(rdna_quirks) >= 1
+    assert rdna_quirks[0].chrom == "chr_arm"
+    assert "distal cap distal_cap+" in rdna_quirks[0].notes
+
+    # Scaffolds & AGP checks
+    fasta_file = out_dir / "scaffolds.fasta"
+    agp_file = out_dir / "scaffolds.agp"
+    assert fasta_file.is_file()
+    assert agp_file.is_file()
+
+    agp_text = agp_file.read_text(encoding="utf-8")
+    assert "provenance=rDNA-chained" in agp_text
+    assert "distal_cap" in agp_text
+
+    # Total length: 40000 + (15000 - 50) + (8000 - 50) = 40000 + 14950 + 7950 = 62900 bp
+    from gfapdefinisher.emitter import parse_agp
+
+    agp_recs = parse_agp(agp_file)
+    arm_recs = [r for r in agp_recs if r.object_id == "chr_arm"]
+    assert len(arm_recs) == 3
+    assert arm_recs[-1].object_end == 62900

@@ -225,16 +225,25 @@ class SatelliteGapResolution:
     distribution: GapDistribution | None = None
 
 
-def load_reads_sequences(reads_path: Path | str | None) -> dict[str, str]:
+def load_reads_sequences(
+    reads_path: Path | str | None,
+    target_qnames: set[str] | Sequence[str] | None = None,
+) -> dict[str, str]:
     """Load long reads into memory as a mapping from read name to sequence string.
 
     Supports FASTA and FASTQ formats, uncompressed or gzip-compressed.
+    If target_qnames is provided, only reads whose IDs are in target_qnames are retained,
+    enabling memory-efficient single-pass streaming across large FASTQ/FASTA files.
     """
     if reads_path is None:
         return {}
 
     path = Path(reads_path)
     if not path.is_file():
+        return {}
+
+    target_set = set(target_qnames) if target_qnames is not None else None
+    if target_set is not None and len(target_set) == 0:
         return {}
 
     is_gz = path.suffix in (".gz", ".gzip")
@@ -253,18 +262,22 @@ def load_reads_sequences(reads_path: Path | str | None) -> dict[str, str]:
         if first_char == ">":
             curr_id = ""
             curr_seq: list[str] = []
+            capture = False
             for line in f:
                 line_str = line.strip()
                 if not line_str:
                     continue
                 if line_str.startswith(">"):
-                    if curr_id:
+                    if curr_id and capture:
                         sequences[curr_id] = "".join(curr_seq)
+                        if target_set is not None and len(sequences) >= len(target_set):
+                            break
                     curr_id = line_str[1:].split()[0]
+                    capture = target_set is None or curr_id in target_set
                     curr_seq = []
-                else:
+                elif capture:
                     curr_seq.append(line_str)
-            if curr_id:
+            if curr_id and capture and (target_set is None or curr_id in target_set):
                 sequences[curr_id] = "".join(curr_seq)
         elif first_char == "@":
             while True:
@@ -278,7 +291,10 @@ def load_reads_sequences(reads_path: Path | str | None) -> dict[str, str]:
                 seq = f.readline().strip()
                 f.readline()  # + separator
                 f.readline()  # qual
-                sequences[qname] = seq
+                if target_set is None or qname in target_set:
+                    sequences[qname] = seq
+                    if target_set is not None and len(sequences) >= len(target_set):
+                        break
 
     return sequences
 
@@ -316,6 +332,55 @@ class OntBridgingEngine:
             self.ledger = ledger
             self.policy = policy
 
+        self.gap_resolutions: list[SatelliteGapResolution] = []
+        self.dropout_resolutions: list[tuple[QuirkRecord, EndStateRecord, str | None]] = []
+
+    def collect_spanning_read_ids(
+        self,
+        paf_source: Path | str | TextIO | Iterable[str] | Iterable[PafHit],
+    ) -> set[str]:
+        """Collect read IDs (qnames) that bridge candidate port pairs."""
+        source_iterable: Iterable[str | PafHit]
+        if isinstance(paf_source, str | Path | TextIO):
+            source_iterable = parse_paf_hits(paf_source)
+        else:
+            source_iterable = paf_source
+
+        all_hits: list[PafHit] = []
+        hits_by_read: dict[str, list[PafHit]] = defaultdict(list)
+        for item in source_iterable:
+            if isinstance(item, PafHit):
+                hit = item
+            else:
+                s = item.strip()
+                if not s or s.startswith("#"):
+                    continue
+                hit = PafHit.from_line(s)
+            all_hits.append(hit)
+            hits_by_read[hit.qname].append(hit)
+
+        pair_counts: dict[tuple[str, str], int] = defaultdict(int)
+        for read_hits in hits_by_read.values():
+            targets = sorted({h.tname for h in read_hits})
+            for i in range(len(targets)):
+                for j in range(i + 1, len(targets)):
+                    pair_counts[(targets[i], targets[j])] += 1
+
+        target_qnames: set[str] = set()
+        checked_pairs: set[tuple[str, str]] = set()
+        for t1, t2 in pair_counts:
+            if (t1, t2) in checked_pairs or (t2, t1) in checked_pairs:
+                continue
+            checked_pairs.add((t1, t2))
+            spanning = self.collect_spanning_reads(paf_source=all_hits, left_port=t1, right_port=t2)
+            if not spanning:
+                spanning = self.collect_spanning_reads(paf_source=all_hits, left_port=t2, right_port=t1)
+            if len(spanning) >= self.policy.ont.min_spanning_reads.value:
+                for sr in spanning:
+                    target_qnames.add(sr.qname)
+
+        return target_qnames
+
     def identify_orphan_caps(self) -> dict[str, tuple[str, str]]:
         """Identify orphan caps in graph.
 
@@ -349,7 +414,7 @@ class OntBridgingEngine:
         paf_source: Path | str | TextIO | Iterable[str] | Iterable[PafHit],
         end_states: list[EndStateRecord],
         quirks: list[QuirkRecord],
-        reads_sequences: Mapping[str, str] | None = None,
+        reads_sequences: Mapping[str, str] | Path | str | None = None,
     ) -> tuple[list[EndStateRecord], list[QuirkRecord]]:
         """Identify candidate variable satellite gap pairs and resolve them via ONT bridging."""
         hits_by_read: dict[str, list[PafHit]] = defaultdict(list)
@@ -371,6 +436,13 @@ class OntBridgingEngine:
             all_hits.append(hit)
             hits_by_read[hit.qname].append(hit)
 
+        active_reads: Mapping[str, str] | None = None
+        if isinstance(reads_sequences, str | Path):
+            target_ids = self.collect_spanning_read_ids(all_hits)
+            active_reads = load_reads_sequences(reads_sequences, target_qnames=target_ids)
+        else:
+            active_reads = reads_sequences
+
         pair_counts: dict[tuple[str, str], int] = defaultdict(int)
         for read_hits in hits_by_read.values():
             targets = sorted({h.tname for h in read_hits})
@@ -387,7 +459,7 @@ class OntBridgingEngine:
                 paf_source=all_hits,
                 left_port=t1,
                 right_port=t2,
-                reads_sequences=reads_sequences,
+                reads_sequences=active_reads,
             )
             left_port, right_port = t1, t2
             if not spanning:
@@ -395,7 +467,7 @@ class OntBridgingEngine:
                     paf_source=all_hits,
                     left_port=t2,
                     right_port=t1,
-                    reads_sequences=reads_sequences,
+                    reads_sequences=active_reads,
                 )
                 if spanning:
                     left_port, right_port = t2, t1
@@ -433,7 +505,7 @@ class OntBridgingEngine:
                     right_port=right_port,
                     paf_source=all_hits,
                     spanning_reads=spanning,
-                    reads_sequences=reads_sequences,
+                    reads_sequences=active_reads,
                     core_coverage_bp_median=matched_end.core_coverage_bp_median if matched_end else None,
                     core_depth_ratio=matched_end.germline_depth_ratio if matched_end else None,
                 )
@@ -830,7 +902,7 @@ class OntBridgingEngine:
                 notes=end_notes,
             )
 
-            return SatelliteGapResolution(
+            res = SatelliteGapResolution(
                 chrom=chrom,
                 side=side,
                 state=state,
@@ -841,6 +913,8 @@ class OntBridgingEngine:
                 representative_sequence=rep_seq,
                 distribution=dist,
             )
+            self.gap_resolutions.append(res)
+            return res
 
         # Unbridged orphan cap
         state = EndState.END_GERMLINE_ORPHAN
@@ -894,7 +968,7 @@ class OntBridgingEngine:
             notes=end_notes,
         )
 
-        return SatelliteGapResolution(
+        res = SatelliteGapResolution(
             chrom=chrom,
             side=side,
             state=state,
@@ -905,6 +979,8 @@ class OntBridgingEngine:
             representative_sequence=None,
             distribution=dist,
         )
+        self.gap_resolutions.append(res)
+        return res
 
     def _find_distal_germline_targets(self, germline_port: SegmentPort) -> list[SegmentPort]:
         """Find candidate distal germline telomeric caps reachable from germline_port."""
@@ -1094,7 +1170,9 @@ class OntBridgingEngine:
                 notes=end_notes,
             )
 
-            return quirk_record, end_state_record, rep_seq
+            res_dropout = (quirk_record, end_state_record, rep_seq)
+            self.dropout_resolutions.append(res_dropout)
+            return res_dropout
 
         state = EndState.END_SOMATIC_MISSING
         feature_id_end = build_feature_id(state, chrom, side)
@@ -1144,4 +1222,6 @@ class OntBridgingEngine:
             notes=end_notes,
         )
 
-        return quirk_record, end_state_record, None
+        res_unrescued = (quirk_record, end_state_record, None)
+        self.dropout_resolutions.append(res_unrescued)
+        return res_unrescued
