@@ -79,6 +79,11 @@ class SegmentPort:
     def __invert__(self) -> SegmentPort:
         return self.invert()
 
+    @property
+    def segment_id(self) -> str:
+        """Alias for segment name."""
+        return self.name
+
     def to_symbol(self) -> str:
         """Return port representation in name+ or name- notation."""
         return f"{self.name}{self.strand.to_symbol()}"

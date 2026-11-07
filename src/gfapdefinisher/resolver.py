@@ -224,6 +224,7 @@ class SatelliteGapResolution:
     representative_read: SpanningRead | None = None
     representative_sequence: str | None = None
     distribution: GapDistribution | None = None
+    intermediate_ports: tuple[SegmentPort, ...] = ()
 
     def __init__(
         self,
@@ -236,6 +237,7 @@ class SatelliteGapResolution:
         representative_read: SpanningRead | None = None,
         representative_sequence: str | None = None,
         distribution: GapDistribution | None = None,
+        intermediate_ports: tuple[SegmentPort, ...] | Sequence[SegmentPort] = (),
         *,
         quirk_record: ResolutionRecord | None = None,
     ) -> None:
@@ -253,6 +255,7 @@ class SatelliteGapResolution:
         self.representative_read = representative_read
         self.representative_sequence = representative_sequence
         self.distribution = distribution
+        self.intermediate_ports = tuple(intermediate_ports)
 
     @property
     def quirk_record(self) -> ResolutionRecord:
@@ -561,6 +564,42 @@ class OntBridgingEngine:
             ledger_map = {ev.port.to_symbol(): ev for ev in ledger_map if hasattr(ev, "port")}
         ev = ledger_map.get(port_sym)
         return bool(ev is not None and getattr(ev, "has_terminal_telomere", False))
+
+    def _is_contaminant(self, seg_name: str) -> bool:
+        """Check whether a segment is flagged as contaminant in the evidence ledger."""
+        if not self.ledger:
+            return False
+        ledger_map = self.ledger
+        if isinstance(ledger_map, list | tuple):
+            ledger_map = {ev.port.to_symbol(): ev for ev in ledger_map if hasattr(ev, "port")}
+        ev_plus = ledger_map.get(f"{seg_name}+")
+        ev_minus = ledger_map.get(f"{seg_name}-")
+        is_contam_plus = getattr(ev_plus, "is_contaminant", False)
+        if callable(is_contam_plus):
+            is_contam_plus = is_contam_plus()
+        is_contam_minus = getattr(ev_minus, "is_contaminant", False)
+        if callable(is_contam_minus):
+            is_contam_minus = is_contam_minus()
+        return bool(is_contam_plus or is_contam_minus)
+
+    def _is_contam_unitig(self, seg_name: str) -> bool:
+        return self._is_contaminant(seg_name)
+
+    def _get_usco_count(self, seg_name: str) -> int:
+        """Get the USCO hit count for a segment from the evidence ledger."""
+        if not self.ledger:
+            return 0
+        ledger_map = self.ledger
+        if isinstance(ledger_map, list | tuple):
+            ledger_map = {ev.port.to_symbol(): ev for ev in ledger_map if hasattr(ev, "port")}
+        ev_plus = ledger_map.get(f"{seg_name}+")
+        ev_minus = ledger_map.get(f"{seg_name}-")
+        return int(
+            getattr(ev_plus, "usco_count", 0)
+            or getattr(ev_plus, "usco_hit_count", 0)
+            or getattr(ev_minus, "usco_count", 0)
+            or getattr(ev_minus, "usco_hit_count", 0)
+        )
 
     def identify_and_resolve_gaps(
         self,
@@ -1000,6 +1039,70 @@ class OntBridgingEngine:
                 cap_tel_name, cap_tel_strand = _parse_port_spec(cap_tel_port)
                 cap_port = SegmentPort(cap_tel_name, cap_tel_strand)
 
+                # Scan unplaced degree-0 satellite-only unitigs carrying top_kmer
+                intermediate_ports: list[SegmentPort] = []
+                anchor_top_forward = anchor_seq.count(top_kmer) >= anchor_seq.count(rc_top)
+
+                for seg_id in sorted(self.graph.segments.keys()):
+                    if (
+                        seg_id == anchor_name
+                        or seg_id == er.chrom
+                        or seg_id == cap_id
+                        or seg_id in orphan_caps
+                        or seg_id in used_cap_segs
+                    ):
+                        continue
+                    if self._is_contam_unitig(seg_id):
+                        continue
+                    if self._get_usco_count(seg_id) > 0:
+                        continue
+                    p_fwd = SegmentPort(seg_id, Strand.FORWARD)
+                    p_rev = SegmentPort(seg_id, Strand.REVERSE)
+                    if self.graph.degree(p_fwd) != 0 or self.graph.degree(p_rev) != 0:
+                        continue
+                    if self._has_terminal_telomere(p_fwd) or self._has_terminal_telomere(p_rev):
+                        continue
+
+                    sat_seg = self.graph.segments[seg_id]
+                    if not sat_seg.sequence:
+                        continue
+                    sat_seq = sat_seg.sequence
+                    fwd_cnt = sat_seq.count(top_kmer)
+                    rev_cnt = sat_seq.count(rc_top)
+                    if fwd_cnt + rev_cnt < min_repeats:
+                        continue
+
+                    if anchor_top_forward:
+                        chosen_strand = Strand.FORWARD if fwd_cnt >= rev_cnt else Strand.REVERSE
+                    else:
+                        chosen_strand = Strand.REVERSE if fwd_cnt >= rev_cnt else Strand.FORWARD
+
+                    intermediate_ports.append(SegmentPort(seg_id, chosen_strand))
+
+                intermediate_ports.sort(
+                    key=lambda p: (
+                        -(
+                            (
+                                self.graph.segments[p.name].sequence.count(top_kmer)
+                                if self.graph.segments[p.name].sequence
+                                else 0
+                            )
+                            + (
+                                self.graph.segments[p.name].sequence.count(rc_top)
+                                if self.graph.segments[p.name].sequence
+                                else 0
+                            )
+                        ),
+                        -self.graph.segments[p.name].length,
+                        p.name,
+                    )
+                )
+
+                for p in intermediate_ports:
+                    used_cap_segs.add(p.name)
+
+                unitig_ids = (anchor_name, *(p.name for p in intermediate_ports), cap_id)
+
                 feature_id_res = build_feature_id(ResolutionType.SUBTELOMERIC_SATELLITE_CAP, er.chrom, er.side, index=1)
                 feature_id_end = build_feature_id(EndState.END_COMPLETE, er.chrom, er.side)
 
@@ -1018,8 +1121,8 @@ class OntBridgingEngine:
                     left_anchor_port=anchor_port.to_symbol(),
                     right_anchor_port=cap_port.to_symbol(),
                     agp_component_type="U",
-                    agp_linkage_evidence="hifi-spanning",
-                    unitig_ids=(anchor_name, cap_id),
+                    agp_linkage_evidence="satellite-kmer",
+                    unitig_ids=unitig_ids,
                     read_count=0,
                     core_coverage_bp_median=er.core_coverage_bp_median,
                     core_depth_ratio=er.germline_depth_ratio,
@@ -1054,6 +1157,7 @@ class OntBridgingEngine:
                     representative_read=None,
                     representative_sequence=None,
                     distribution=None,
+                    intermediate_ports=tuple(intermediate_ports),
                 )
                 self.gap_resolutions.append(res)
                 resolved_end_keys.add((er.chrom, er.side))
@@ -1278,7 +1382,7 @@ class OntBridgingEngine:
 
         if count >= 2:
             n_q = self.policy.ont.quantile_num.value
-            qs = statistics.quantiles(lengths, n=n_q)
+            qs = statistics.quantiles(lengths, n=n_q, method="inclusive")
             q1 = qs[0]
             q3 = qs[-1]
             iqr_bp = round(q3 - q1)

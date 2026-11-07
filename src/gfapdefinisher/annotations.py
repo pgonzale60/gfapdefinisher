@@ -79,6 +79,11 @@ class BarrnapHit:
     feature_name: str
     evalue: float
 
+    @property
+    def product(self) -> str:
+        """Alias for feature_name matching GFF product attribute."""
+        return self.feature_name
+
 
 @dataclass(slots=True, frozen=True)
 class CompleasmHit:

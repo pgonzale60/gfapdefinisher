@@ -15,9 +15,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
-from gfapdefinisher.annotations import NodeAnnotations
+from gfapdefinisher.annotations import BarrnapHit, NodeAnnotations
 from gfapdefinisher.cigar import cigar_query_consumption
 from gfapdefinisher.graph import BidirectedGraph
 from gfapdefinisher.ledger import EndEvidence
@@ -33,6 +33,18 @@ from gfapdefinisher.resolutions import (
     emit_resolutions_tsv,
 )
 from gfapdefinisher.resolver import reverse_complement
+
+
+def _is_prokaryotic_rRNA(hit: Any) -> bool:
+    """Return True if hit is prokaryotic ribosomal RNA (16S or 23S)."""
+    prod = getattr(hit, "product", getattr(hit, "feature_name", ""))
+    return any(sub in prod for sub in ("16S", "23S"))
+
+
+def _is_45s_hit(hit: BarrnapHit) -> bool:
+    """Return True ONLY if not prokaryotic rRNA and hit product contains 18S, 5.8S, or 28S."""
+    prod = getattr(hit, "product", getattr(hit, "feature_name", ""))
+    return (not _is_prokaryotic_rRNA(hit)) and any(sub in prod for sub in ("18S", "5.8S", "28S"))
 
 
 @dataclass(slots=True)
@@ -51,6 +63,9 @@ class RdnaResolution:
     reached_distal_cap: bool = False
     unlinked_join_indices: tuple[int, ...] = ()
     excluded_unitigs: tuple[str, ...] = ()
+    is_intercalary: bool = False
+    exit_stem_port: SegmentPort | None = None
+    exact_dovetail_exit: bool = True
 
     def __init__(
         self,
@@ -68,6 +83,9 @@ class RdnaResolution:
         excluded_unitigs: tuple[str, ...] = (),
         *,
         quirk_record: ResolutionRecord | None = None,
+        is_intercalary: bool = False,
+        exit_stem_port: SegmentPort | None = None,
+        exact_dovetail_exit: bool = True,
     ) -> None:
         self.chrom = chrom
         self.side = side
@@ -84,6 +102,21 @@ class RdnaResolution:
         self.reached_distal_cap = reached_distal_cap
         self.unlinked_join_indices = unlinked_join_indices
         self.excluded_unitigs = excluded_unitigs
+        self.is_intercalary = is_intercalary
+        self.exit_stem_port = exit_stem_port
+        self.exact_dovetail_exit = exact_dovetail_exit
+
+    @property
+    def unitig_ports(self) -> tuple[SegmentPort, ...]:
+        """Sequence of unitig ports along traversed path."""
+        return tuple(self.path)
+
+    @property
+    def is_resolved(self) -> bool:
+        """Whether resolution successfully resolved terminal cap or intercalary bridge."""
+        if self.is_intercalary:
+            return True
+        return self.reached_distal_cap or (self.end_state_record.resolved if self.end_state_record else False)
 
     @property
     def quirk_record(self) -> ResolutionRecord:
@@ -114,6 +147,10 @@ class RdnaResolution:
     emit_quirks_tsv = emit_resolutions_tsv
 
 
+RdnaPath = RdnaResolution
+Port = SegmentPort
+
+
 class RdnaCassetteResolver:
     """Graph-walking resolver for multi-copy rDNA cassettes and distal telomere caps.
 
@@ -134,11 +171,16 @@ class RdnaCassetteResolver:
         self.ledger_by_port: dict[str, EndEvidence] = ledger
         self.policy = policy
         self.annotations = annotations
+        self.consumed_rdna: set[str] = set()
 
         self._ledger_by_name: dict[str, list[EndEvidence]] = defaultdict(list)
         for ev in self.ledger.values():
             if isinstance(ev, EndEvidence):
                 self._ledger_by_name[ev.segment_name].append(ev)
+
+    def _usco_count(self, seg_name: str) -> int:
+        """Alias for _get_usco_count."""
+        return self._get_usco_count(seg_name)
 
     def _is_contaminant(self, seg_name: str) -> bool:
         """Check whether a segment is flagged as contaminant or non-eukaryotic."""
@@ -302,11 +344,15 @@ class RdnaCassetteResolver:
 
         if self.annotations is not None and name in self.annotations:
             ann = self.annotations[name]
-            if bool(ann.barrnap_hits):
-                return True
+            return any(_is_45s_hit(h) for h in ann.barrnap_hits)
 
         for ev in self._ledger_by_name.get(name, []):
-            if ev.rdna_hit_count > 0 or ev.has_terminal_rdna or bool(ev.rdna_features):
+            if ev.rdna_features:
+                return any(
+                    (not any(p in f for p in ("16S", "23S"))) and any(sub in f for sub in ("18S", "5.8S", "28S"))
+                    for f in ev.rdna_features
+                )
+            if ev.rdna_hit_count > 0 or ev.has_terminal_rdna:
                 return True
 
         return False
@@ -338,16 +384,20 @@ class RdnaCassetteResolver:
 
         return False
 
+    def _infer_rdna_orientation(self, seg_name: str) -> Strand | None:
+        """Determine transcriptional orientation of 45S rDNA unitig (alias for get_intrinsic_rdna_orientation)."""
+        return self.get_intrinsic_rdna_orientation(seg_name)
+
     def get_intrinsic_rdna_orientation(self, seg_name: str) -> Strand | None:
         """Determine the 18S -> 5.8S -> 28S transcriptional strand of an rDNA unitig."""
         if self.annotations is not None and seg_name in self.annotations:
-            hits = self.annotations[seg_name].barrnap_hits
+            hits = [h for h in self.annotations[seg_name].barrnap_hits if _is_45s_hit(h)]
             pos_hits = [h for h in hits if h.strand == "+"]
             neg_hits = [h for h in hits if h.strand == "-"]
 
             # Check positive strand 18S -> 28S structure (increasing coordinates)
-            pos_18 = [h for h in pos_hits if "18S" in h.feature_name]
-            pos_28 = [h for h in pos_hits if "28S" in h.feature_name]
+            pos_18 = [h for h in pos_hits if "18S" in getattr(h, "product", h.feature_name)]
+            pos_28 = [h for h in pos_hits if "28S" in getattr(h, "product", h.feature_name)]
             pos_ordered = False
             pos_inverted = False
             if len(pos_18) > 0 and len(pos_28) > 0:
@@ -357,8 +407,8 @@ class RdnaCassetteResolver:
                     pos_inverted = True
 
             # Check negative strand 18S -> 28S structure (decreasing coordinates in unitig)
-            neg_18 = [h for h in neg_hits if "18S" in h.feature_name]
-            neg_28 = [h for h in neg_hits if "28S" in h.feature_name]
+            neg_18 = [h for h in neg_hits if "18S" in getattr(h, "product", h.feature_name)]
+            neg_28 = [h for h in neg_hits if "28S" in getattr(h, "product", h.feature_name)]
             neg_ordered = False
             neg_inverted = False
             if len(neg_18) > 0 and len(neg_28) > 0:
@@ -454,11 +504,12 @@ class RdnaCassetteResolver:
         self,
         expected_dir: Strand | None,
         visited_ids: set[str],
+        consumed_rdna: set[str] | None = None,
     ) -> list[SegmentPort]:
         """Find orphan rDNA-bearing telomeric cap unitigs matching orientation and purity criteria."""
         candidates: list[SegmentPort] = []
         for seg_id in sorted(self.graph.segments.keys()):
-            if seg_id in visited_ids:
+            if seg_id in visited_ids or (consumed_rdna and seg_id in consumed_rdna):
                 continue
             if self._is_contaminant_unitig(seg_id):
                 continue
@@ -497,9 +548,10 @@ class RdnaCassetteResolver:
         self,
         expected_dir: Strand | None,
         visited_ids: set[str],
+        consumed_rdna: set[str] | None = None,
     ) -> SegmentPort | None:
         """Find an orphan rDNA-bearing telomeric cap unitig matching orientation and purity criteria."""
-        candidates = self.find_candidate_heuristic_rdna_caps(expected_dir, visited_ids)
+        candidates = self.find_candidate_heuristic_rdna_caps(expected_dir, visited_ids, consumed_rdna=consumed_rdna)
         if len(candidates) == 0:
             return None
         return candidates[0]
@@ -527,13 +579,12 @@ class RdnaCassetteResolver:
                     entry_ports.append(port)
 
         def rank_entry(p: SegmentPort) -> tuple[int, int, str, str]:
-            usco_flag = 1 if self._get_usco_count(p.name) > 0 else 0
+            usco_cnt = self._get_usco_count(p.name)
             seg = self.graph.segments.get(p.name)
-            seg_len = seg.length if seg is not None else 0
-            # Sort descending by USCO presence and length, with deterministic name/strand
-            return (-usco_flag, -seg_len, p.name, p.strand.to_symbol())
+            seq_len = len(seg.sequence) if (seg and seg.sequence) else (seg.length if seg else 0)
+            return (usco_cnt, seq_len, p.name, p.strand.to_symbol())
 
-        entry_ports.sort(key=rank_entry)
+        entry_ports.sort(key=rank_entry, reverse=True)
         return entry_ports
 
     def find_rdna_entry_ports(self) -> list[SegmentPort]:
@@ -545,7 +596,9 @@ class RdnaCassetteResolver:
         ports = self.find_rdna_entry_ports()
         return ports[0] if len(ports) > 0 else None
 
-    def _find_paths(self, entry_port: SegmentPort) -> tuple[list[list[SegmentPort]], list[list[SegmentPort]]]:
+    def _find_paths(
+        self, entry_port: SegmentPort, consumed_rdna: set[str] | None = None
+    ) -> tuple[list[list[SegmentPort]], list[list[SegmentPort]]]:
         """Search for valid paths from entry_port through rDNA unitigs to distal caps."""
         max_hops = len(self.graph.segments)
         cap_paths: list[list[SegmentPort]] = []
@@ -565,7 +618,7 @@ class RdnaCassetteResolver:
 
             for edge in outgoing:
                 nxt = edge.to_port
-                if nxt.name in visited:
+                if nxt.name in visited or (consumed_rdna and nxt.name in consumed_rdna):
                     continue
                 if self._is_contaminant(nxt.name):
                     continue
@@ -596,7 +649,9 @@ class RdnaCassetteResolver:
 
         return cap_paths, rdna_paths
 
-    def reach_distal_telomere_cap(self, entry_port: SegmentPort | str | None = None) -> list[SegmentPort] | None:
+    def reach_distal_telomere_cap(
+        self, entry_port: SegmentPort | str | None = None, consumed_rdna: set[str] | None = None
+    ) -> list[SegmentPort] | None:
         """Identify the path that terminates at a distal telomeric cap unitig."""
         resolved_entry: SegmentPort | None
         if entry_port is None:
@@ -608,7 +663,7 @@ class RdnaCassetteResolver:
         if resolved_entry is None:
             return None
 
-        cap_paths, _ = self._find_paths(resolved_entry)
+        cap_paths, _ = self._find_paths(resolved_entry, consumed_rdna=consumed_rdna)
         if len(cap_paths) == 0:
             return None
 
@@ -619,14 +674,17 @@ class RdnaCassetteResolver:
         cap_paths.sort(key=score_path, reverse=True)
         return cap_paths[0]
 
-    def connect_to_telomere_cap(self, entry_port: SegmentPort | str | None = None) -> list[SegmentPort] | None:
+    def connect_to_telomere_cap(
+        self, entry_port: SegmentPort | str | None = None, consumed_rdna: set[str] | None = None
+    ) -> list[SegmentPort] | None:
         """Alias for reach_distal_telomere_cap."""
-        return self.reach_distal_telomere_cap(entry_port)
+        return self.reach_distal_telomere_cap(entry_port, consumed_rdna=consumed_rdna)
 
     def traverse_rdna_cassette(
         self,
         entry_port: SegmentPort | str | None = None,
         include_anchor: bool = False,
+        consumed_rdna: set[str] | None = None,
     ) -> list[SegmentPort]:
         """Traverse through connected rDNA unitigs chaining consistent copies."""
         resolved_entry: SegmentPort | None
@@ -642,7 +700,7 @@ class RdnaCassetteResolver:
         if resolved_entry.name in self._get_rdna_segments():
             return [resolved_entry] if include_anchor else []
 
-        cap_paths, rdna_paths = self._find_paths(resolved_entry)
+        cap_paths, rdna_paths = self._find_paths(resolved_entry, consumed_rdna=consumed_rdna)
 
         best_path: list[SegmentPort] = []
         if len(cap_paths) > 0:
@@ -758,9 +816,42 @@ class RdnaCassetteResolver:
         side: str = "5p",
         gap_index: int = 1,
         notes: str = "",
+        consumed_rdna: set[str] | None = None,
     ) -> RdnaResolution:
         """Resolve rDNA cassette walk from a core entry stem to a distal cap (graph-connected or heuristic)."""
-        path_to_cap = self.reach_distal_telomere_cap(entry_port)
+        active_consumed = self.consumed_rdna if consumed_rdna is None else consumed_rdna
+        outgoing = self.graph.get_outgoing(entry_port)
+        rdna_neighbors = [e.to_port for e in outgoing if self.is_rdna_unitig(e.to_port)]
+        if rdna_neighbors and all(p.name in active_consumed for p in rdna_neighbors):
+            feature_id_end = build_feature_id(EndState.END_SHARED_EXEMPT, chrom, side)
+            feature_id_res = build_feature_id(ResolutionType.RDNA_CASSETTE, chrom, side, index=gap_index)
+            return RdnaResolution(
+                chrom=chrom,
+                side=side,
+                state=EndState.END_SHARED_EXEMPT,
+                end_state_record=EndStateRecord(
+                    feature_id=feature_id_end,
+                    chrom=chrom,
+                    side=side,
+                    state=EndState.END_SHARED_EXEMPT,
+                    resolved=False,
+                    notes="Spurious/secondary entry port: all immediate rDNA neighbors already consumed",
+                ),
+                resolution_record=ResolutionRecord(
+                    feature_id=feature_id_res,
+                    chrom=chrom,
+                    side=side,
+                    resolution_type=ResolutionType.RDNA_CASSETTE,
+                    unitig_ids=(),
+                    representative_sequence_selected=False,
+                    notes="Spurious/secondary entry port: all immediate rDNA neighbors already consumed",
+                ),
+                path=[],
+                distal_cap_port=None,
+                reached_distal_cap=False,
+            )
+
+        path_to_cap = self.reach_distal_telomere_cap(entry_port, consumed_rdna=active_consumed)
 
         if path_to_cap is not None and len(path_to_cap) > 1:
             cap_port = path_to_cap[-1]
@@ -768,6 +859,11 @@ class RdnaCassetteResolver:
             path_len = self.compute_path_length(path_to_cap)
             all_unitigs = tuple(p.name for p in path_to_cap)
             rdna_unitigs = tuple(p.name for p in path_to_cap if self.is_rdna_unitig(p))
+
+            for p in path_to_cap:
+                if p.name != entry_port.name:
+                    active_consumed.add(p.name)
+            self.consumed_rdna.update(active_consumed)
 
             feature_id_end = build_feature_id(EndState.END_SHARED_EXEMPT, chrom, side)
             feature_id_res = build_feature_id(ResolutionType.RDNA_CASSETTE, chrom, side, index=gap_index)
@@ -839,7 +935,7 @@ class RdnaCassetteResolver:
         feature_id_end = build_feature_id(EndState.END_SHARED_EXEMPT, chrom, side)
         feature_id_res = build_feature_id(ResolutionType.RDNA_CASSETTE, chrom, side, index=gap_index)
 
-        unresolved_path = self.traverse_rdna_cassette(entry_port, include_anchor=True)
+        unresolved_path = self.traverse_rdna_cassette(entry_port, include_anchor=True, consumed_rdna=active_consumed)
         unlinked_join_indices: list[int] = []
 
         if len(unresolved_path) > 1:
@@ -848,7 +944,7 @@ class RdnaCassetteResolver:
             rdna_segs = self._get_rdna_segments()
             remaining_ports: dict[str, SegmentPort] = {}
             for s in sorted(rdna_segs):
-                if s in visited_names:
+                if s in visited_names or s in active_consumed:
                     continue
                 if self._get_usco_count(s) > 0:
                     continue
@@ -914,12 +1010,58 @@ class RdnaCassetteResolver:
         if len(chained) >= 1:
             expected_dir = self._effective_rdna_dir(chained[0])
             visited = {p.name for p in full_path}
-            candidates = self.find_candidate_heuristic_rdna_caps(expected_dir, visited)
+            candidates = self.find_candidate_heuristic_rdna_caps(expected_dir, visited, consumed_rdna=active_consumed)
             if len(candidates) > 0:
                 distal_cap_port = candidates[0]
                 capped_via_heuristic = True
                 if len(candidates) > 1:
                     excluded_unitigs = tuple(c.name for c in candidates[1:])
+
+        is_intercalary = False
+        exit_stem_port: SegmentPort | None = None
+        exact_dovetail_exit = True
+
+        if not capped_via_heuristic and distal_cap_port is None and len(full_path) > 1:
+            cand_exits: list[tuple[SegmentPort, bool]] = []
+            last_port = full_path[-1]
+            for edge in self.graph.get_outgoing(last_port):
+                nxt = edge.to_port
+                if (
+                    nxt.name != entry_port.name
+                    and nxt.name not in active_consumed
+                    and self._get_usco_count(nxt.name) > 0
+                    and not self._is_contaminant(nxt.name)
+                    and not self.is_rdna_unitig(nxt)
+                ):
+                    cand_exits.append((nxt, True))
+
+            if not cand_exits:
+                for p in reversed(full_path[1:]):
+                    for edge in self.graph.get_outgoing(p):
+                        nxt = edge.to_port
+                        if (
+                            nxt.name != entry_port.name
+                            and nxt.name not in active_consumed
+                            and self._get_usco_count(nxt.name) > 0
+                            and not self._is_contaminant(nxt.name)
+                            and not self.is_rdna_unitig(nxt)
+                        ):
+                            cand_exits.append((nxt, False))
+                    if cand_exits:
+                        break
+
+            if cand_exits:
+                cand_exits.sort(
+                    key=lambda item: (
+                        self._get_usco_count(item[0].name),
+                        self.graph.segments[item[0].name].length if item[0].name in self.graph.segments else 0,
+                        item[0].name,
+                    ),
+                    reverse=True,
+                )
+                exit_stem_port, exact_dovetail_exit = cand_exits[0]
+                is_intercalary = True
+                full_path.append(exit_stem_port)
 
         all_unitigs = tuple(p.name for p in full_path)
         if distal_cap_port is not None:
@@ -929,7 +1071,18 @@ class RdnaCassetteResolver:
 
         left_str = entry_port.to_symbol()
 
-        if capped_via_heuristic and distal_cap_port is not None:
+        if is_intercalary and exit_stem_port is not None:
+            right_str = exit_stem_port.to_symbol()
+            agp_component = "W" if exact_dovetail_exit else "U"
+            agp_evidence = "graph-walk" if exact_dovetail_exit else "rna_tangle"
+            unresolved_res_notes = (
+                f"Intercalary rDNA cassette connecting {entry_port.to_symbol()} to {exit_stem_port.to_symbol()}"
+            )
+            unresolved_end_notes = (
+                f"Intercalary rDNA cassette connecting {entry_port.to_symbol()} to {exit_stem_port.to_symbol()}"
+            )
+            resolved_flag = True
+        elif capped_via_heuristic and distal_cap_port is not None:
             right_str = distal_cap_port.to_symbol()
             agp_component = "U"
             agp_evidence = "rna_tangle"
@@ -937,12 +1090,14 @@ class RdnaCassetteResolver:
                 f"rDNA cassette tangle capped via heuristic at distal cap {distal_cap_port.to_symbol()}"
             )
             unresolved_end_notes = f"Shared exempt rDNA cassette capped via heuristic at {distal_cap_port.to_symbol()}"
+            resolved_flag = False
         else:
             right_str = None
             agp_component = "U"
             agp_evidence = "unresolved-tangle"
             unresolved_res_notes = "Unresolved rDNA cassette tangle: distal telomere cap not reached"
             unresolved_end_notes = "Unresolved rDNA cassette end"
+            resolved_flag = False
 
         if notes:
             unresolved_res_notes = f"{unresolved_res_notes}; {notes}"
@@ -982,9 +1137,15 @@ class RdnaCassetteResolver:
             side=side,
             state=EndState.END_SHARED_EXEMPT,
             shared_port=right_str,
-            resolved=False,
+            resolved=resolved_flag,
             notes=unresolved_end_notes,
         )
+
+        for p in full_path:
+            if p.name != entry_port.name and (exit_stem_port is None or p.name != exit_stem_port.name):
+                active_consumed.add(p.name)
+        active_consumed.update(excluded_unitigs)
+        self.consumed_rdna.update(active_consumed)
 
         return RdnaResolution(
             chrom=chrom,
@@ -999,6 +1160,9 @@ class RdnaCassetteResolver:
             reached_distal_cap=False,
             unlinked_join_indices=tuple(unlinked_join_indices),
             excluded_unitigs=excluded_unitigs,
+            is_intercalary=is_intercalary,
+            exit_stem_port=exit_stem_port,
+            exact_dovetail_exit=exact_dovetail_exit,
         )
 
     def resolve_rdna_cassette(
@@ -1008,6 +1172,7 @@ class RdnaCassetteResolver:
         entry_port: SegmentPort | str | None = None,
         gap_index: int = 1,
         notes: str = "",
+        consumed_rdna: set[str] | None = None,
     ) -> RdnaResolution:
         """Assemble traversed rDNA path and emit EndStateRecord and ResolutionRecord."""
         resolved_entry: SegmentPort | None
@@ -1065,6 +1230,7 @@ class RdnaCassetteResolver:
             side=side,
             gap_index=gap_index,
             notes=notes,
+            consumed_rdna=consumed_rdna,
         )
 
     def collect_unresolved_tangles(self, chained_segments: set[str] | Sequence[str] = ()) -> list[ResolutionRecord]:
