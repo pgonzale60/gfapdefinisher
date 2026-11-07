@@ -98,6 +98,7 @@ class PathComponent:
     linkage: str = "yes"
     linkage_evidence: str = "hifi-spanning"
     gap_component_type: str = "N"
+    feature_id: str | None = None
 
     def __init__(
         self,
@@ -117,6 +118,7 @@ class PathComponent:
         linkage: str = "yes",
         linkage_evidence: str = "hifi-spanning",
         gap_component_type: str = "N",
+        feature_id: str | None = None,
     ) -> None:
         seg_id = segment_id if segment_id is not None else (component_id or "")
         ov = overlap_to_next if overlap_to_next is not None else overlap_to_next_bp
@@ -153,6 +155,7 @@ class PathComponent:
         object.__setattr__(self, "linkage", linkage)
         object.__setattr__(self, "linkage_evidence", linkage_evidence)
         object.__setattr__(self, "gap_component_type", gap_component_type)
+        object.__setattr__(self, "feature_id", feature_id)
 
     @property
     def is_unpolished(self) -> bool:

@@ -229,6 +229,14 @@ def test_gap_distribution_statistics():
     assert dist_single.max_bp == 1500
     assert dist_single.iqr_bp == 0
 
+    # Two-value distribution (N=2 spanning reads [1187, 8887] yields inclusive iqr_bp = 3850)
+    dist_two = engine.compute_distribution([1187, 8887])
+    assert dist_two.count == 2
+    assert dist_two.min_bp == 1187
+    assert dist_two.max_bp == 8887
+    assert dist_two.median_bp == 5037
+    assert dist_two.iqr_bp == 3850
+
     # Multi-value distribution
     lengths = [1000, 1200, 1500, 1800, 2000]
     dist = engine.compute_distribution(lengths)
@@ -1298,8 +1306,8 @@ def test_identify_and_resolve_gaps_two_hop_grs():
     assert q2.right_anchor_port == "cap_3p+"
 
 
-def test_resolve_subtelomeric_satellite_caps_emits_hifi_spanning():
-    """Verify resolve_subtelomeric_satellite_caps sets agp_linkage_evidence to 'hifi-spanning'."""
+def test_resolve_subtelomeric_satellite_caps_emits_satellite_kmer():
+    """Verify resolve_subtelomeric_satellite_caps sets agp_linkage_evidence to 'satellite-kmer'."""
     graph = BidirectedGraph()
     rep_unit = "ACGTACGTACGTACG"  # 15-mer
     anchor_seq = ("C" * 1000) + (rep_unit * 200)
@@ -1356,7 +1364,7 @@ def test_resolve_subtelomeric_satellite_caps_emits_hifi_spanning():
 
     assert len(quirks) == 1
     q = quirks[0]
-    assert q.agp_linkage_evidence == "hifi-spanning"
+    assert q.agp_linkage_evidence == "satellite-kmer"
     assert q.agp_component_type == "U"
     assert q.length_median_bp == 100
     assert q.unitig_ids == ("anchor_sat", "cap_sat")

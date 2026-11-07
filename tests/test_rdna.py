@@ -9,7 +9,7 @@ from gfapdefinisher.annotations import BarrnapHit, NodeAnnotations, load_barrnap
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
-from gfapdefinisher.rdna import RdnaCassetteResolver
+from gfapdefinisher.rdna import RdnaCassetteResolver, is_rdna_unitig
 from gfapdefinisher.resolutions import (
     EndState,
     IntervalQuirk,
@@ -1040,7 +1040,8 @@ def test_resolve_entry_stem_concatenates_all_rdna_unitigs_and_records_excluded_c
     assert res.unlinked_join_indices == (2,)  # jump at rdna_2
     assert res.distal_cap_port == SegmentPort("cap_high", Strand.FORWARD)
     assert res.excluded_unitigs == ("cap_low",)
-    assert res.quirk_record.unitig_ids == ("stem", "rdna_1", "rdna_2", "rdna_3", "cap_high")
+    assert res.quirk_record.unitig_ids == ("rdna_1", "rdna_2", "rdna_3", "cap_high")
+    assert "stem" not in res.quirk_record.unitig_ids
 
 
 @pytest.mark.bio
@@ -1081,6 +1082,179 @@ def test_benchmark_df5120_full_rdna_concatenation_and_cap_exclusion():
     assert res.path[0] == p_anchor
     assert res.distal_cap_port == SegmentPort("utg000053l", Strand.REVERSE)
     assert res.excluded_unitigs == ("utg000098l",)
-    assert len(res.quirk_record.unitig_ids) == 17
+    assert len(res.quirk_record.unitig_ids) == 16
+    assert "utg000053l" in res.quirk_record.unitig_ids
+    assert "utg000013l" not in res.quirk_record.unitig_ids
     assert res.quirk_record.right_anchor_port == "utg000053l-"
     assert res.quirk_record.agp_linkage_evidence == "rna_tangle"
+
+
+def test_is_rdna_unitig_rejects_5s_only():
+    """Verify is_rdna_unitig rejects 5S rRNA and prokaryotic rRNA (16S, 23S) hits, accepting only 45S."""
+    hit_5s = BarrnapHit(
+        sequence_id="utg_5s",
+        start=1,
+        end=120,
+        strand="+",
+        feature_name="5S_rRNA",
+        evalue=1e-10,
+    )
+    ann_5s = {"utg_5s": NodeAnnotations(sequence_id="utg_5s", barrnap_hits=(hit_5s,))}
+    assert is_rdna_unitig("utg_5s", annotations=ann_5s) is False
+
+    # Ledger evidence with only 5S
+    ev_5s = _make_evidence("utg_5s_ev", "3p", rdna_hit_count=1, rdna_features=("5S_rRNA",))
+    assert is_rdna_unitig("utg_5s_ev", ledger={"utg_5s_ev+": ev_5s}) is False
+
+    # Prokaryotic rRNA hits
+    hit_16s = BarrnapHit(
+        sequence_id="utg_16s",
+        start=1,
+        end=1500,
+        strand="+",
+        feature_name="16S_rRNA",
+        evalue=1e-50,
+    )
+    ann_16s = {"utg_16s": NodeAnnotations(sequence_id="utg_16s", barrnap_hits=(hit_16s,))}
+    assert is_rdna_unitig("utg_16s", annotations=ann_16s) is False
+
+    hit_23s = BarrnapHit(
+        sequence_id="utg_23s",
+        start=1,
+        end=2900,
+        strand="+",
+        feature_name="23S_rRNA",
+        evalue=1e-50,
+    )
+    ann_23s = {"utg_23s": NodeAnnotations(sequence_id="utg_23s", barrnap_hits=(hit_23s,))}
+    assert is_rdna_unitig("utg_23s", annotations=ann_23s) is False
+
+    # Valid eukaryotic 45S rRNA hits
+    hit_18s = BarrnapHit(
+        sequence_id="utg_18s",
+        start=1,
+        end=1800,
+        strand="+",
+        feature_name="18S_rRNA",
+        evalue=1e-50,
+    )
+    ann_18s = {"utg_18s": NodeAnnotations(sequence_id="utg_18s", barrnap_hits=(hit_18s,))}
+    assert is_rdna_unitig("utg_18s", annotations=ann_18s) is True
+
+    hit_28s = BarrnapHit(
+        sequence_id="utg_28s",
+        start=1,
+        end=3500,
+        strand="+",
+        feature_name="28S_rRNA",
+        evalue=1e-50,
+    )
+    ann_28s = {"utg_28s": NodeAnnotations(sequence_id="utg_28s", barrnap_hits=(hit_28s,))}
+    assert is_rdna_unitig("utg_28s", annotations=ann_28s) is True
+
+
+def test_intercalary_45s_rdna_cluster_bridging_core_stems():
+    """Verify intercalary 45S rDNA cluster bridges two core chromosome stems without terminal telomeres."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem_A", length=50000, depth=60.0, sequence="A" * 50000)
+    graph.add_segment("rdna_int", length=15000, depth=180.0, sequence="C" * 15000)
+    graph.add_segment("stem_B", length=60000, depth=60.0, sequence="G" * 60000)
+
+    p_stem_A = SegmentPort("stem_A", Strand.FORWARD)
+    p_rdna_int = SegmentPort("rdna_int", Strand.FORWARD)
+    p_stem_B = SegmentPort("stem_B", Strand.FORWARD)
+
+    # stem_A+ -> rdna_int+ -> stem_B+
+    graph.add_edge(p_stem_A, p_rdna_int, cigar="100M")
+    graph.add_edge(p_rdna_int, p_stem_B, cigar="100M")
+
+    # Stems have USCO hits > 0 (core chromosomes), neither has terminal telomere
+    ledger = {
+        "stem_A+": _make_evidence("stem_A", "3p", usco_hit_count=5),
+        "stem_A-": _make_evidence("stem_A", "5p", usco_hit_count=5),
+        "rdna_int+": _make_evidence("rdna_int", "3p", rdna_hit_count=2, rdna_features=("18S_rRNA", "28S_rRNA")),
+        "rdna_int-": _make_evidence("rdna_int", "5p", rdna_hit_count=2, rdna_features=("18S_rRNA", "28S_rRNA")),
+        "stem_B+": _make_evidence("stem_B", "3p", usco_hit_count=6),
+        "stem_B-": _make_evidence("stem_B", "5p", usco_hit_count=6),
+    }
+
+    h18 = BarrnapHit(sequence_id="rdna_int", start=1000, end=2800, strand="+", feature_name="18S_rRNA", evalue=1e-50)
+    h28 = BarrnapHit(sequence_id="rdna_int", start=4000, end=7500, strand="+", feature_name="28S_rRNA", evalue=1e-50)
+    ann = {"rdna_int": NodeAnnotations(sequence_id="rdna_int", barrnap_hits=(h18, h28))}
+
+    resolver = RdnaCassetteResolver(graph, ledger, annotations=ann)
+    res = resolver.resolve_entry_stem(p_stem_A, chrom="chrI", side="3p")
+
+    assert res.is_intercalary is True
+    assert res.reached_distal_cap is False
+    assert res.exit_stem_port == p_stem_B
+    assert [p.name for p in res.path] == ["stem_A", "rdna_int", "stem_B"]
+
+
+def test_consumed_rdna_prevents_duplicate_cassette_traversal():
+    """Verify consumed_rdna prevents duplicate traversal of the same 45S rDNA cluster from multiple entry ports."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem_primary", length=80000, depth=60.0, sequence="A" * 80000)
+    graph.add_segment("stem_secondary", length=20000, depth=60.0, sequence="T" * 20000)
+    graph.add_segment("rdna_cluster", length=15000, depth=240.0, sequence="C" * 15000)
+    graph.add_segment("tel_cap", length=5000, depth=30.0, sequence="G" * 5000)
+
+    p_stem1 = SegmentPort("stem_primary", Strand.FORWARD)
+    p_stem2 = SegmentPort("stem_secondary", Strand.FORWARD)
+    p_rdna = SegmentPort("rdna_cluster", Strand.FORWARD)
+    p_cap = SegmentPort("tel_cap", Strand.FORWARD)
+
+    # Both stems connect into the same rDNA cluster
+    graph.add_edge(p_stem1, p_rdna, cigar="100M")
+    graph.add_edge(p_stem2, p_rdna, cigar="100M")
+    graph.add_edge(p_rdna, p_cap, cigar="100M")
+
+    ledger = {
+        "stem_primary+": _make_evidence("stem_primary", "3p", usco_hit_count=10),
+        "stem_primary-": _make_evidence("stem_primary", "5p", usco_hit_count=10),
+        "stem_secondary+": _make_evidence("stem_secondary", "3p", usco_hit_count=2),
+        "stem_secondary-": _make_evidence("stem_secondary", "5p", usco_hit_count=2),
+        "rdna_cluster+": _make_evidence("rdna_cluster", "3p", rdna_hit_count=2, rdna_features=("18S_rRNA", "28S_rRNA")),
+        "rdna_cluster-": _make_evidence("rdna_cluster", "5p", rdna_hit_count=2, rdna_features=("18S_rRNA", "28S_rRNA")),
+        "tel_cap+": _make_evidence(
+            "tel_cap",
+            "3p",
+            has_terminal_telomere=True,
+            rdna_hit_count=1,
+            rdna_features=("28S_rRNA",),
+        ),
+        "tel_cap-": _make_evidence(
+            "tel_cap",
+            "5p",
+            has_terminal_telomere=False,
+            rdna_hit_count=1,
+            rdna_features=("28S_rRNA",),
+        ),
+    }
+
+    h18 = BarrnapHit(
+        sequence_id="rdna_cluster", start=1000, end=2800, strand="+", feature_name="18S_rRNA", evalue=1e-50
+    )
+    h28 = BarrnapHit(
+        sequence_id="rdna_cluster", start=4000, end=7500, strand="+", feature_name="28S_rRNA", evalue=1e-50
+    )
+    ann = {"rdna_cluster": NodeAnnotations(sequence_id="rdna_cluster", barrnap_hits=(h18, h28))}
+
+    resolver = RdnaCassetteResolver(graph, ledger, annotations=ann)
+    consumed_rdna: set[str] = set()
+
+    # Primary stem resolves the rDNA cluster
+    res1 = resolver.resolve_entry_stem(p_stem1, chrom="chr1", side="3p", consumed_rdna=consumed_rdna)
+    assert res1.reached_distal_cap or res1.capped_via_heuristic
+    assert res1.distal_cap_port == p_cap
+    for p in res1.path[1:]:
+        consumed_rdna.add(p.name)
+    if res1.distal_cap_port:
+        consumed_rdna.add(res1.distal_cap_port.name)
+    consumed_rdna.update(res1.excluded_unitigs)
+
+    # Secondary stem entering the consumed cluster must return empty/unresolved, preventing duplicate cassette
+    res2 = resolver.resolve_entry_stem(p_stem2, chrom="chr2", side="3p", consumed_rdna=consumed_rdna)
+    assert len(res2.path) <= 1
+    assert res2.distal_cap_port is None
+    assert not res2.is_resolved

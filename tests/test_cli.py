@@ -813,7 +813,7 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     compleasm_path = benchmark_dir / "compleasm_unitigs_full_table.tsv"
     ont_paf_candidates = [
         benchmark_dir / "ont_to_utgs.paf",
-        benchmark_dir / "ont_to_flanks.paf",
+        Path("tests/data/df5120_ont_slice.paf.gz"),
     ]
     ont_paf_path = next((p for p in ont_paf_candidates if p.exists()), None)
 
@@ -863,7 +863,11 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
 
     # Step 2: Run finish WITH ONT PAF and reads to verify full bilateral T2T across all 6 chromosomes
     out_dir = tmp_path / "df5120_finish"
-    ont_reads_path = benchmark_dir / "ont_spanning_reads.fa.gz"
+    ont_reads_candidates = [
+        benchmark_dir / "ont_spanning_reads.fa.gz",
+        Path("tests/data/df5120_ont_slice.fa.gz"),
+    ]
+    ont_reads_path = next((p for p in ont_reads_candidates if p.exists()), None)
     finish_args = [
         "finish",
         "--gfa",
@@ -881,7 +885,7 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
         "--out-dir",
         str(out_dir),
     ]
-    if ont_reads_path.exists():
+    if ont_reads_path is not None and ont_reads_path.exists():
         finish_args.extend(["--ont-reads", str(ont_reads_path)])
 
     exit_code = main(finish_args)
@@ -906,14 +910,14 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     end_states = parse_end_states_tsv(out_dir / "end_states.tsv")
     utg9_feature_ids = {e.feature_id for e in end_states if e.chrom == "utg000009l"}
     assert "end_complete:utg000009l:3p" in utg9_feature_ids
-    if (benchmark_dir / "ont_to_utgs.paf").exists():
+    if ont_paf_path is not None and ont_paf_path.exists():
         assert ResolutionType.SAT_GAP_VARIABLE in res_types
         assert "end_complete:utg000009l:5p" in utg9_feature_ids
 
     # Verify scaffolds.agp contains the ONT-derived component for utg000009l:5p
     agp_records = parse_agp(out_dir / "scaffolds.agp")
     utg9_agp = [r for r in agp_records if r.object_id == "utg000009l"]
-    if (benchmark_dir / "ont_to_utgs.paf").exists() and ont_reads_path.exists():
+    if ont_paf_path is not None and ont_paf_path.exists() and ont_reads_path is not None and ont_reads_path.exists():
         ont_comps = [r for r in utg9_agp if getattr(r, "component_id", None) == "e59ed077-450e-4e48-ab71-19a19d3490b9"]
         assert len(ont_comps) == 1
         assert ont_comps[0].sequence_provenance == SequenceProvenance.ONT_DERIVED
@@ -936,11 +940,12 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     assert seq13[:3000].count("GCCTAA") >= 350
     assert seq13[-3000:].count("TTAGGC") >= 150
 
-    # Chr III (utg000002l, len 7,114,054): bilateral T2T with 5p satellite cap utg000150l+
+    # Chr III (utg000002l, len 7,187,254): bilateral T2T with 5p satellite cap utg000150l+ and intermediate satellite utg000083l
     seq2 = str(fasta["utg000002l"])
-    assert len(seq2) == 7114054
+    assert len(seq2) == 7187254
     assert seq2[:3000].count("GCCTAA") >= 150
     assert seq2[-3000:].count("TTAGGC") >= 200
+    assert "utg000083l" not in fasta
 
     # Chr IV (utg000004l, len 6,999,772): bilateral T2T
     seq4 = str(fasta["utg000004l"])
@@ -950,7 +955,7 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
 
     # Chr V (utg000009l): bilateral T2T with 5p ONT gap cap utg000217l+
     seq9 = str(fasta["utg000009l"])
-    if (benchmark_dir / "ont_to_utgs.paf").exists():
+    if ont_paf_path is not None and ont_paf_path.exists():
         assert seq9[:3000].count("GCCTAA") >= 400
     assert seq9[-3000:].count("TTAGGC") >= 200
 
