@@ -354,16 +354,58 @@ def build_scaffolds(
                     gp_5p = _parse_port(j_5p.germline_continuation_port)
                     g_chain_5p = _trace_germline_chain(graph, ledger_map, gp_5p, max_hops)
 
+            # 5p ONT satellite gap resolution
+            gres_5p: SatelliteGapResolution | None = None
+            if g_chain_5p and g_chain_5p[-1].name in gap_by_left:
+                gres_5p = gap_by_left[g_chain_5p[-1].name]
+            elif not g_chain_5p and first_port.name in gap_by_left:
+                cand_5p = gap_by_left[first_port.name]
+                if cand_5p.quirk_record.side == "5p":
+                    gres_5p = cand_5p
+
+            if gres_5p is not None and gres_5p.representative_sequence and gres_5p.representative_read:
+                qrec = gres_5p.quirk_record
+                r_name = qrec.right_anchor_port.rstrip("+-") if qrec.right_anchor_port else None
+                r_strand = (
+                    Strand.FORWARD if (qrec.right_anchor_port and "+" in qrec.right_anchor_port) else Strand.REVERSE
+                )
+                r_strand_inv = r_strand.invert()
+                if r_name and r_name in graph.segments:
+                    r_seg = graph.segments[r_name]
+                    r_seq = (
+                        r_seg.sequence if r_strand_inv == Strand.FORWARD else reverse_complement(r_seg.sequence or "")
+                    )
+                    comps.append(
+                        PathComponent(
+                            segment_id=r_name,
+                            strand=r_strand_inv.to_symbol(),
+                            sequence=r_seq,
+                            overlap_to_next_bp=0,
+                            sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+                        )
+                    )
+                    consumed.add(r_name)
+                comps.append(
+                    PathComponent(
+                        segment_id=gres_5p.representative_read.qname,
+                        strand="-",
+                        sequence=reverse_complement(gres_5p.representative_sequence or ""),
+                        overlap_to_next_bp=0,
+                        sequence_provenance=SequenceProvenance.ONT_DERIVED,
+                        unpolished=True,
+                    )
+                )
+
             prefix_ports = [p.invert() for p in reversed(g_chain_5p)]
             for i, port in enumerate(prefix_ports):
                 nxt_port = prefix_ports[i + 1] if i < len(prefix_ports) - 1 else first_port
                 overlap = _find_overlap_len(graph, port, nxt_port)
                 p_seg = graph.segments[port.name]
-                p_seq = p_seg.sequence if p.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
+                p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
                 comps.append(
                     PathComponent(
                         segment_id=port.name,
-                        strand=p.strand.to_symbol(),
+                        strand=port.strand.to_symbol(),
                         sequence=p_seq,
                         overlap_to_next_bp=overlap,
                         sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
@@ -470,33 +512,38 @@ def build_scaffolds(
         # 3p gap resolution
         cand_left = g_chain_3p[-1].name if g_chain_3p else last_port.name
         gres = gap_by_left.get(cand_left)
+        if gres is not None and gres.quirk_record.side == "5p":
+            gres = None
         if gres is None and cand_left != last_port.name:
-            gres = gap_by_left.get(last_port.name)
+            cand_gres = gap_by_left.get(last_port.name)
+            if cand_gres is not None and cand_gres.quirk_record.side != "5p":
+                gres = cand_gres
         if gres is None and not g_chain_3p:
             for e in graph.get_outgoing(SegmentPort(seg_name, Strand.FORWARD)):
                 target_seg = e.to_port.name
                 if target_seg in gap_by_left:
                     cand_gres = gap_by_left[target_seg]
-                    gres = cand_gres
-                    e_ov = parse_dovetail_overlap_len(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
-                    comps[-1].overlap_to_next_bp = e_ov
-                    grs_seg = graph.segments[target_seg]
-                    grs_seq = (
-                        grs_seg.sequence
-                        if e.to_port.strand == Strand.FORWARD
-                        else reverse_complement(grs_seg.sequence or "")
-                    )
-                    comps.append(
-                        PathComponent(
-                            segment_id=target_seg,
-                            strand=e.to_port.strand.to_symbol(),
-                            sequence=grs_seq,
-                            overlap_to_next_bp=0,
-                            sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+                    if cand_gres.quirk_record.side != "5p":
+                        gres = cand_gres
+                        e_ov = parse_dovetail_overlap_len(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
+                        comps[-1].overlap_to_next_bp = e_ov
+                        grs_seg = graph.segments[target_seg]
+                        grs_seq = (
+                            grs_seg.sequence
+                            if e.to_port.strand == Strand.FORWARD
+                            else reverse_complement(grs_seg.sequence or "")
                         )
-                    )
-                    consumed.add(target_seg)
-                    break
+                        comps.append(
+                            PathComponent(
+                                segment_id=target_seg,
+                                strand=e.to_port.strand.to_symbol(),
+                                sequence=grs_seq,
+                                overlap_to_next_bp=0,
+                                sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+                            )
+                        )
+                        consumed.add(target_seg)
+                        break
 
         if gres is not None and gres.representative_sequence and gres.representative_read:
             qrec = gres.quirk_record
