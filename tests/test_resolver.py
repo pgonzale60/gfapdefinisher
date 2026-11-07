@@ -1043,3 +1043,256 @@ def test_identify_and_resolve_gaps_prevents_overwrite_on_shared_target():
     assert resolved_stem.resolved is True
     assert resolved_stem.somatic_port == "chr_som+"
     assert resolved_stem.germline_port == "orphan_cap1+"
+
+
+def test_identify_and_resolve_gaps_opposite_strand_cap():
+    """Verify gap resolution when orphan cap terminal telomere is at 5' end (port cap-)."""
+    graph = BidirectedGraph()
+    graph.add_segment("chr_anchor", 50000)
+    graph.add_segment("cap_rev", 15000)
+
+    # cap_rev has terminal telomere at 5' end (port -), so port cap_rev- is telomeric
+    ev_plus = EndEvidence(
+        segment_name="cap_rev",
+        end="3p",
+        port=SegmentPort("cap_rev", Strand.PLUS),
+        length=15000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=False,
+        usco_hit_count=0,
+    )
+    ev_minus = EndEvidence(
+        segment_name="cap_rev",
+        end="5p",
+        port=SegmentPort("cap_rev", Strand.MINUS),
+        length=15000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=True,
+        usco_hit_count=0,
+    )
+
+    ledger = {
+        "cap_rev+": ev_plus,
+        "cap_rev-": ev_minus,
+    }
+
+    engine = OntBridgingEngine(graph=graph, ledger=ledger)
+    orphan_caps = engine.identify_orphan_caps()
+    assert "cap_rev" in orphan_caps
+    assert orphan_caps["cap_rev"] == ("cap_rev-", "cap_rev+")
+
+    initial_end = EndStateRecord(
+        feature_id="end_chr4_5p",
+        chrom="IV",
+        side="5p",
+        state=EndState.END_SOMATIC_MISSING,
+        somatic_port="chr4_som-",
+        germline_port="chr_anchor+",
+        resolved=False,
+    )
+    initial_quirk = QuirkRecord(
+        feature_id="q_chr4_5p",
+        chrom="IV",
+        side="5p",
+        quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+    )
+
+    paf_lines = [
+        _make_paf_line("r1", 20000, 1000, 2500, "+", "chr_anchor", 50000, 48500, 50000),
+        _make_paf_line("r1", 20000, 4000, 5500, "-", "cap_rev", 15000, 13500, 15000),
+        _make_paf_line("r2", 20000, 1000, 2500, "+", "chr_anchor", 50000, 48500, 50000),
+        _make_paf_line("r2", 20000, 4000, 5500, "-", "cap_rev", 15000, 13500, 15000),
+        _make_paf_line("r3", 20000, 1000, 2500, "+", "chr_anchor", 50000, 48500, 50000),
+        _make_paf_line("r3", 20000, 4000, 5500, "-", "cap_rev", 15000, 13500, 15000),
+    ]
+
+    end_states, quirks = engine.identify_and_resolve_gaps(
+        paf_source=paf_lines,
+        end_states=[initial_end],
+        quirks=[initial_quirk],
+    )
+
+    assert len(end_states) == 1
+    res_end = end_states[0]
+    assert res_end.state == EndState.END_COMPLETE
+    assert res_end.resolved is True
+    assert res_end.somatic_port == "chr4_som-"
+    assert res_end.germline_port == "cap_rev-"
+
+    assert len(quirks) == 1
+    res_quirk = quirks[0]
+    assert res_quirk.left_anchor_port == "chr_anchor+"
+    assert res_quirk.right_anchor_port == "cap_rev-"
+    assert res_quirk.spanning_read_count == 3
+
+
+def test_identify_and_resolve_gaps_filters_unmatched_pairs_when_end_states_provided():
+    """Verify that unassigned pairs in PAF do not create spurious ends when end_states is provided."""
+    graph = BidirectedGraph()
+    graph.add_segment("chr_anchor", 50000)
+    graph.add_segment("unrelated_a", 20000)
+    graph.add_segment("unrelated_b", 20000)
+
+    engine = OntBridgingEngine(graph=graph, ledger={})
+
+    initial_end = EndStateRecord(
+        feature_id="end_chr1_3p",
+        chrom="I",
+        side="3p",
+        state=EndState.END_SOMATIC_MISSING,
+        somatic_port="chr1_som+",
+        germline_port="chr_anchor+",
+        resolved=False,
+    )
+
+    paf_lines = [
+        _make_paf_line("r1", 20000, 1000, 2500, "+", "unrelated_a", 20000, 18500, 20000),
+        _make_paf_line("r1", 20000, 4000, 5500, "+", "unrelated_b", 20000, 0, 1500),
+        _make_paf_line("r2", 20000, 1000, 2500, "+", "unrelated_a", 20000, 18500, 20000),
+        _make_paf_line("r2", 20000, 4000, 5500, "+", "unrelated_b", 20000, 0, 1500),
+        _make_paf_line("r3", 20000, 1000, 2500, "+", "unrelated_a", 20000, 18500, 20000),
+        _make_paf_line("r3", 20000, 4000, 5500, "+", "unrelated_b", 20000, 0, 1500),
+    ]
+
+    end_states, quirks = engine.identify_and_resolve_gaps(
+        paf_source=paf_lines,
+        end_states=[initial_end],
+        quirks=[],
+    )
+
+    assert len(end_states) == 1
+    assert end_states[0].chrom == "I"
+    assert end_states[0].resolved is False
+    assert len(quirks) == 0
+
+
+def test_identify_and_resolve_gaps_two_hop_grs():
+    """Verify 2-hop ONT GRS gap bridging: anchor -> mid_grs -> cap."""
+    graph = BidirectedGraph()
+    graph.add_segment("chr3_anchor", 50000)
+    graph.add_segment("mid_grs", 25000)
+    graph.add_segment("cap_3p", 10000)
+
+    mid_plus = EndEvidence(
+        segment_name="mid_grs",
+        end="3p",
+        port=SegmentPort("mid_grs", Strand.PLUS),
+        length=25000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=False,
+        usco_hit_count=0,
+    )
+    mid_minus = EndEvidence(
+        segment_name="mid_grs",
+        end="5p",
+        port=SegmentPort("mid_grs", Strand.MINUS),
+        length=25000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=False,
+        usco_hit_count=0,
+    )
+
+    cap_plus = EndEvidence(
+        segment_name="cap_3p",
+        end="3p",
+        port=SegmentPort("cap_3p", Strand.PLUS),
+        length=10000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=True,
+        usco_hit_count=0,
+    )
+    cap_minus = EndEvidence(
+        segment_name="cap_3p",
+        end="5p",
+        port=SegmentPort("cap_3p", Strand.MINUS),
+        length=10000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=False,
+        usco_hit_count=0,
+    )
+
+    ledger = {
+        "mid_grs+": mid_plus,
+        "mid_grs-": mid_minus,
+        "cap_3p+": cap_plus,
+        "cap_3p-": cap_minus,
+    }
+
+    engine = OntBridgingEngine(graph=graph, ledger=ledger)
+    orphan_caps = engine.identify_orphan_caps()
+    assert "cap_3p" in orphan_caps
+
+    unlinked_grs = engine.identify_unlinked_grs_unitigs()
+    assert "mid_grs" in unlinked_grs
+
+    initial_end = EndStateRecord(
+        feature_id="end_chr3_3p",
+        chrom="III",
+        side="3p",
+        state=EndState.END_SOMATIC_MISSING,
+        somatic_port="chr3_som+",
+        germline_port="chr3_anchor+",
+        resolved=False,
+    )
+    initial_quirk = QuirkRecord(
+        feature_id="q_chr3_3p",
+        chrom="III",
+        side="3p",
+        quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+    )
+
+    paf_lines = [
+        # Hop 1 reads (r1, r2, r3)
+        _make_paf_line("r1", 20000, 1000, 2500, "+", "chr3_anchor", 50000, 48500, 50000),
+        _make_paf_line("r1", 20000, 4000, 5500, "+", "mid_grs", 25000, 0, 1500),
+        _make_paf_line("r2", 20000, 1000, 2500, "+", "chr3_anchor", 50000, 48500, 50000),
+        _make_paf_line("r2", 20000, 4000, 5500, "+", "mid_grs", 25000, 0, 1500),
+        _make_paf_line("r3", 20000, 1000, 2500, "+", "chr3_anchor", 50000, 48500, 50000),
+        _make_paf_line("r3", 20000, 4000, 5500, "+", "mid_grs", 25000, 0, 1500),
+        # Hop 2 reads (r4, r5, r6)
+        _make_paf_line("r4", 20000, 1000, 2500, "-", "mid_grs", 25000, 0, 1500),
+        _make_paf_line("r4", 20000, 4000, 5500, "+", "cap_3p", 10000, 0, 1500),
+        _make_paf_line("r5", 20000, 1000, 2500, "-", "mid_grs", 25000, 0, 1500),
+        _make_paf_line("r5", 20000, 4000, 5500, "+", "cap_3p", 10000, 0, 1500),
+        _make_paf_line("r6", 20000, 1000, 2500, "-", "mid_grs", 25000, 0, 1500),
+        _make_paf_line("r6", 20000, 4000, 5500, "+", "cap_3p", 10000, 0, 1500),
+    ]
+
+    end_states, quirks = engine.identify_and_resolve_gaps(
+        paf_source=paf_lines,
+        end_states=[initial_end],
+        quirks=[initial_quirk],
+    )
+
+    assert len(end_states) == 1
+    res_end = end_states[0]
+    assert res_end.state == EndState.END_COMPLETE
+    assert res_end.resolved is True
+    assert res_end.somatic_port == "chr3_som+"
+    assert res_end.germline_port == "cap_3p+"
+
+    assert len(quirks) == 2
+    q1 = next(q for q in quirks if ":1" in q.feature_id)
+    q2 = next(q for q in quirks if ":2" in q.feature_id)
+    assert q1.left_anchor_port == "chr3_anchor+"
+    assert q1.right_anchor_port == "mid_grs+"
+    assert q2.left_anchor_port == "mid_grs-"
+    assert q2.right_anchor_port == "cap_3p+"
