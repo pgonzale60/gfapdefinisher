@@ -7,23 +7,31 @@ import pytest
 
 from gfapdefinisher.classifier import PdeJunctionCall
 from gfapdefinisher.models import SegmentPort, Strand
-from gfapdefinisher.quirks import (
+from gfapdefinisher.resolutions import (
     END_STATE_TSV_COLUMNS,
     JUNCTION_TSV_COLUMNS,
+    QUIRK_COLUMNS,
+    QUIRK_TSV_COLUMNS,
+    RESOLUTION_COLUMNS,
+    RESOLUTION_TSV_COLUMNS,
     EndState,
     EndStateRecord,
     IntervalQuirk,
     JunctionClass,
     JunctionRecord,
     QuirkRecord,
+    ResolutionRecord,
+    ResolutionType,
     build_feature_id,
     create_junction_record,
     emit_end_states_tsv,
     emit_junctions_tsv,
     emit_quirks_tsv,
+    emit_resolutions_tsv,
     parse_end_states_tsv,
     parse_junctions_tsv,
     parse_quirks_tsv,
+    parse_resolutions_tsv,
 )
 
 
@@ -71,12 +79,25 @@ def test_interval_quirk_enum_values_and_access():
         "low_support_stub",
         "bubble_rejoining",
         "itr",
+        "subtelomeric_dup",
+        "intercalary_elimination_candidate",
+        "somatic_allelic_bubble",
+        "intercalary_grs_bridge",
+        "pde_terminal_cap",
+        "subtelomeric_satellite_cap",
     }
     assert {e.value for e in IntervalQuirk} == expected_values
 
     for val in expected_values:
         assert getattr(IntervalQuirk, val) == val
         assert IntervalQuirk(val).value == val
+
+    # Verify ResolutionType alias behaves identically
+    assert ResolutionType is IntervalQuirk
+    assert ResolutionRecord is QuirkRecord
+    assert RESOLUTION_COLUMNS == QUIRK_COLUMNS == QUIRK_TSV_COLUMNS == RESOLUTION_TSV_COLUMNS
+    assert emit_resolutions_tsv is emit_quirks_tsv
+    assert parse_resolutions_tsv is parse_quirks_tsv
 
 
 def test_build_feature_id():
@@ -221,6 +242,30 @@ def test_quirk_record_validation_and_serialization():
     assert row[4] == "7"
     assert row[6] == "8500"
     assert row[19] == "True"
+    assert row[23] == ""
+    assert row[24] == ""
+    assert row[25] == ""
+
+    # Record with AGP coordinates and excluded unitigs
+    rec_coords = QuirkRecord(
+        feature_id="somatic_allelic_bubble:I:mid:1",
+        chrom="I",
+        side="mid",
+        quirk_type=IntervalQuirk.SOMATIC_ALLELIC_BUBBLE,
+        agp_start=1000,
+        agp_end=5000,
+        unitig_ids=["utg_pri"],  # type: ignore[arg-type]
+        excluded_unitig_ids=["utg_alt"],  # type: ignore[arg-type]
+    )
+    assert rec_coords.agp_start == 1000
+    assert rec_coords.agp_end == 5000
+    assert rec_coords.excluded_unitig_ids == ("utg_alt",)
+    d_coords = rec_coords.to_dict()
+    assert d_coords["excluded_unitig_ids"] == ["utg_alt"]
+    row_coords = rec_coords.to_tsv_row()
+    assert row_coords[23] == "1000"
+    assert row_coords[24] == "5000"
+    assert row_coords[25] == "utg_alt"
 
     # Validation errors
     with pytest.raises(ValueError, match="Chromosome cannot be empty"):
@@ -237,6 +282,16 @@ def test_quirk_record_validation_and_serialization():
             quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
             length_min_bp=9000,
             length_max_bp=8000,
+        )
+
+    with pytest.raises(ValueError, match="cannot exceed agp_end"):
+        QuirkRecord(
+            feature_id="f",
+            chrom="IV",
+            side="3p",
+            quirk_type=IntervalQuirk.SOMATIC_ALLELIC_BUBBLE,
+            agp_start=5000,
+            agp_end=1000,
         )
 
 
@@ -320,6 +375,131 @@ def test_quirks_tsv_roundtrip(tmp_path: Path):
     parsed_fs = parse_quirks_tsv(tsv_path)
     assert len(parsed_fs) == 3
     assert parsed_fs[0].feature_id == records[0].feature_id
+
+
+def test_resolutions_tsv_roundtrip_new_types(tmp_path: Path):
+    """Verify round-trip TSV serialization/deserialization for new ResolutionType members and fields."""
+    records = [
+        ResolutionRecord(
+            feature_id="somatic_allelic_bubble:I:mid:1",
+            chrom="I",
+            side="mid",
+            quirk_type=ResolutionType.SOMATIC_ALLELIC_BUBBLE,
+            left_anchor_port="anchor_01+",
+            right_anchor_port="anchor_02+",
+            agp_component_type="W",
+            agp_linkage_evidence="graph",
+            unitig_ids=("utg_bubble_pri",),
+            excluded_unitig_ids=("utg_bubble_alt",),
+            agp_start=1000,
+            agp_end=5000,
+            core_coverage_bp_median=45.0,
+            core_depth_ratio=1.0,
+            representative_sequence_selected=True,
+            notes="Traversed 2-hop diploid somatic bubble selecting higher-depth primary allele",
+        ),
+        ResolutionRecord(
+            feature_id="intercalary_grs_bridge:X:mid:1",
+            chrom="X",
+            side="mid",
+            quirk_type=ResolutionType.INTERCALARY_GRS_BRIDGE,
+            left_anchor_port="fork_left+",
+            right_anchor_port="fork_right-",
+            agp_component_type="W",
+            agp_linkage_evidence="graph",
+            unitig_ids=("utg_grs_bridge",),
+            agp_start=5001,
+            agp_end=9000,
+            core_coverage_bp_median=45.0,
+            core_depth_ratio=0.12,
+            representative_sequence_selected=True,
+            notes="Intact non-eliminated germline-restricted bridge unitig across paired PDE forks",
+        ),
+        ResolutionRecord(
+            feature_id="pde_terminal_cap:II:5p:1",
+            chrom="II",
+            side="5p",
+            quirk_type=ResolutionType.PDE_TERMINAL_CAP,
+            left_anchor_port="stem_port+",
+            right_anchor_port="cap_port+",
+            agp_component_type="W",
+            agp_linkage_evidence="graph",
+            unitig_ids=("utg_chain_1", "utg_telo_cap"),
+            excluded_unitig_ids=("utg_somatic_stub",),
+            agp_start=9001,
+            agp_end=12000,
+            core_coverage_bp_median=45.0,
+            core_depth_ratio=0.15,
+            representative_sequence_selected=True,
+            notes="Terminal PDE fork resolved by walking germline continuation chain to telomeric cap",
+        ),
+        ResolutionRecord(
+            feature_id="subtelomeric_satellite_cap:III:3p:1",
+            chrom="III",
+            side="3p",
+            quirk_type=ResolutionType.SUBTELOMERIC_SATELLITE_CAP,
+            left_anchor_port="sat_arm+",
+            right_anchor_port="orphan_cap+",
+            agp_component_type="U",
+            agp_linkage_evidence="unbridged",
+            unitig_ids=("utg_sat_arm",),
+            agp_start=12001,
+            agp_end=15000,
+            core_coverage_bp_median=45.0,
+            core_depth_ratio=0.10,
+            representative_sequence_selected=False,
+            notes="Tandem-satellite germline arm capped via k-mer monomer matching to orphan cap",
+        ),
+    ]
+
+    # In-memory emission and parsing
+    tsv_content = emit_resolutions_tsv(records)
+    assert tsv_content.startswith("\t".join(RESOLUTION_COLUMNS))
+    parsed = parse_resolutions_tsv(tsv_content)
+    assert len(parsed) == 4
+
+    assert parsed[0].feature_id == "somatic_allelic_bubble:I:mid:1"
+    assert parsed[0].quirk_type is ResolutionType.SOMATIC_ALLELIC_BUBBLE
+    assert parsed[0].unitig_ids == ("utg_bubble_pri",)
+    assert parsed[0].excluded_unitig_ids == ("utg_bubble_alt",)
+    assert parsed[0].agp_start == 1000
+    assert parsed[0].agp_end == 5000
+    assert parsed[0].core_depth_ratio == 1.0
+
+    assert parsed[1].feature_id == "intercalary_grs_bridge:X:mid:1"
+    assert parsed[1].quirk_type is ResolutionType.INTERCALARY_GRS_BRIDGE
+    assert parsed[1].unitig_ids == ("utg_grs_bridge",)
+    assert parsed[1].excluded_unitig_ids == ()
+    assert parsed[1].agp_start == 5001
+    assert parsed[1].agp_end == 9000
+
+    assert parsed[2].feature_id == "pde_terminal_cap:II:5p:1"
+    assert parsed[2].quirk_type is ResolutionType.PDE_TERMINAL_CAP
+    assert parsed[2].unitig_ids == ("utg_chain_1", "utg_telo_cap")
+    assert parsed[2].excluded_unitig_ids == ("utg_somatic_stub",)
+    assert parsed[2].agp_start == 9001
+    assert parsed[2].agp_end == 12000
+
+    assert parsed[3].feature_id == "subtelomeric_satellite_cap:III:3p:1"
+    assert parsed[3].quirk_type is ResolutionType.SUBTELOMERIC_SATELLITE_CAP
+    assert parsed[3].agp_component_type == "U"
+    assert parsed[3].agp_linkage_evidence == "unbridged"
+    assert parsed[3].agp_start == 12001
+    assert parsed[3].agp_end == 15000
+
+    # File-based round-trip
+    tsv_file = tmp_path / "resolutions.tsv"
+    emit_resolutions_tsv(records, tsv_file)
+    assert tsv_file.exists()
+    parsed_fs = parse_resolutions_tsv(tsv_file)
+    assert parsed_fs == parsed
+
+    # Roundtrip with comments and empty lines
+    commented_tsv = (
+        f"# Curator Resolution Audit Table\n# Generated by gfapdefinisher\n{tsv_content}\n# End of audit table\n"
+    )
+    parsed_commented = parse_resolutions_tsv(commented_tsv)
+    assert parsed_commented == parsed
 
 
 def test_sat_gap_variable_resolution_rule_semantics():
@@ -604,14 +784,14 @@ def test_create_junction_record_repeat_entry():
 
 def test_top_level_package_exports():
     import gfapdefinisher as g
-    import gfapdefinisher.quirks as gq
+    import gfapdefinisher.resolutions as gq
 
     assert hasattr(g, "EndStateRecord")
     assert hasattr(g, "JunctionRecord")
-    assert hasattr(g, "QuirkRecord")
+    assert hasattr(g, "ResolutionRecord")
     assert hasattr(g, "EndState")
     assert hasattr(g, "JunctionClass")
-    assert hasattr(g, "IntervalQuirk")
+    assert hasattr(g, "ResolutionType")
     assert hasattr(g, "DEFAULT_POLICY")
     assert hasattr(g, "Policy")
     assert g.DEFAULT_POLICY is not None
@@ -622,6 +802,14 @@ def test_top_level_package_exports():
     assert "parse_end_states_tsv" in gq.__all__
     assert "emit_junctions_tsv" in gq.__all__
     assert "parse_junctions_tsv" in gq.__all__
+    assert "emit_quirks_tsv" in gq.__all__
+    assert "parse_quirks_tsv" in gq.__all__
+    assert "emit_resolutions_tsv" in gq.__all__
+    assert "parse_resolutions_tsv" in gq.__all__
+    assert "ResolutionType" in gq.__all__
+    assert "ResolutionRecord" in gq.__all__
+    assert "RESOLUTION_COLUMNS" in gq.__all__
+    assert "RESOLUTION_TSV_COLUMNS" in gq.__all__
 
 
 def test_end_states_tsv_special_characters_and_comments():
@@ -699,6 +887,12 @@ def test_nonexistent_tsv_raises_filenotfound():
     with pytest.raises(FileNotFoundError):
         parse_junctions_tsv("nonexistent_junctions.tsv")
 
+    with pytest.raises(FileNotFoundError):
+        parse_quirks_tsv("nonexistent_quirks.tsv")
+
+    with pytest.raises(FileNotFoundError):
+        parse_resolutions_tsv("nonexistent_resolutions.tsv")
+
 
 def test_junction_record_break_index_validation():
     """Verify JunctionRecord enforces break_index >= 1."""
@@ -770,7 +964,7 @@ def test_benchmark_df5120_collect_features_intercalary_grs_bridges():
     from gfapdefinisher.classifier import compute_core_coverage
     from gfapdefinisher.graph import load_gfa
     from gfapdefinisher.ledger import build_end_evidence_ledger
-    from gfapdefinisher.quirks import collect_features
+    from gfapdefinisher.resolutions import collect_features
 
     graph = load_gfa(gfa_path)
     annotations = aggregate_node_annotations(

@@ -4,7 +4,7 @@ Implements BIO-001 (unconditional terminal completion) and BIO-004 (representati
 repeat preservation for variable-length tandem satellites). Bridges candidate unitig
 ports using long ONT reads, detects innermost boundary hits to disambiguate multivalent
 satellite repeat arrays, computes empirical gap distributions, and emits ratified
-QuirkRecord and EndStateRecord instances.
+ResolutionRecord and EndStateRecord instances.
 """
 
 from __future__ import annotations
@@ -20,11 +20,11 @@ from typing import Any, TextIO
 from gfapdefinisher.emitter import DEFAULT_AGP_POLICY, AgpPolicy
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY, Policy
-from gfapdefinisher.quirks import (
+from gfapdefinisher.resolutions import (
     EndState,
     EndStateRecord,
-    IntervalQuirk,
-    QuirkRecord,
+    ResolutionRecord,
+    ResolutionType,
     build_feature_id,
 )
 
@@ -218,24 +218,58 @@ class SatelliteGapResolution:
     chrom: str
     side: str
     state: EndState
-    quirk_record: QuirkRecord
+    resolution_record: ResolutionRecord
     end_state_record: EndStateRecord
     spanning_reads: list[SpanningRead]
     representative_read: SpanningRead | None = None
     representative_sequence: str | None = None
     distribution: GapDistribution | None = None
 
+    def __init__(
+        self,
+        chrom: str,
+        side: str,
+        state: EndState,
+        resolution_record: ResolutionRecord | None = None,
+        end_state_record: EndStateRecord | None = None,
+        spanning_reads: list[SpanningRead] | None = None,
+        representative_read: SpanningRead | None = None,
+        representative_sequence: str | None = None,
+        distribution: GapDistribution | None = None,
+        *,
+        quirk_record: ResolutionRecord | None = None,
+    ) -> None:
+        self.chrom = chrom
+        self.side = side
+        self.state = state
+        res_rec = resolution_record if resolution_record is not None else quirk_record
+        if res_rec is None:
+            raise ValueError("resolution_record cannot be empty.")
+        self.resolution_record = res_rec
+        if end_state_record is None:
+            raise ValueError("end_state_record cannot be empty.")
+        self.end_state_record = end_state_record
+        self.spanning_reads = spanning_reads if spanning_reads is not None else []
+        self.representative_read = representative_read
+        self.representative_sequence = representative_sequence
+        self.distribution = distribution
+
+    @property
+    def quirk_record(self) -> ResolutionRecord:
+        """Alias for backward compatibility with quirk record access."""
+        return self.resolution_record
+
     @property
     def left_flank_port(self) -> SegmentPort | None:
-        if self.quirk_record and self.quirk_record.left_anchor_port:
-            name, strand = _parse_port_spec(self.quirk_record.left_anchor_port)
+        if self.resolution_record and self.resolution_record.left_anchor_port:
+            name, strand = _parse_port_spec(self.resolution_record.left_anchor_port)
             return SegmentPort(name, strand)
         return None
 
     @property
     def right_flank_port(self) -> SegmentPort | None:
-        if self.quirk_record and self.quirk_record.right_anchor_port:
-            name, strand = _parse_port_spec(self.quirk_record.right_anchor_port)
+        if self.resolution_record and self.resolution_record.right_anchor_port:
+            name, strand = _parse_port_spec(self.resolution_record.right_anchor_port)
             return SegmentPort(name, strand)
         return None
 
@@ -245,14 +279,14 @@ class SatelliteGapResolution:
 
     @property
     def median_gap_bp(self) -> float:
-        if self.quirk_record and self.quirk_record.length_median_bp is not None:
-            return float(self.quirk_record.length_median_bp)
+        if self.resolution_record and self.resolution_record.length_median_bp is not None:
+            return float(self.resolution_record.length_median_bp)
         return float(DEFAULT_AGP_POLICY.unknown_gap_bp.value)
 
     @property
     def gap_index(self) -> int:
-        if self.quirk_record and self.quirk_record.feature_id:
-            parts = self.quirk_record.feature_id.split(":")
+        if self.resolution_record and self.resolution_record.feature_id:
+            parts = self.resolution_record.feature_id.split(":")
             if len(parts) > 2 and parts[-1].isdigit():
                 return int(parts[-1])
         return 1
@@ -369,7 +403,7 @@ class OntBridgingEngine:
             self.policy = policy
 
         self.gap_resolutions: list[SatelliteGapResolution] = []
-        self.dropout_resolutions: list[tuple[QuirkRecord, EndStateRecord, str | None]] = []
+        self.dropout_resolutions: list[tuple[ResolutionRecord, EndStateRecord, str | None]] = []
 
     def collect_spanning_read_ids(
         self,
@@ -532,9 +566,9 @@ class OntBridgingEngine:
         self,
         paf_source: Path | str | TextIO | Iterable[str] | Iterable[PafHit],
         end_states: list[EndStateRecord],
-        quirks: list[QuirkRecord],
+        quirks: list[ResolutionRecord],
         reads_sequences: Mapping[str, str] | Path | str | None = None,
-    ) -> tuple[list[EndStateRecord], list[QuirkRecord]]:
+    ) -> tuple[list[EndStateRecord], list[ResolutionRecord]]:
         """Identify candidate variable satellite gap pairs and resolve them via ONT bridging."""
         orphan_caps = self.identify_orphan_caps()
         unlinked_grs = self.identify_unlinked_grs_unitigs()
@@ -723,16 +757,16 @@ class OntBridgingEngine:
                     new_ends.append(res.end_state_record)
                 end_states = new_ends
 
-                new_quirks: list[QuirkRecord] = []
+                new_quirks: list[ResolutionRecord] = []
                 replaced_quirk = False
                 for qr in quirks:
-                    if qr.chrom == chrom and qr.side == side and qr.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE:
-                        new_quirks.append(res.quirk_record)
+                    if qr.chrom == chrom and qr.side == side and qr.resolution_type == ResolutionType.SAT_GAP_VARIABLE:
+                        new_quirks.append(res.resolution_record)
                         replaced_quirk = True
                     else:
                         new_quirks.append(qr)
                 if not replaced_quirk:
-                    new_quirks.append(res.quirk_record)
+                    new_quirks.append(res.resolution_record)
                 quirks = new_quirks
 
         floor = self.policy.ont.min_spanning_reads.value
@@ -861,11 +895,13 @@ class OntBridgingEngine:
                     q
                     for q in quirks
                     if not (
-                        q.chrom == er.chrom and q.side == er.side and q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE
+                        q.chrom == er.chrom
+                        and q.side == er.side
+                        and q.resolution_type == ResolutionType.SAT_GAP_VARIABLE
                     )
                 ]
-                quirks.append(res1.quirk_record)
-                quirks.append(res2.quirk_record)
+                quirks.append(res1.resolution_record)
+                quirks.append(res2.resolution_record)
                 break
 
         end_states, quirks = self.resolve_subtelomeric_satellite_caps(
@@ -881,11 +917,11 @@ class OntBridgingEngine:
     def resolve_subtelomeric_satellite_caps(
         self,
         end_states: list[EndStateRecord],
-        quirks: list[QuirkRecord],
+        quirks: list[ResolutionRecord],
         orphan_caps: dict[str, tuple[str, str]] | None = None,
         used_cap_segs: set[str] | None = None,
         resolved_end_keys: set[tuple[str, str]] | None = None,
-    ) -> tuple[list[EndStateRecord], list[QuirkRecord]]:
+    ) -> tuple[list[EndStateRecord], list[ResolutionRecord]]:
         """Resolve remaining unresolved ends whose distal tip terminates in a tandem satellite repeat matching an orphan cap."""
         if self.graph is None:
             return end_states, quirks
@@ -964,14 +1000,14 @@ class OntBridgingEngine:
                 cap_tel_name, cap_tel_strand = _parse_port_spec(cap_tel_port)
                 cap_port = SegmentPort(cap_tel_name, cap_tel_strand)
 
-                feature_id_quirk = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, er.chrom, er.side, index=1)
+                feature_id_res = build_feature_id(ResolutionType.SUBTELOMERIC_SATELLITE_CAP, er.chrom, er.side, index=1)
                 feature_id_end = build_feature_id(EndState.END_COMPLETE, er.chrom, er.side)
 
-                quirk_record = QuirkRecord(
-                    feature_id=feature_id_quirk,
+                resolution_record = ResolutionRecord(
+                    feature_id=feature_id_res,
                     chrom=er.chrom,
                     side=er.side,
-                    quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+                    resolution_type=ResolutionType.SUBTELOMERIC_SATELLITE_CAP,
                     spanning_read_count=0,
                     length_min_bp=unknown_gap,
                     length_median_bp=unknown_gap,
@@ -982,7 +1018,7 @@ class OntBridgingEngine:
                     left_anchor_port=anchor_port.to_symbol(),
                     right_anchor_port=cap_port.to_symbol(),
                     agp_component_type="U",
-                    agp_linkage_evidence="paired-ends",
+                    agp_linkage_evidence="hifi-spanning",
                     unitig_ids=(anchor_name, cap_id),
                     read_count=0,
                     core_coverage_bp_median=er.core_coverage_bp_median,
@@ -1012,7 +1048,7 @@ class OntBridgingEngine:
                     chrom=er.chrom,
                     side=er.side,
                     state=EndState.END_COMPLETE,
-                    quirk_record=quirk_record,
+                    resolution_record=resolution_record,
                     end_state_record=end_state_record,
                     spanning_reads=[],
                     representative_read=None,
@@ -1037,10 +1073,13 @@ class OntBridgingEngine:
                     q
                     for q in quirks
                     if not (
-                        q.chrom == er.chrom and q.side == er.side and q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE
+                        q.chrom == er.chrom
+                        and q.side == er.side
+                        and q.resolution_type
+                        in (ResolutionType.SAT_GAP_VARIABLE, ResolutionType.SUBTELOMERIC_SATELLITE_CAP)
                     )
                 ]
-                quirks.append(quirk_record)
+                quirks.append(resolution_record)
                 break
 
         return end_states, quirks
@@ -1280,7 +1319,7 @@ class OntBridgingEngine:
         - When bridged by >= min_spanning_reads, selects representative sequence from
           candidate read closest to empirical median gap length without generic N collapse.
         - Resolves chromosome end state to EndState.END_COMPLETE (or END_GERMLINE_ORPHAN if unbridged).
-        - Emits typed QuirkRecord and EndStateRecord instances for biological ledger tracking.
+        - Emits typed ResolutionRecord and EndStateRecord instances for biological ledger tracking.
 
         Args:
             chrom: Chromosome name (e.g. 'IV', 'V').
@@ -1299,7 +1338,7 @@ class OntBridgingEngine:
             notes: Contextual provenance notes.
 
         Returns:
-            SatelliteGapResolution containing typed QuirkRecord, EndStateRecord, and candidates.
+            SatelliteGapResolution containing typed ResolutionRecord, EndStateRecord, and candidates.
         """
         reads_list: list[SpanningRead]
         if spanning_reads is None:
@@ -1328,7 +1367,7 @@ class OntBridgingEngine:
         elif somatic_port is not None:
             actual_somatic_port = somatic_port
 
-        feature_id_quirk = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, chrom, side, index=gap_index)
+        feature_id_res = build_feature_id(ResolutionType.SAT_GAP_VARIABLE, chrom, side, index=gap_index)
 
         if len(reads_list) >= floor:
             # Successfully bridged
@@ -1383,11 +1422,11 @@ class OntBridgingEngine:
             if notes:
                 end_notes = f"{end_notes}; {notes}"
 
-            quirk_record = QuirkRecord(
-                feature_id=feature_id_quirk,
+            resolution_record = ResolutionRecord(
+                feature_id=feature_id_res,
                 chrom=chrom,
                 side=side,
-                quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+                resolution_type=ResolutionType.SAT_GAP_VARIABLE,
                 spanning_read_count=len(reads_list),
                 length_min_bp=dist.min_bp,
                 length_median_bp=dist.median_bp,
@@ -1428,7 +1467,7 @@ class OntBridgingEngine:
                 chrom=chrom,
                 side=side,
                 state=state,
-                quirk_record=quirk_record,
+                resolution_record=resolution_record,
                 end_state_record=end_state_record,
                 spanning_reads=reads_list,
                 representative_read=best_read,
@@ -1451,11 +1490,11 @@ class OntBridgingEngine:
         if notes:
             end_notes = f"{end_notes}; {notes}"
 
-        quirk_record = QuirkRecord(
-            feature_id=feature_id_quirk,
+        resolution_record = ResolutionRecord(
+            feature_id=feature_id_res,
             chrom=chrom,
             side=side,
-            quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+            resolution_type=ResolutionType.SAT_GAP_VARIABLE,
             spanning_read_count=len(reads_list),
             length_min_bp=dist.min_bp if dist else None,
             length_median_bp=dist.median_bp if dist else None,
@@ -1494,7 +1533,7 @@ class OntBridgingEngine:
             chrom=chrom,
             side=side,
             state=state,
-            quirk_record=quirk_record,
+            resolution_record=resolution_record,
             end_state_record=end_state_record,
             spanning_reads=reads_list,
             representative_read=None,
@@ -1545,7 +1584,7 @@ class OntBridgingEngine:
         core_depth_ratio: float | None = None,
         gap_index: int = 1,
         notes: str = "",
-    ) -> tuple[QuirkRecord, EndStateRecord, str | None]:
+    ) -> tuple[ResolutionRecord, EndStateRecord, str | None]:
         """Resolve a somatic dropout chromosome end via spanning ONT reads.
 
         At chromosome ends where the somatic branch suffers a sequencing dropout,
@@ -1556,12 +1595,12 @@ class OntBridgingEngine:
           median gap length (BIO-004).
         - Resolves chromosome end state to EndState.END_COMPLETE (resolved=True),
           setting notes="ONT-derived sequence resolved germline telomere".
-        - Emits QuirkRecord documenting the rescued dropout stub
-          (IntervalQuirk.LOW_SUPPORT_STUB), with representative_sequence_selected=True.
+        - Emits ResolutionRecord documenting the rescued dropout stub
+          (ResolutionType.LOW_SUPPORT_STUB), with representative_sequence_selected=True.
 
         If no spanning reads exist:
         - Retains EndState.END_SOMATIC_MISSING (resolved=False).
-        - Emits QuirkRecord with representative_sequence_selected=False.
+        - Emits ResolutionRecord with representative_sequence_selected=False.
 
         Args:
             chrom: Chromosome name (e.g. 'IV', 'V').
@@ -1579,7 +1618,7 @@ class OntBridgingEngine:
             notes: Contextual provenance notes.
 
         Returns:
-            Tuple of (QuirkRecord, EndStateRecord, representative_sequence).
+            Tuple of (ResolutionRecord, EndStateRecord, representative_sequence).
         """
         cand_targets = [germline_port]
         cand_targets.extend(self._find_distal_germline_targets(germline_port))
@@ -1623,7 +1662,7 @@ class OntBridgingEngine:
         somatic_str = somatic_port.to_symbol() if hasattr(somatic_port, "to_symbol") else str(somatic_port)
         somatic_name = getattr(somatic_port, "name", str(somatic_port))
 
-        feature_id_quirk = build_feature_id(IntervalQuirk.LOW_SUPPORT_STUB, chrom, side, index=gap_index)
+        feature_id_res = build_feature_id(ResolutionType.LOW_SUPPORT_STUB, chrom, side, index=gap_index)
         core_ratio = core_depth_ratio if core_depth_ratio is not None else somatic_depth_ratio
 
         if spanning_reads:
@@ -1658,11 +1697,11 @@ class OntBridgingEngine:
             if notes:
                 quirk_notes = f"{quirk_notes}; {notes}"
 
-            quirk_record = QuirkRecord(
-                feature_id=feature_id_quirk,
+            resolution_record = ResolutionRecord(
+                feature_id=feature_id_res,
                 chrom=chrom,
                 side=side,
-                quirk_type=IntervalQuirk.LOW_SUPPORT_STUB,
+                resolution_type=ResolutionType.LOW_SUPPORT_STUB,
                 spanning_read_count=len(spanning_reads),
                 length_min_bp=dist.min_bp,
                 length_median_bp=dist.median_bp,
@@ -1697,7 +1736,7 @@ class OntBridgingEngine:
                 notes=end_notes,
             )
 
-            res_dropout = (quirk_record, end_state_record, rep_seq)
+            res_dropout = (resolution_record, end_state_record, rep_seq)
             self.dropout_resolutions.append(res_dropout)
             return res_dropout
 
@@ -1712,11 +1751,11 @@ class OntBridgingEngine:
         if notes:
             quirk_notes = f"{quirk_notes}; {notes}"
 
-        quirk_record = QuirkRecord(
-            feature_id=feature_id_quirk,
+        resolution_record = ResolutionRecord(
+            feature_id=feature_id_res,
             chrom=chrom,
             side=side,
-            quirk_type=IntervalQuirk.LOW_SUPPORT_STUB,
+            resolution_type=ResolutionType.LOW_SUPPORT_STUB,
             spanning_read_count=0,
             length_min_bp=None,
             length_median_bp=None,
@@ -1749,6 +1788,6 @@ class OntBridgingEngine:
             notes=end_notes,
         )
 
-        res_unrescued = (quirk_record, end_state_record, None)
+        res_unrescued = (resolution_record, end_state_record, None)
         self.dropout_resolutions.append(res_unrescued)
         return res_unrescued

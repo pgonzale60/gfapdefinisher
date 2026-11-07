@@ -10,7 +10,7 @@ from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY
-from gfapdefinisher.quirks import (
+from gfapdefinisher.resolutions import (
     EndState,
     EndStateRecord,
     IntervalQuirk,
@@ -1296,3 +1296,67 @@ def test_identify_and_resolve_gaps_two_hop_grs():
     assert q1.right_anchor_port == "mid_grs+"
     assert q2.left_anchor_port == "mid_grs-"
     assert q2.right_anchor_port == "cap_3p+"
+
+
+def test_resolve_subtelomeric_satellite_caps_emits_hifi_spanning():
+    """Verify resolve_subtelomeric_satellite_caps sets agp_linkage_evidence to 'hifi-spanning'."""
+    graph = BidirectedGraph()
+    rep_unit = "ACGTACGTACGTACG"  # 15-mer
+    anchor_seq = ("C" * 1000) + (rep_unit * 200)
+    cap_seq = (rep_unit * 10) + ("TTAGGC" * 35)
+
+    graph.add_segment("anchor_sat", length=len(anchor_seq), sequence=anchor_seq, depth=40.0)
+    graph.add_segment("cap_sat", length=len(cap_seq), sequence=cap_seq, depth=35.0)
+
+    ledger = {
+        "anchor_sat+": EndEvidence(
+            segment_name="anchor_sat",
+            end="3p",
+            port=SegmentPort("anchor_sat", Strand.PLUS),
+            length=len(anchor_seq),
+            depth=40.0,
+            degree=0,
+            is_tip=True,
+            outgoing_neighbors=(),
+            has_terminal_telomere=False,
+            usco_hit_count=0,
+        ),
+        "cap_sat+": EndEvidence(
+            segment_name="cap_sat",
+            end="3p",
+            port=SegmentPort("cap_sat", Strand.PLUS),
+            length=len(cap_seq),
+            depth=35.0,
+            degree=0,
+            is_tip=True,
+            outgoing_neighbors=(),
+            has_terminal_telomere=True,
+            usco_hit_count=0,
+        ),
+    }
+
+    engine = OntBridgingEngine(graph=graph, ledger=ledger)
+
+    er = EndStateRecord(
+        feature_id="end_I_3p",
+        chrom="I",
+        side="3p",
+        state=EndState.END_SOMATIC_MISSING,
+        somatic_port="anchor_sat+",
+        germline_port="anchor_sat+",
+        resolved=False,
+    )
+    orphan_caps = {"cap_sat": ("cap_sat+", "3p")}
+
+    end_states, quirks = engine.resolve_subtelomeric_satellite_caps(
+        end_states=[er],
+        quirks=[],
+        orphan_caps=orphan_caps,
+    )
+
+    assert len(quirks) == 1
+    q = quirks[0]
+    assert q.agp_linkage_evidence == "hifi-spanning"
+    assert q.agp_component_type == "U"
+    assert q.length_median_bp == 100
+    assert q.unitig_ids == ("anchor_sat", "cap_sat")

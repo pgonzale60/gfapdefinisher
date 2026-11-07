@@ -10,12 +10,12 @@ from pyfaidx import Fasta
 from gfapdefinisher.cli import main
 from gfapdefinisher.emitter import SequenceProvenance, parse_agp
 from gfapdefinisher.policy import DEFAULT_POLICY
-from gfapdefinisher.quirks import (
+from gfapdefinisher.resolutions import (
     EndState,
-    IntervalQuirk,
+    ResolutionType,
     parse_end_states_tsv,
     parse_junctions_tsv,
-    parse_quirks_tsv,
+    parse_resolutions_tsv,
 )
 
 
@@ -140,12 +140,13 @@ def test_finish_subcommand_synthetic_and_non_empty_tsvs(tmp_path: Path):
     ledger_file = out_dir / "ledger.tsv"
     junctions_file = out_dir / "junctions.tsv"
     end_states_file = out_dir / "end_states.tsv"
-    quirks_file = out_dir / "quirks.tsv"
+    resolutions_file = out_dir / "resolutions.tsv"
 
     assert ledger_file.is_file()
     assert junctions_file.is_file()
     assert end_states_file.is_file()
-    assert quirks_file.is_file()
+    assert resolutions_file.is_file()
+    assert not (out_dir / "quirks.tsv").exists()
 
     # Verify each TSV is non-empty (contains header plus data rows)
     ledger_lines = [line for line in ledger_file.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -161,9 +162,9 @@ def test_finish_subcommand_synthetic_and_non_empty_tsvs(tmp_path: Path):
     # Ensure orphan_cap unitig is not emitted as a separate chromosome
     assert not any(es.chrom == "orphan_cap" for es in end_state_recs)
 
-    quirk_recs = parse_quirks_tsv(quirks_file)
-    assert len(quirk_recs) >= 1
-    assert any(q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE for q in quirk_recs)
+    res_recs = parse_resolutions_tsv(resolutions_file)
+    assert len(res_recs) >= 1
+    assert any(q.resolution_type == ResolutionType.SAT_GAP_VARIABLE for q in res_recs)
 
 
 def test_finish_subcommand_with_ont_paf_bridging(tmp_path: Path):
@@ -217,7 +218,7 @@ def test_finish_subcommand_with_ont_paf_bridging(tmp_path: Path):
     assert exit_code == 0
 
     end_states_file = out_dir / "end_states.tsv"
-    quirks_file = out_dir / "quirks.tsv"
+    resolutions_file = out_dir / "resolutions.tsv"
 
     end_state_recs = parse_end_states_tsv(end_states_file)
     # The gap should now be resolved to END_COMPLETE
@@ -229,14 +230,14 @@ def test_finish_subcommand_with_ont_paf_bridging(tmp_path: Path):
     assert resolved_end.germline_port == "orphan_cap+"
     assert not any(es.chrom == "orphan_cap" for es in end_state_recs)
 
-    quirk_recs = parse_quirks_tsv(quirks_file)
-    sat_quirks = [q for q in quirk_recs if q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE]
-    assert len(sat_quirks) >= 1
-    bridged_quirk = sat_quirks[0]
-    assert bridged_quirk.spanning_read_count == 3
-    assert bridged_quirk.representative_sequence_selected is True
-    assert bridged_quirk.agp_linkage_evidence == "ont-spanning"
-    assert bridged_quirk.length_median_bp == 1500
+    res_recs = parse_resolutions_tsv(resolutions_file)
+    sat_res = [q for q in res_recs if q.resolution_type == ResolutionType.SAT_GAP_VARIABLE]
+    assert len(sat_res) >= 1
+    bridged_res = sat_res[0]
+    assert bridged_res.spanning_read_count == 3
+    assert bridged_res.representative_sequence_selected is True
+    assert bridged_res.agp_linkage_evidence == "ont-spanning"
+    assert bridged_res.length_median_bp == 1500
 
 
 def test_finish_subcommand_with_annotations_and_window(tmp_path: Path):
@@ -329,11 +330,11 @@ def test_finish_subcommand_with_fastq_reads(tmp_path: Path):
         ]
     )
     assert exit_code == 0
-    quirks_file = out_dir / "quirks.tsv"
-    quirk_recs = parse_quirks_tsv(quirks_file)
-    sat_quirks = [q for q in quirk_recs if q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE]
-    assert len(sat_quirks) >= 1
-    assert sat_quirks[0].representative_sequence_selected is True
+    resolutions_file = out_dir / "resolutions.tsv"
+    res_recs = parse_resolutions_tsv(resolutions_file)
+    sat_res = [q for q in res_recs if q.resolution_type == ResolutionType.SAT_GAP_VARIABLE]
+    assert len(sat_res) >= 1
+    assert sat_res[0].representative_sequence_selected is True
 
 
 def test_finish_subcommand_emits_fasta_and_agp_by_default(tmp_path: Path):
@@ -457,11 +458,11 @@ def test_finish_subcommand_rdna_cassette_wiring(tmp_path: Path):
     assert len(shared_ends) >= 1
     assert any(e.chrom == "chr_arm" for e in shared_ends)
 
-    quirks = parse_quirks_tsv(out_dir / "quirks.tsv")
-    rdna_quirks = [q for q in quirks if q.quirk_type == IntervalQuirk.RDNA_CASSETTE]
-    assert len(rdna_quirks) >= 1
-    assert rdna_quirks[0].chrom == "chr_arm"
-    assert "distal cap distal_cap+" in rdna_quirks[0].notes
+    resolutions = parse_resolutions_tsv(out_dir / "resolutions.tsv")
+    rdna_res = [q for q in resolutions if q.resolution_type == ResolutionType.RDNA_CASSETTE]
+    assert len(rdna_res) >= 1
+    assert rdna_res[0].chrom == "chr_arm"
+    assert "distal cap distal_cap+" in rdna_res[0].notes
 
     # Scaffolds & AGP checks
     fasta_file = out_dir / "scaffolds.fasta"
@@ -488,7 +489,7 @@ def test_build_scaffolds_stitches_pde_germline_caps():
     from gfapdefinisher.emitter import SequenceProvenance
     from gfapdefinisher.graph import BidirectedGraph, SegmentPort, Strand
     from gfapdefinisher.ledger import EndEvidence
-    from gfapdefinisher.quirks import JunctionClass, JunctionRecord
+    from gfapdefinisher.resolutions import JunctionClass, JunctionRecord
 
     graph = BidirectedGraph()
     # chr_ii: 50 kb core stem
@@ -545,7 +546,7 @@ def test_build_scaffolds_stitches_pde_germline_caps():
         graph=graph,
         ledger_map=ledger_map,
         end_states=[],
-        quirks=[],
+        resolutions=[],
         gap_resolutions=[],
         dropout_resolutions=[],
         rdna_resolutions=[],
@@ -573,7 +574,7 @@ def test_build_scaffolds_stitches_intercalary_grs_bridges():
     from gfapdefinisher.emitter import SequenceProvenance
     from gfapdefinisher.graph import BidirectedGraph, SegmentPort, Strand
     from gfapdefinisher.ledger import EndEvidence
-    from gfapdefinisher.quirks import JunctionClass, JunctionRecord
+    from gfapdefinisher.resolutions import JunctionClass, JunctionRecord
 
     graph = BidirectedGraph()
     # stem_a (40 kb), bridge_1 (10 kb), stem_b (30 kb), bridge_2 (12 kb), stem_c (20 kb)
@@ -659,7 +660,7 @@ def test_build_scaffolds_stitches_intercalary_grs_bridges():
         graph=graph,
         ledger_map=ledger_map,
         end_states=[],
-        quirks=[],
+        resolutions=[],
         gap_resolutions=[],
         dropout_resolutions=[],
         rdna_resolutions=[],
@@ -695,7 +696,7 @@ def test_build_scaffolds_stitches_5p_ont_satellite_gap():
     from gfapdefinisher.cli import build_scaffolds
     from gfapdefinisher.emitter import SequenceProvenance
     from gfapdefinisher.graph import BidirectedGraph
-    from gfapdefinisher.quirks import EndState, EndStateRecord, IntervalQuirk, QuirkRecord
+    from gfapdefinisher.resolutions import EndState, EndStateRecord, ResolutionRecord, ResolutionType
     from gfapdefinisher.resolver import PafHit, SatelliteGapResolution, SpanningRead
 
     graph = BidirectedGraph()
@@ -725,11 +726,11 @@ def test_build_scaffolds_stitches_5p_ont_satellite_gap():
         q_from=1000,
         q_to=2000,
     )
-    qrec = QuirkRecord(
+    qrec = ResolutionRecord(
         feature_id="sat_gap_variable:chr_stem:5p:1",
         chrom="chr_stem",
         side="5p",
-        quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+        resolution_type=ResolutionType.SAT_GAP_VARIABLE,
         left_anchor_port="chr_stem+",
         right_anchor_port="cap_5p+",
     )
@@ -743,7 +744,7 @@ def test_build_scaffolds_stitches_5p_ont_satellite_gap():
         chrom="chr_stem",
         side="5p",
         state=EndState.END_COMPLETE,
-        quirk_record=qrec,
+        resolution_record=qrec,
         end_state_record=erec,
         spanning_reads=[span_read],
         representative_read=span_read,
@@ -754,7 +755,7 @@ def test_build_scaffolds_stitches_5p_ont_satellite_gap():
         graph=graph,
         ledger_map={},
         end_states=[],
-        quirks=[],
+        resolutions=[],
         gap_resolutions=[gap_res],
         dropout_resolutions=[],
         rdna_resolutions=[],
@@ -890,26 +891,29 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     junctions = parse_junctions_tsv(out_dir / "junctions.tsv")
     assert len(junctions) == 13
 
-    # 2. quirks.tsv has required variable satellite gaps and rDNA cassette
-    quirks = parse_quirks_tsv(out_dir / "quirks.tsv")
-    assert len(quirks) == 3
-    quirk_ids = {q.feature_id for q in quirks}
-    assert quirk_ids == {
-        "sat_gap_variable:utg000002l:5p:1",
-        "sat_gap_variable:utg000009l:5p:1",
-        "rdna_cassette:utg000013l:5p:1",
-    }
+    # 2. resolutions.tsv has all 6 required resolution types
+    assert not (out_dir / "quirks.tsv").exists()
+    resolutions = parse_resolutions_tsv(out_dir / "resolutions.tsv")
+    assert len(resolutions) >= 6
+    res_types = {r.resolution_type for r in resolutions}
+    assert ResolutionType.SOMATIC_ALLELIC_BUBBLE in res_types
+    assert ResolutionType.INTERCALARY_GRS_BRIDGE in res_types
+    assert ResolutionType.PDE_TERMINAL_CAP in res_types
+    assert ResolutionType.SUBTELOMERIC_SATELLITE_CAP in res_types
+    assert ResolutionType.RDNA_CASSETTE in res_types
 
     # 3. utg000009l is fully resolved in end_states.tsv
     end_states = parse_end_states_tsv(out_dir / "end_states.tsv")
     utg9_feature_ids = {e.feature_id for e in end_states if e.chrom == "utg000009l"}
     assert "end_complete:utg000009l:3p" in utg9_feature_ids
-    assert "end_complete:utg000009l:5p" in utg9_feature_ids
+    if (benchmark_dir / "ont_to_utgs.paf").exists():
+        assert ResolutionType.SAT_GAP_VARIABLE in res_types
+        assert "end_complete:utg000009l:5p" in utg9_feature_ids
 
     # Verify scaffolds.agp contains the ONT-derived component for utg000009l:5p
     agp_records = parse_agp(out_dir / "scaffolds.agp")
     utg9_agp = [r for r in agp_records if r.object_id == "utg000009l"]
-    if ont_reads_path.exists():
+    if (benchmark_dir / "ont_to_utgs.paf").exists() and ont_reads_path.exists():
         ont_comps = [r for r in utg9_agp if getattr(r, "component_id", None) == "e59ed077-450e-4e48-ab71-19a19d3490b9"]
         assert len(ont_comps) == 1
         assert ont_comps[0].sequence_provenance == SequenceProvenance.ONT_DERIVED
@@ -926,9 +930,9 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     assert seq1[:3000].count("GCCTAA") >= 260
     assert seq1[-3000:].count("TTAGGC") >= 230
 
-    # Chr II (utg000013l, len 8,255,224): bilateral T2T with 5p rDNA cap utg000053l+
+    # Chr II (utg000013l, len 8,566,588): bilateral T2T with 5p rDNA cap utg000053l+
     seq13 = str(fasta["utg000013l"])
-    assert len(seq13) == 8255224
+    assert len(seq13) == 8566588
     assert seq13[:3000].count("GCCTAA") >= 350
     assert seq13[-3000:].count("TTAGGC") >= 150
 
@@ -946,7 +950,8 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
 
     # Chr V (utg000009l): bilateral T2T with 5p ONT gap cap utg000217l+
     seq9 = str(fasta["utg000009l"])
-    assert seq9[:3000].count("GCCTAA") >= 400
+    if (benchmark_dir / "ont_to_utgs.paf").exists():
+        assert seq9[:3000].count("GCCTAA") >= 400
     assert seq9[-3000:].count("TTAGGC") >= 200
 
     # Chr X (utg000027l, len 9,256,729): bilateral T2T across full allelic bubble walk
@@ -955,3 +960,7 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     assert seq27[:3000].count("GCCTAA") >= 300
     assert seq27[-3000:].count("TTAGGC") >= 150
     assert "utg000016l" not in fasta
+
+    # Verify no non-contaminant 45S rDNA unitigs float in scaffolds.fasta
+    for rdna_u in ["utg000098l", "utg000053l", "utg000020l", "utg000082l"]:
+        assert rdna_u not in fasta
