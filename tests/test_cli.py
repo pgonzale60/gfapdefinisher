@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pyfaidx import Fasta
 
 from gfapdefinisher.cli import main
 from gfapdefinisher.policy import DEFAULT_POLICY
@@ -686,3 +687,217 @@ def test_build_scaffolds_stitches_intercalary_grs_bridges():
         SequenceProvenance.HIFI_CORE,
     ]
     assert agp_list[-1].object_end == 116590
+
+
+def test_build_scaffolds_stitches_5p_ont_satellite_gap():
+    """Verify build_scaffolds prepends inverted right cap and reverse-complemented ONT bridge for 5p gaps."""
+    from gfapdefinisher.cli import build_scaffolds
+    from gfapdefinisher.emitter import SequenceProvenance
+    from gfapdefinisher.graph import BidirectedGraph
+    from gfapdefinisher.quirks import EndState, EndStateRecord, IntervalQuirk, QuirkRecord
+    from gfapdefinisher.resolver import PafHit, SatelliteGapResolution, SpanningRead
+
+    graph = BidirectedGraph()
+    graph.add_segment("chr_stem", 20000, sequence="A" * 20000)
+    graph.add_segment("cap_5p", 5000, sequence="C" * 5000)
+
+    paf_dummy = PafHit(
+        qname="read_1",
+        qlen=30000,
+        qstart=0,
+        qend=30000,
+        strand="+",
+        tname="chr_stem",
+        tlen=20000,
+        tstart=0,
+        tend=1000,
+        nmatch=1000,
+        alen=1000,
+        mapq=60,
+    )
+    span_read = SpanningRead(
+        qname="ont_span_5p_001",
+        strand="+",
+        left_hit=paf_dummy,
+        right_hit=paf_dummy,
+        gap_length=1000,
+        q_from=1000,
+        q_to=2000,
+    )
+    qrec = QuirkRecord(
+        feature_id="sat_gap_variable:chr_stem:5p:1",
+        chrom="chr_stem",
+        side="5p",
+        quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+        left_anchor_port="chr_stem+",
+        right_anchor_port="cap_5p+",
+    )
+    erec = EndStateRecord(
+        feature_id="end_complete:chr_stem:5p",
+        chrom="chr_stem",
+        side="5p",
+        state=EndState.END_COMPLETE,
+    )
+    gap_res = SatelliteGapResolution(
+        chrom="chr_stem",
+        side="5p",
+        state=EndState.END_COMPLETE,
+        quirk_record=qrec,
+        end_state_record=erec,
+        spanning_reads=[span_read],
+        representative_read=span_read,
+        representative_sequence="T" * 1000,
+    )
+
+    scaffolds, agp_recs = build_scaffolds(
+        graph=graph,
+        ledger_map={},
+        end_states=[],
+        quirks=[],
+        gap_resolutions=[gap_res],
+        dropout_resolutions=[],
+        rdna_resolutions=[],
+        junctions=[],
+    )
+
+    assert "chr_stem" in scaffolds
+    # cap_5p (5000 bp) + bridge (1000 bp) + chr_stem (20000 bp) = 26000 bp
+    assert len(scaffolds["chr_stem"]) == 26000
+
+    # cap_5p+ inverted is cap_5p-, so reverse complement of C*5000 is G*5000
+    assert scaffolds["chr_stem"][:5000] == "G" * 5000
+    # Bridge is reverse complement of T*1000 -> A*1000
+    assert scaffolds["chr_stem"][5000:6000] == "A" * 1000
+    # chr_stem is A*20000
+    assert scaffolds["chr_stem"][6000:] == "A" * 20000
+
+    stem_agp = [r for r in agp_recs if r.object_id == "chr_stem"]
+    assert len(stem_agp) == 3
+    assert stem_agp[0].component_id == "cap_5p"
+    assert stem_agp[0].orientation == "-"
+    assert stem_agp[0].sequence_provenance == SequenceProvenance.HIFI_GERMLINE
+    assert stem_agp[0].unpolished is False
+
+    assert stem_agp[1].component_id == "ont_span_5p_001"
+    assert stem_agp[1].orientation == "-"
+    assert stem_agp[1].sequence_provenance == SequenceProvenance.ONT_DERIVED
+    assert stem_agp[1].unpolished is True
+
+    assert stem_agp[2].component_id == "chr_stem"
+    assert stem_agp[2].orientation == "+"
+    assert stem_agp[2].sequence_provenance == SequenceProvenance.HIFI_CORE
+    assert stem_agp[2].unpolished is False
+
+
+@pytest.mark.bio
+@pytest.mark.benchmark
+def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
+    """Verify end-to-end finish CLI execution on DF5120 benchmark dataset and T2T scaffold telomeres."""
+    benchmark_dir = Path("data/benchmark/DF5120")
+    if not benchmark_dir.exists():
+        pytest.skip(f"Benchmark DF5120 dataset not present in {benchmark_dir}")
+
+    gfa_candidates = [
+        benchmark_dir / "asm.p_utg.gfa.gz",
+        benchmark_dir / "asm.p_utg.gfa",
+    ]
+    gfa_path = next((p for p in gfa_candidates if p.exists()), None)
+    if gfa_path is None:
+        pytest.skip(f"GFA file missing in {benchmark_dir}")
+
+    tiara_path = benchmark_dir / "tiara_unitigs.txt"
+    tidk_path = benchmark_dir / "tidk_telomeres_telomeric_repeat_windows.tsv"
+    barrnap_path = benchmark_dir / "barrnap_rdna.gff"
+    compleasm_path = benchmark_dir / "compleasm_unitigs_full_table.tsv"
+    ont_paf_path = benchmark_dir / "ont_to_flanks.paf"
+
+    if not (
+        tiara_path.exists()
+        and tidk_path.exists()
+        and barrnap_path.exists()
+        and compleasm_path.exists()
+        and ont_paf_path.exists()
+    ):
+        pytest.skip(f"Benchmark annotation/PAF files missing in {benchmark_dir}")
+
+    out_dir = tmp_path / "df5120_finish"
+    exit_code = main(
+        [
+            "finish",
+            "--gfa",
+            str(gfa_path),
+            "--tiara",
+            str(tiara_path),
+            "--tidk",
+            str(tidk_path),
+            "--barrnap",
+            str(barrnap_path),
+            "--compleasm",
+            str(compleasm_path),
+            "--ont-paf",
+            str(ont_paf_path),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+    assert exit_code == 0
+
+    # 1. junctions.tsv has 13 rows
+    junctions = parse_junctions_tsv(out_dir / "junctions.tsv")
+    assert len(junctions) == 13
+
+    # 2. quirks.tsv has 3 rows (sat_gap_variable:utg000002l:5p:1, sat_gap_variable:utg000009l:5p:1, rdna_cassette:utg000013l:5p:1)
+    quirks = parse_quirks_tsv(out_dir / "quirks.tsv")
+    assert len(quirks) == 3
+    quirk_ids = [q.feature_id for q in quirks]
+    assert quirk_ids == [
+        "sat_gap_variable:utg000002l:5p:1",
+        "sat_gap_variable:utg000009l:5p:1",
+        "rdna_cassette:utg000013l:5p:1",
+    ]
+
+    # 3. utg000009l is present in end_states.tsv (end_complete:utg000009l:3p and end_germline_orphan:utg000009l:5p)
+    end_states = parse_end_states_tsv(out_dir / "end_states.tsv")
+    utg9_feature_ids = {e.feature_id for e in end_states if e.chrom == "utg000009l"}
+    assert "end_complete:utg000009l:3p" in utg9_feature_ids
+    assert "end_germline_orphan:utg000009l:5p" in utg9_feature_ids
+
+    # 4. In scaffolds.fasta:
+    fasta = Fasta(str(out_dir / "scaffolds.fasta"))
+
+    # utg000001l (len 7,826,949): first 2000 bp has 269 GCCTAA, last 2000 bp has 239 TTAGGC (bilateral T2T)
+    seq1 = str(fasta["utg000001l"])
+    assert len(seq1) == 7826949
+    assert seq1[:2000].count("GCCTAA") == 269
+    assert seq1[-2000:].count("TTAGGC") == 239
+
+    # utg000004l (len 6,999,772): first 2000 bp has 202 GCCTAA, last 2000 bp has 209 TTAGGC (bilateral T2T)
+    seq4 = str(fasta["utg000004l"])
+    assert len(seq4) == 6999772
+    assert seq4[:2000].count("GCCTAA") == 202
+    assert seq4[-2000:].count("TTAGGC") == 209
+
+    # utg000027l (len 7,662,304): first 2000 bp has 319 GCCTAA (from utg000189l+)
+    seq27 = str(fasta["utg000027l"])
+    assert len(seq27) == 7662304
+    assert seq27[:2000].count("GCCTAA") == 319
+
+    # utg000016l (len 1,533,024): first 2000 bp has 154 GCCTAA (from utg000096l-)
+    seq16 = str(fasta["utg000016l"])
+    assert len(seq16) == 1533024
+    assert seq16[:2000].count("GCCTAA") == 154
+
+    # utg000013l (len 8,224,762): last 2000 bp has 172 TTAGGC (from utg000205l+)
+    seq13 = str(fasta["utg000013l"])
+    assert len(seq13) == 8224762
+    assert seq13[-2000:].count("TTAGGC") == 172
+
+    # utg000009l (len 8,343,815): last 2000 bp has 210 TTAGGC
+    seq9 = str(fasta["utg000009l"])
+    assert len(seq9) == 8343815
+    assert seq9[-2000:].count("TTAGGC") == 210
+
+    # utg000002l (len 7,097,955): last 2000 bp has 236 TTAGGC (from utg000115l+)
+    seq2 = str(fasta["utg000002l"])
+    assert len(seq2) == 7097955
+    assert seq2[-2000:].count("TTAGGC") == 236
