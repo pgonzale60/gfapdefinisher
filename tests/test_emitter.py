@@ -655,3 +655,26 @@ def test_fasta_agp_emitter_unknown_gap_rdna_tangle():
     assert full_seq == ("A" * 500) + ("N" * 100) + ("T" * 300)
     assert len(full_rows) == 3
     assert full_rows[1].to_line() == "chrII\t501\t600\t2\tU\t100\trepeat\tyes\trna_tangle"
+
+
+def test_path_component_default_hifi_spanning_and_gap_emission():
+    """Verify PathComponent defaults to hifi-spanning linkage evidence and emits U-gap in AGP."""
+    comp = PathComponent(segment_id="utg01", strand="+", sequence="ACGT")
+    assert comp.linkage_evidence == "hifi-spanning"
+
+    c1 = PathComponent(segment_id="s1", strand="+", sequence="A" * 200, provenance=SequenceProvenance.HIFI_CORE)
+    gap_comp = PathComponent(
+        is_gap=True,
+        gap_length=100,
+        gap_type="repeat",
+        linkage="yes",
+        linkage_evidence="hifi-spanning",
+        gap_component_type="N",
+    )
+    c2 = PathComponent(segment_id="s2", strand="+", sequence="C" * 200, provenance=SequenceProvenance.HIFI_CORE)
+    seq, rows = assemble_scaffold_sequence([c1, gap_comp, c2], scaffold_id="chrX")
+    assert len(rows) == 3
+    assert isinstance(rows[1], AgpGapRow)
+    assert rows[1].component_type == "U"
+    assert rows[1].linkage_evidence == "hifi-spanning"
+    assert rows[1].to_line() == "chrX\t201\t300\t2\tU\t100\trepeat\tyes\thifi-spanning"

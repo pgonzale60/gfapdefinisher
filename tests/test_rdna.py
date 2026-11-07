@@ -820,10 +820,18 @@ def test_benchmark_df5120_rdna_chains_eukaryotic_and_rejects_bacterial_contamina
     for b in banned_bacterial:
         assert b not in entry_names
 
-    # 3. Traversal chains eukaryotic rDNA copies utg000013l- -> utg000020l- -> utg000082l-
+    # 3. Traversal chains eukaryotic rDNA copies utg000013l- -> utg000020l- -> utg000082l- -> utg000214l+ -> utg000212l+ -> utg000172l+ -> utg000207l-
     chain = resolver.traverse_rdna_cassette(p_anchor, include_anchor=True)
     chain_symbols = [p.to_symbol() for p in chain]
-    assert chain_symbols == ["utg000013l-", "utg000020l-", "utg000082l-"]
+    assert chain_symbols == [
+        "utg000013l-",
+        "utg000020l-",
+        "utg000082l-",
+        "utg000214l+",
+        "utg000212l+",
+        "utg000172l+",
+        "utg000207l-",
+    ]
     assert not any(p.name in banned_bacterial for p in chain)
 
 
@@ -955,3 +963,124 @@ def test_resolve_entry_stem_heuristic_orphan_cap_matching_and_rejection():
     assert res_contam.distal_cap_port is None
     assert res_contam.capped_via_heuristic is False
     assert res_contam.quirk_record.right_anchor_port is None
+
+
+def test_resolve_entry_stem_concatenates_all_rdna_unitigs_and_records_excluded_caps():
+    """Verify resolve_entry_stem greedily chains disconnected rDNA unitigs and records excluded orphan caps."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=20000, depth=60.0)
+    graph.add_segment("rdna_1", length=10000, depth=100.0)
+    graph.add_segment("rdna_2", length=8000, depth=80.0)
+    graph.add_segment("rdna_3", length=6000, depth=40.0)
+    graph.add_segment("cap_high", length=5000, depth=30.0)
+    graph.add_segment("cap_low", length=4000, depth=5.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_rdna_1 = SegmentPort("rdna_1", Strand.FORWARD)
+    graph.add_edge(p_stem, p_rdna_1, cigar="100M")
+
+    # rdna_2 and rdna_3 are disconnected from rdna_1, but rdna_2 connects to rdna_3
+    p_rdna_2 = SegmentPort("rdna_2", Strand.FORWARD)
+    p_rdna_3 = SegmentPort("rdna_3", Strand.FORWARD)
+    graph.add_edge(p_rdna_2, p_rdna_3, cigar="100M")
+
+    annotations = {
+        "rdna_1": NodeAnnotations(
+            sequence_id="rdna_1",
+            barrnap_hits=[
+                BarrnapHit("rdna_1", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("rdna_1", 2500, 6000, "+", "28S_rRNA", 1e-60),
+            ],
+        ),
+        "rdna_2": NodeAnnotations(
+            sequence_id="rdna_2",
+            barrnap_hits=[
+                BarrnapHit("rdna_2", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("rdna_2", 2500, 6000, "+", "28S_rRNA", 1e-60),
+            ],
+        ),
+        "rdna_3": NodeAnnotations(
+            sequence_id="rdna_3",
+            barrnap_hits=[
+                BarrnapHit("rdna_3", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("rdna_3", 2500, 5000, "+", "28S_rRNA", 1e-60),
+            ],
+        ),
+        "cap_high": NodeAnnotations(
+            sequence_id="cap_high",
+            barrnap_hits=[
+                BarrnapHit("cap_high", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("cap_high", 2500, 4500, "+", "28S_rRNA", 1e-60),
+            ],
+        ),
+        "cap_low": NodeAnnotations(
+            sequence_id="cap_low",
+            barrnap_hits=[
+                BarrnapHit("cap_low", 100, 1800, "+", "18S_rRNA", 1e-40),
+            ],
+        ),
+    }
+
+    ledger = {
+        "stem+": _make_evidence("stem", "3p"),
+        "rdna_1+": _make_evidence("rdna_1", "3p", rdna_hit_count=2),
+        "rdna_2+": _make_evidence("rdna_2", "3p", rdna_hit_count=2),
+        "rdna_3+": _make_evidence("rdna_3", "3p", rdna_hit_count=2),
+        "cap_high+": _make_evidence("cap_high", "3p", has_terminal_telomere=True, rdna_hit_count=2),
+        "cap_high-": _make_evidence("cap_high", "5p", has_terminal_telomere=False, rdna_hit_count=2),
+        "cap_low+": _make_evidence("cap_low", "3p", has_terminal_telomere=True, rdna_hit_count=1),
+        "cap_low-": _make_evidence("cap_low", "5p", has_terminal_telomere=False, rdna_hit_count=1),
+    }
+
+    resolver = RdnaCassetteResolver(graph, ledger, annotations=annotations)
+    res = resolver.resolve_entry_stem(p_stem, chrom="II", side="5p")
+
+    # Path must chain stem, rdna_1, then jump to rdna_2, then step to rdna_3
+    assert [p.to_symbol() for p in res.path] == ["stem+", "rdna_1+", "rdna_2+", "rdna_3+"]
+    assert res.unlinked_join_indices == (2,)  # jump at rdna_2
+    assert res.distal_cap_port == SegmentPort("cap_high", Strand.FORWARD)
+    assert res.excluded_unitigs == ("cap_low",)
+    assert res.quirk_record.unitig_ids == ("stem", "rdna_1", "rdna_2", "rdna_3", "cap_high")
+
+
+@pytest.mark.bio
+@pytest.mark.benchmark
+def test_benchmark_df5120_full_rdna_concatenation_and_cap_exclusion():
+    """Verify on reference benchmark DF5120 that RdnaCassetteResolver chains all 16 rDNA unitigs and caps with utg000053l-."""
+    if not BENCHMARK_DIR.exists():
+        pytest.skip(f"Benchmark DF5120 dataset not present in {BENCHMARK_DIR}")
+
+    gfa_candidates = [
+        BENCHMARK_DIR / "asm.p_utg.gfa.gz",
+        BENCHMARK_DIR / "asm.p_utg.gfa",
+    ]
+    gfa_path = next((p for p in gfa_candidates if p.exists()), None)
+    if gfa_path is None:
+        pytest.skip(f"GFA file missing in {BENCHMARK_DIR}")
+
+    from gfapdefinisher.annotations import aggregate_node_annotations
+    from gfapdefinisher.ledger import build_end_evidence_ledger
+
+    graph = load_gfa(gfa_path)
+    annotations = aggregate_node_annotations(
+        tiara=BENCHMARK_DIR / "tiara_unitigs.txt",
+        tidk=BENCHMARK_DIR / "tidk_telomeres_telomeric_repeat_windows.tsv",
+        barrnap=BENCHMARK_DIR / "barrnap_rdna.gff",
+        compleasm=BENCHMARK_DIR / "compleasm_unitigs_full_table.tsv",
+        sequence_ids=graph.segments.keys(),
+    )
+    ledger = build_end_evidence_ledger(graph=graph, annotations=annotations)
+    ledger_map = {ev.port.to_symbol(): ev for ev in ledger} | {f"{ev.segment_name}:{ev.end}": ev for ev in ledger}
+
+    resolver = RdnaCassetteResolver(graph, ledger_map, annotations=annotations)
+    p_anchor = SegmentPort("utg000013l", Strand.REVERSE)
+    res = resolver.resolve_entry_stem(p_anchor, chrom="II", side="5p")
+
+    # Chains core stem + 15 rDNA tangle unitigs
+    assert len(res.path) == 16
+    assert res.path[0] == p_anchor
+    assert res.distal_cap_port == SegmentPort("utg000053l", Strand.REVERSE)
+    assert res.excluded_unitigs == ("utg000098l",)
+    assert len(res.quirk_record.unitig_ids) == 17
+    assert res.quirk_record.right_anchor_port == "utg000053l-"
+    assert res.quirk_record.agp_linkage_evidence == "rna_tangle"
