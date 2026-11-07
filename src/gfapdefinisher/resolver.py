@@ -15,7 +15,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY, Policy
@@ -225,6 +225,64 @@ class SatelliteGapResolution:
     distribution: GapDistribution | None = None
 
 
+def load_reads_sequences(reads_path: Path | str | None) -> dict[str, str]:
+    """Load long reads into memory as a mapping from read name to sequence string.
+
+    Supports FASTA and FASTQ formats, uncompressed or gzip-compressed.
+    """
+    if reads_path is None:
+        return {}
+
+    path = Path(reads_path)
+    if not path.is_file():
+        return {}
+
+    is_gz = path.suffix in (".gz", ".gzip")
+    open_fn = gzip.open if is_gz else open
+
+    sequences: dict[str, str] = {}
+    with open_fn(path, "rt", encoding="utf-8") as f:
+        first_char = ""
+        for line in f:
+            stripped = line.strip()
+            if stripped:
+                first_char = stripped[0]
+                break
+        f.seek(0)
+
+        if first_char == ">":
+            curr_id = ""
+            curr_seq: list[str] = []
+            for line in f:
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                if line_str.startswith(">"):
+                    if curr_id:
+                        sequences[curr_id] = "".join(curr_seq)
+                    curr_id = line_str[1:].split()[0]
+                    curr_seq = []
+                else:
+                    curr_seq.append(line_str)
+            if curr_id:
+                sequences[curr_id] = "".join(curr_seq)
+        elif first_char == "@":
+            while True:
+                header = f.readline()
+                if not header:
+                    break
+                header_str = header.strip()
+                if not header_str:
+                    continue
+                qname = header_str[1:].split()[0]
+                seq = f.readline().strip()
+                f.readline()  # + separator
+                f.readline()  # qual
+                sequences[qname] = seq
+
+    return sequences
+
+
 class OntBridgingEngine:
     """Resolution engine bridging assembly graph ports with long ONT reads.
 
@@ -233,8 +291,172 @@ class OntBridgingEngine:
     representative sequence selection.
     """
 
-    def __init__(self, policy: Policy = DEFAULT_POLICY) -> None:
-        self.policy = policy
+    def __init__(
+        self,
+        graph_or_policy: Any = DEFAULT_POLICY,
+        ledger: Any | None = None,
+        policy: Policy = DEFAULT_POLICY,
+    ) -> None:
+        if isinstance(graph_or_policy, Policy):
+            self.policy = graph_or_policy
+            self.graph = None
+            self.ledger = ledger
+        elif hasattr(graph_or_policy, "segments"):
+            self.graph = graph_or_policy
+            self.ledger = ledger
+            self.policy = policy
+        else:
+            self.graph = None
+            self.ledger = ledger
+            self.policy = policy
+
+    def identify_orphan_caps(self) -> dict[str, tuple[str, str]]:
+        """Identify orphan caps in graph.
+
+        Returns a mapping from segment_name to (telomere_port, inward_port).
+        """
+        orphan_caps: dict[str, tuple[str, str]] = {}
+        if self.graph is None or not self.ledger:
+            return orphan_caps
+
+        ledger_map = self.ledger
+        if isinstance(ledger_map, list | tuple):
+            ledger_map = {ev.port.to_symbol(): ev for ev in ledger_map if hasattr(ev, "port")}
+
+        for seg_name in self.graph.segments:
+            ev_plus = ledger_map.get(f"{seg_name}+")
+            ev_minus = ledger_map.get(f"{seg_name}-")
+
+            if ev_minus is not None and getattr(ev_minus, "has_terminal_telomere", False):
+                deg_plus = self.graph.degree(SegmentPort(seg_name, Strand.FORWARD))
+                if deg_plus == 0:
+                    orphan_caps[seg_name] = (f"{seg_name}-", f"{seg_name}+")
+            elif ev_plus is not None and getattr(ev_plus, "has_terminal_telomere", False):
+                deg_minus = self.graph.degree(SegmentPort(seg_name, Strand.MINUS))
+                if deg_minus == 0:
+                    orphan_caps[seg_name] = (f"{seg_name}+", f"{seg_name}-")
+
+        return orphan_caps
+
+    def identify_and_resolve_gaps(
+        self,
+        paf_source: Path | str | TextIO | Iterable[str] | Iterable[PafHit],
+        end_states: list[EndStateRecord],
+        quirks: list[QuirkRecord],
+        reads_sequences: Mapping[str, str] | None = None,
+    ) -> tuple[list[EndStateRecord], list[QuirkRecord]]:
+        """Identify candidate variable satellite gap pairs and resolve them via ONT bridging."""
+        hits_by_read: dict[str, list[PafHit]] = defaultdict(list)
+        source_iterable: Iterable[str | PafHit]
+        if isinstance(paf_source, str | Path | TextIO):
+            source_iterable = parse_paf_hits(paf_source)
+        else:
+            source_iterable = paf_source
+
+        all_hits: list[PafHit] = []
+        for item in source_iterable:
+            if isinstance(item, PafHit):
+                hit = item
+            else:
+                s = item.strip()
+                if not s or s.startswith("#"):
+                    continue
+                hit = PafHit.from_line(s)
+            all_hits.append(hit)
+            hits_by_read[hit.qname].append(hit)
+
+        pair_counts: dict[tuple[str, str], int] = defaultdict(int)
+        for read_hits in hits_by_read.values():
+            targets = sorted({h.tname for h in read_hits})
+            for i in range(len(targets)):
+                for j in range(i + 1, len(targets)):
+                    pair_counts[(targets[i], targets[j])] += 1
+
+        resolved_pairs: set[tuple[str, str]] = set()
+        for (t1, t2), _count in pair_counts.items():
+            if (t1, t2) in resolved_pairs or (t2, t1) in resolved_pairs:
+                continue
+
+            spanning = self.collect_spanning_reads(
+                paf_source=all_hits,
+                left_port=t1,
+                right_port=t2,
+                reads_sequences=reads_sequences,
+            )
+            left_port, right_port = t1, t2
+            if not spanning:
+                spanning = self.collect_spanning_reads(
+                    paf_source=all_hits,
+                    left_port=t2,
+                    right_port=t1,
+                    reads_sequences=reads_sequences,
+                )
+                if spanning:
+                    left_port, right_port = t2, t1
+
+            if len(spanning) >= self.policy.ont.min_spanning_reads.value:
+                resolved_pairs.add((left_port, right_port))
+
+                matched_end: EndStateRecord | None = None
+                for er in end_states:
+                    targets_match = {
+                        left_port,
+                        right_port,
+                        f"{left_port}+",
+                        f"{left_port}-",
+                        f"{right_port}+",
+                        f"{right_port}-",
+                        left_port.rstrip("+-"),
+                        right_port.rstrip("+-"),
+                    }
+                    if (
+                        (er.germline_port and er.germline_port in targets_match)
+                        or (er.somatic_port and er.somatic_port in targets_match)
+                        or er.chrom in targets_match
+                    ):
+                        matched_end = er
+                        break
+
+                chrom = matched_end.chrom if matched_end else left_port.rstrip("+-")
+                side = matched_end.side if matched_end else ("3p" if "+" in left_port else "5p")
+
+                res = self.resolve_satellite_gap(
+                    chrom=chrom,
+                    side=side,
+                    left_port=left_port,
+                    right_port=right_port,
+                    paf_source=all_hits,
+                    spanning_reads=spanning,
+                    reads_sequences=reads_sequences,
+                    core_coverage_bp_median=matched_end.core_coverage_bp_median if matched_end else None,
+                    core_depth_ratio=matched_end.germline_depth_ratio if matched_end else None,
+                )
+
+                new_ends: list[EndStateRecord] = []
+                replaced_end = False
+                for er in end_states:
+                    if er.chrom == chrom and er.side == side:
+                        new_ends.append(res.end_state_record)
+                        replaced_end = True
+                    else:
+                        new_ends.append(er)
+                if not replaced_end:
+                    new_ends.append(res.end_state_record)
+                end_states = new_ends
+
+                new_quirks: list[QuirkRecord] = []
+                replaced_quirk = False
+                for qr in quirks:
+                    if qr.chrom == chrom and qr.side == side and qr.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE:
+                        new_quirks.append(res.quirk_record)
+                        replaced_quirk = True
+                    else:
+                        new_quirks.append(qr)
+                if not replaced_quirk:
+                    new_quirks.append(res.quirk_record)
+                quirks = new_quirks
+
+        return end_states, quirks
 
     def collect_spanning_reads(
         self,
