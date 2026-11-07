@@ -9,6 +9,16 @@ from gfapdefinisher.classifier import (
     classify_pde_junction,
     classify_port,
 )
+from gfapdefinisher.emitter import (
+    AgpRecord,
+    PathComponent,
+    SequenceProvenance,
+    assemble_path_sequence,
+    assemble_scaffold_sequence,
+    emit_agp,
+    emit_fasta,
+    parse_agp,
+)
 from gfapdefinisher.policy import (
     DEFAULT_POLICY,
     Policy,
@@ -40,6 +50,7 @@ def hello() -> str:
 
 
 __all__ = [
+    "AgpRecord",
     "DEFAULT_POLICY",
     "EndState",
     "EndStateRecord",
@@ -48,6 +59,7 @@ __all__ = [
     "JunctionClass",
     "JunctionRecord",
     "OntBridgingEngine",
+    "PathComponent",
     "PafHit",
     "PdeJunctionCall",
     "Policy",
@@ -57,11 +69,17 @@ __all__ = [
     "RdnaCassetteResolver",
     "RdnaResolution",
     "SatelliteGapResolution",
+    "SequenceProvenance",
     "SpanningRead",
     "TerminalFeature",
     "Topology",
+    "assemble_path_sequence",
+    "assemble_scaffold_sequence",
     "classify_pde_junction",
     "classify_port",
+    "emit_agp",
+    "emit_fasta",
     "hello",
+    "parse_agp",
     "parse_paf_hits",
 ]

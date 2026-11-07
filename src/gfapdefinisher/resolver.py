@@ -810,6 +810,8 @@ class OntBridgingEngine:
                 core_coverage_bp_median=core_coverage_bp_median,
                 core_depth_ratio=core_depth_ratio,
                 representative_sequence_selected=True,
+                sequence_provenance="ONT-derived",
+                unpolished=True,
                 notes=quirk_notes,
             )
 
@@ -1072,6 +1074,8 @@ class OntBridgingEngine:
                 core_coverage_bp_median=core_coverage_bp_median,
                 core_depth_ratio=core_ratio,
                 representative_sequence_selected=True,
+                sequence_provenance="ONT-derived",
+                unpolished=True,
                 notes=quirk_notes,
             )
 
