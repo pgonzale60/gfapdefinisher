@@ -24,18 +24,19 @@ from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import build_end_evidence_ledger, emit_tsv_ledger
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY
-from gfapdefinisher.quirks import (
+from gfapdefinisher.rdna import RdnaCassetteResolver, RdnaResolution
+from gfapdefinisher.resolutions import (
     EndState,
     EndStateRecord,
-    IntervalQuirk,
     JunctionRecord,
-    QuirkRecord,
+    ResolutionRecord,
+    ResolutionType,
+    build_feature_id,
     collect_features,
     emit_end_states_tsv,
     emit_junctions_tsv,
-    emit_quirks_tsv,
+    emit_resolutions_tsv,
 )
-from gfapdefinisher.rdna import RdnaCassetteResolver, RdnaResolution
 from gfapdefinisher.resolver import (
     OntBridgingEngine,
     SatelliteGapResolution,
@@ -118,6 +119,13 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         dest="emit_agp",
         help="Optional path to emit AGP v2.1 records (default: <out_dir>/scaffolds.agp)",
+    )
+    finish_parser.add_argument(
+        "--resolutions",
+        type=Path,
+        default=None,
+        dest="resolutions",
+        help="Optional custom output path for resolutions TSV (default: <out_dir>/resolutions.tsv)",
     )
     finish_parser.add_argument(
         "--prefix",
@@ -210,14 +218,25 @@ def build_scaffolds(
     graph: BidirectedGraph,
     ledger_map: Mapping[str, Any],
     end_states: Sequence[EndStateRecord],
-    quirks: Sequence[QuirkRecord],
-    gap_resolutions: Sequence[SatelliteGapResolution],
-    dropout_resolutions: Sequence[tuple[QuirkRecord, EndStateRecord, str | None]],
-    rdna_resolutions: Sequence[RdnaResolution],
+    resolutions: Sequence[ResolutionRecord] | None = None,
+    gap_resolutions: Sequence[SatelliteGapResolution] = (),
+    dropout_resolutions: Sequence[tuple[ResolutionRecord, EndStateRecord, str | None]] = (),
+    rdna_resolutions: Sequence[RdnaResolution] = (),
     prefix: str = "",
     junctions: Sequence[JunctionRecord] = (),
+    *,
+    quirks: Sequence[ResolutionRecord] | None = None,
+    resolution_records: list[ResolutionRecord] | None = None,
 ) -> tuple[dict[str, str], list[AgpRecord]]:
     """Assemble scaffold sequences and AGP v2.1 records with empirical provenance."""
+    active_resolutions: list[ResolutionRecord] | None = None
+    if resolution_records is not None:
+        active_resolutions = resolution_records
+    elif isinstance(resolutions, list):
+        active_resolutions = resolutions
+    elif isinstance(quirks, list):
+        active_resolutions = quirks
+
     rdna_5p: dict[str, RdnaResolution] = {}
     rdna_3p: dict[str, RdnaResolution] = {}
     for r in rdna_resolutions:
@@ -230,18 +249,18 @@ def build_scaffolds(
     gap_by_left: dict[tuple[str, str], SatelliteGapResolution] = {}
     gap_by_left_seg: dict[str, SatelliteGapResolution] = {}
     for g in gap_resolutions:
-        q = g.quirk_record
-        if q and q.left_anchor_port:
-            l_name, l_strand = _parse_port_spec(q.left_anchor_port)
+        r_rec = g.resolution_record
+        if r_rec and r_rec.left_anchor_port:
+            l_name, l_strand = _parse_port_spec(r_rec.left_anchor_port)
             gap_by_left[(l_name, l_strand.value)] = g
             gap_by_left_seg[l_name] = g
         elif g.chrom:
             gap_by_left_seg[g.chrom] = g
 
-    dropout_by_anchor: dict[str, tuple[QuirkRecord, EndStateRecord, str]] = {}
-    for qrec, erec, dseq in dropout_resolutions:
+    dropout_by_anchor: dict[str, tuple[ResolutionRecord, EndStateRecord, str]] = {}
+    for rrec, erec, dseq in dropout_resolutions:
         if dseq:
-            dropout_by_anchor[erec.chrom] = (qrec, erec, dseq)
+            dropout_by_anchor[erec.chrom] = (rrec, erec, dseq)
 
     junctions_by_stem: dict[str, JunctionRecord] = {j.stem_port: j for j in junctions}
     junctions_by_germ: dict[str, JunctionRecord] = {
@@ -253,6 +272,7 @@ def build_scaffolds(
     bridge_forward: dict[SegmentPort, tuple[SegmentPort, SegmentPort]] = {}
     has_incoming_bridge: set[SegmentPort] = set()
 
+    seen_bridges: set[str] = set()
     for j in junctions:
         if j.germline_continuation_port:
             stem_p = _parse_port(j.stem_port)
@@ -263,6 +283,36 @@ def build_scaffolds(
                 next_stem_p = _parse_port(j2.stem_port).invert()
                 bridge_forward[stem_p] = (gp, next_stem_p)
                 has_incoming_bridge.add(next_stem_p)
+                if active_resolutions is not None and gp.name not in seen_bridges:
+                    seen_bridges.add(gp.name)
+                    bridge_count = len(
+                        [
+                            rec
+                            for rec in active_resolutions
+                            if rec.resolution_type == ResolutionType.INTERCALARY_GRS_BRIDGE
+                        ]
+                    )
+                    bridge_fid = build_feature_id(
+                        ResolutionType.INTERCALARY_GRS_BRIDGE,
+                        stem_p.name,
+                        "mid",
+                        index=bridge_count + 1,
+                    )
+                    bridge_rec = ResolutionRecord(
+                        feature_id=bridge_fid,
+                        chrom=stem_p.name,
+                        side="mid",
+                        resolution_type=ResolutionType.INTERCALARY_GRS_BRIDGE,
+                        left_anchor_port=stem_p.to_symbol(),
+                        right_anchor_port=next_stem_p.to_symbol(),
+                        unitig_ids=(gp.name,),
+                        core_coverage_bp_median=(graph.segments[gp.name].depth if gp.name in graph.segments else None),
+                        notes=(
+                            f"Intercalary GRS bridge {gp.to_symbol()} connecting core stems "
+                            f"{stem_p.to_symbol()} and {next_stem_p.to_symbol()}"
+                        ),
+                    )
+                    active_resolutions.append(bridge_rec)
 
     stem_names = {j.stem_port.rstrip("+-") for j in junctions}
 
@@ -278,6 +328,11 @@ def build_scaffolds(
         if len(r.path) > 1:
             for p in r.path[1:]:
                 consumed.add(p.name)
+        consumed.update(r.excluded_unitigs)
+        if r.distal_cap_port is not None:
+            consumed.add(r.distal_cap_port.name)
+
+    seen_bubbles: set[tuple[str, str]] = set()
 
     def _step_forward(curr: SegmentPort, visited_stems: set[str]) -> list[SegmentPort] | None:
         if curr in bridge_forward:
@@ -328,6 +383,48 @@ def build_scaffolds(
                             for b in cand_branches:
                                 consumed.add(b.name)
                             consumed.add(reconv_port.name)
+                            bubble_key = (
+                                min(curr.to_symbol(), core_outs[0].to_symbol()),
+                                max(curr.to_symbol(), core_outs[0].to_symbol()),
+                            )
+                            if active_resolutions is not None and bubble_key not in seen_bubbles:
+                                seen_bubbles.add(bubble_key)
+                                excl_branches = tuple(b.name for b in cand_branches if b != best_branch)
+                                bubble_count = len(
+                                    [
+                                        rec
+                                        for rec in active_resolutions
+                                        if rec.resolution_type == ResolutionType.SOMATIC_ALLELIC_BUBBLE
+                                    ]
+                                )
+                                bubble_fid = build_feature_id(
+                                    ResolutionType.SOMATIC_ALLELIC_BUBBLE,
+                                    curr.name,
+                                    "mid",
+                                    index=bubble_count + 1,
+                                )
+                                bubble_rec = ResolutionRecord(
+                                    feature_id=bubble_fid,
+                                    chrom=curr.name,
+                                    side="mid",
+                                    resolution_type=ResolutionType.SOMATIC_ALLELIC_BUBBLE,
+                                    left_anchor_port=curr.to_symbol(),
+                                    right_anchor_port=core_outs[0].to_symbol(),
+                                    unitig_ids=(best_branch.name, reconv_port.name),
+                                    excluded_unitig_ids=excl_branches,
+                                    core_coverage_bp_median=(
+                                        graph.segments[best_branch.name].depth
+                                        if best_branch.name in graph.segments
+                                        else None
+                                    ),
+                                    notes=(
+                                        f"Traversed 2-hop somatic allelic bubble from {curr.to_symbol()} to {core_outs[0].to_symbol()}; "
+                                        f"selected primary higher-depth allele {best_branch.to_symbol()} "
+                                        f"({graph.segments[best_branch.name].depth if best_branch.name in graph.segments else 0.0:.1f}x) "
+                                        f"over {','.join(excl_branches)}"
+                                    ),
+                                )
+                                active_resolutions.append(bubble_rec)
                             return [best_branch, reconv_port, core_outs[0]]
         return None
 
@@ -423,24 +520,24 @@ def build_scaffolds(
                 )
                 comps.append(
                     PathComponent(
-                        component_id=cap_port.name,
+                        segment_id=cap_port.name,
                         strand=cap_strand,
                         sequence=cap_seq,
-                        overlap_to_next=0,
-                        provenance=SequenceProvenance.RDNA_CHAINED,
+                        overlap_to_next_bp=0,
+                        sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
                     )
                 )
                 consumed.add(cap_port.name)
                 comps.append(
                     PathComponent(
-                        component_id="rdna_tangle_gap",
+                        segment_id="rdna_tangle_gap",
                         strand="+",
                         is_gap=True,
                         gap_length=DEFAULT_AGP_POLICY.unknown_gap_bp.value,
                         gap_type="repeat",
                         linkage="yes",
                         linkage_evidence="rna_tangle",
-                        overlap_to_next=0,
+                        overlap_to_next_bp=0,
                         gap_component_type="U",
                     )
                 )
@@ -449,14 +546,9 @@ def build_scaffolds(
                 p_seg = graph.segments[port.name]
                 p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
                 nxt_port = twin_path[i + 1] if i < len(twin_path) - 2 else first_port
-                overlap = _find_overlap_len(graph, port, nxt_port)
-                prov = (
-                    SequenceProvenance.RDNA_CHAINED
-                    if (
-                        "rdna" in port.name.lower() or "rrna" in port.name.lower() or (i > 0 and i < len(twin_path) - 1)
-                    )
-                    else SequenceProvenance.HIFI_CORE
-                )
+                has_edge = any(e.to_port == nxt_port for e in graph.get_outgoing(port))
+                overlap = _find_overlap_len(graph, port, nxt_port) if has_edge else 0
+                prov = SequenceProvenance.RDNA_CHAINED
                 if i == 0 and not (r.capped_via_heuristic and r.distal_cap_port is not None):
                     prov = SequenceProvenance.HIFI_GERMLINE
                 comps.append(
@@ -469,6 +561,21 @@ def build_scaffolds(
                     )
                 )
                 consumed.add(port.name)
+                if not has_edge:
+                    comps.append(
+                        PathComponent(
+                            segment_id="rdna_tangle_gap",
+                            strand="+",
+                            is_gap=True,
+                            gap_length=DEFAULT_AGP_POLICY.unknown_gap_bp.value,
+                            gap_type="repeat",
+                            linkage="yes",
+                            linkage_evidence="rna_tangle",
+                            overlap_to_next_bp=0,
+                            gap_component_type="U",
+                        )
+                    )
+            consumed.update(r.excluded_unitigs)
         else:
             # 5p germline continuation extension
             first_inv = first_port.invert()
@@ -490,7 +597,7 @@ def build_scaffolds(
                 gres = gap_by_left.get(key)
                 if gres is None:
                     cand = gap_by_left_seg.get(curr_out.name)
-                    if cand is not None and cand.quirk_record and cand.quirk_record.side == "5p":
+                    if cand is not None and cand.resolution_record and cand.resolution_record.side == "5p":
                         gres = cand
                 if gres is None:
                     break
@@ -498,14 +605,14 @@ def build_scaffolds(
                 gaps_5p.append(gres)
                 if gres.right_flank_port:
                     curr_out = gres.right_flank_port
-                elif gres.quirk_record and gres.quirk_record.right_anchor_port:
-                    r_name, r_strand = _parse_port_spec(gres.quirk_record.right_anchor_port)
+                elif gres.resolution_record and gres.resolution_record.right_anchor_port:
+                    r_name, r_strand = _parse_port_spec(gres.resolution_record.right_anchor_port)
                     curr_out = SegmentPort(r_name, r_strand)
                 else:
                     break
 
             for gres in reversed(gaps_5p):
-                qrec = gres.quirk_record
+                qrec = gres.resolution_record
                 r_name = (
                     qrec.right_anchor_port.rstrip("+-")
                     if (qrec and qrec.right_anchor_port)
@@ -550,18 +657,20 @@ def build_scaffolds(
                         if gres.median_gap_bp
                         else DEFAULT_AGP_POLICY.unknown_gap_bp.value
                     )
-                    gap_type = "repeat" if (qrec and qrec.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE) else "scaffold"
+                    gap_type = (
+                        "repeat" if (qrec and qrec.resolution_type == ResolutionType.SAT_GAP_VARIABLE) else "scaffold"
+                    )
                     comp_type = "U" if gap_len == DEFAULT_AGP_POLICY.unknown_gap_bp.value else "N"
                     comps.append(
                         PathComponent(
-                            component_id=f"gap_{gres.chrom}_{gres.side}_{gres.gap_index}",
+                            segment_id=f"gap_{gres.chrom}_{gres.side}_{gres.gap_index}",
                             strand="+",
                             is_gap=True,
                             gap_length=gap_len,
                             gap_type=gap_type,
                             linkage="yes",
-                            linkage_evidence="paired-ends",
-                            overlap_to_next=0,
+                            linkage_evidence="hifi-spanning",
+                            overlap_to_next_bp=0,
                             gap_component_type=comp_type,
                         )
                     )
@@ -604,14 +713,31 @@ def build_scaffolds(
         g_chain_3p: list[SegmentPort] = []
         if last_port.name in rdna_3p:
             r = rdna_3p[last_port.name]
-            overlap = _find_overlap_len(graph, r.path[0], r.path[1])
+            has_first_edge = any(e.to_port == r.path[1] for e in graph.get_outgoing(r.path[0]))
+            overlap = _find_overlap_len(graph, r.path[0], r.path[1]) if has_first_edge else 0
             comps[-1].overlap_to_next_bp = overlap
+            if not has_first_edge:
+                comps.append(
+                    PathComponent(
+                        segment_id="rdna_tangle_gap",
+                        strand="+",
+                        is_gap=True,
+                        gap_length=DEFAULT_AGP_POLICY.unknown_gap_bp.value,
+                        gap_type="repeat",
+                        linkage="yes",
+                        linkage_evidence="rna_tangle",
+                        overlap_to_next_bp=0,
+                        gap_component_type="U",
+                    )
+                )
 
             for i in range(1, len(r.path)):
                 port = r.path[i]
                 p_seg = graph.segments[port.name]
                 p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
-                nxt_ov = _find_overlap_len(graph, port, r.path[i + 1]) if i < len(r.path) - 1 else 0
+                nxt_port = r.path[i + 1] if i < len(r.path) - 1 else None
+                has_nxt_edge = any(e.to_port == nxt_port for e in graph.get_outgoing(port)) if nxt_port else False
+                nxt_ov = _find_overlap_len(graph, port, nxt_port) if has_nxt_edge else 0
                 prov = (
                     SequenceProvenance.HIFI_GERMLINE
                     if (i == len(r.path) - 1 and not (r.capped_via_heuristic and r.distal_cap_port is not None))
@@ -627,6 +753,20 @@ def build_scaffolds(
                     )
                 )
                 consumed.add(port.name)
+                if nxt_port is not None and not has_nxt_edge:
+                    comps.append(
+                        PathComponent(
+                            segment_id="rdna_tangle_gap",
+                            strand="+",
+                            is_gap=True,
+                            gap_length=DEFAULT_AGP_POLICY.unknown_gap_bp.value,
+                            gap_type="repeat",
+                            linkage="yes",
+                            linkage_evidence="rna_tangle",
+                            overlap_to_next_bp=0,
+                            gap_component_type="U",
+                        )
+                    )
 
             if r.capped_via_heuristic and r.distal_cap_port is not None:
                 cap_port = r.distal_cap_port
@@ -639,27 +779,28 @@ def build_scaffolds(
                 )
                 comps.append(
                     PathComponent(
-                        component_id="rdna_tangle_gap",
+                        segment_id="rdna_tangle_gap",
                         strand="+",
                         is_gap=True,
                         gap_length=DEFAULT_AGP_POLICY.unknown_gap_bp.value,
                         gap_type="repeat",
                         linkage="yes",
                         linkage_evidence="rna_tangle",
-                        overlap_to_next=0,
+                        overlap_to_next_bp=0,
                         gap_component_type="U",
                     )
                 )
                 comps.append(
                     PathComponent(
-                        component_id=cap_port.name,
+                        segment_id=cap_port.name,
                         strand=cap_strand,
                         sequence=cap_seq,
-                        overlap_to_next=0,
-                        provenance=SequenceProvenance.HIFI_GERMLINE,
+                        overlap_to_next_bp=0,
+                        sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
                     )
                 )
                 consumed.add(cap_port.name)
+            consumed.update(r.excluded_unitigs)
         elif last_port.name in dropout_by_anchor:
             # Somatic dropout rescue
             dqrec, derec, dseq = dropout_by_anchor[last_port.name]
@@ -719,22 +860,26 @@ def build_scaffolds(
         # 3p gap resolution
         cand_left = g_chain_3p[-1] if g_chain_3p else last_port
         gres = gap_by_left.get((cand_left.name, cand_left.strand.value))
-        if gres is not None and gres.quirk_record and gres.quirk_record.side == "5p":
+        if gres is not None and gres.resolution_record and gres.resolution_record.side == "5p":
             gres = None
         if gres is None:
             cand_gres = gap_by_left_seg.get(cand_left.name)
-            if cand_gres is not None and cand_gres.quirk_record and cand_gres.quirk_record.side != "5p":
+            if cand_gres is not None and cand_gres.resolution_record and cand_gres.resolution_record.side != "5p":
                 gres = cand_gres
         if gres is None and cand_left != last_port:
             cand_gres = gap_by_left.get((last_port.name, last_port.strand.value)) or gap_by_left_seg.get(last_port.name)
-            if cand_gres is not None and cand_gres.quirk_record and cand_gres.quirk_record.side != "5p":
+            if cand_gres is not None and cand_gres.resolution_record and cand_gres.resolution_record.side != "5p":
                 gres = cand_gres
         if gres is None and not g_chain_3p:
             for e in graph.get_outgoing(last_port):
                 target_seg = e.to_port.name
                 if (target_seg, e.to_port.strand.value) in gap_by_left or target_seg in gap_by_left_seg:
                     cand_gres = gap_by_left.get((target_seg, e.to_port.strand.value)) or gap_by_left_seg.get(target_seg)
-                    if cand_gres is not None and cand_gres.quirk_record and cand_gres.quirk_record.side != "5p":
+                    if (
+                        cand_gres is not None
+                        and cand_gres.resolution_record
+                        and cand_gres.resolution_record.side != "5p"
+                    ):
                         gres = cand_gres
                         e_ov = parse_dovetail_overlap_len(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
                         comps[-1].overlap_to_next_bp = e_ov
@@ -757,7 +902,7 @@ def build_scaffolds(
                         break
 
         if gres is not None:
-            qrec = gres.quirk_record
+            qrec = gres.resolution_record
             r_name = (
                 qrec.right_anchor_port.rstrip("+-")
                 if (qrec and qrec.right_anchor_port)
@@ -783,18 +928,20 @@ def build_scaffolds(
                 gap_len = (
                     int(round(gres.median_gap_bp)) if gres.median_gap_bp else DEFAULT_AGP_POLICY.unknown_gap_bp.value
                 )
-                gap_type = "repeat" if (qrec and qrec.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE) else "scaffold"
+                gap_type = (
+                    "repeat" if (qrec and qrec.resolution_type == ResolutionType.SAT_GAP_VARIABLE) else "scaffold"
+                )
                 comp_type = "U" if gap_len == DEFAULT_AGP_POLICY.unknown_gap_bp.value else "N"
                 comps.append(
                     PathComponent(
-                        component_id=f"gap_{gres.chrom}_{gres.side}_{gres.gap_index}",
+                        segment_id=f"gap_{gres.chrom}_{gres.side}_{gres.gap_index}",
                         strand="+",
                         is_gap=True,
                         gap_length=gap_len,
                         gap_type=gap_type,
                         linkage="yes",
-                        linkage_evidence="paired-ends",
-                        overlap_to_next=0,
+                        linkage_evidence="hifi-spanning",
+                        overlap_to_next_bp=0,
                         gap_component_type=comp_type,
                     )
                 )
@@ -862,7 +1009,7 @@ def run_finish(args: argparse.Namespace) -> None:
     )
     ledger_map = {ev.port.to_symbol(): ev for ev in ledger} | {f"{ev.segment_name}:{ev.end}": ev for ev in ledger}
     core_coverage = compute_core_coverage(graph, ledger)
-    junction_records, end_state_records, quirk_records = collect_features(
+    junction_records, end_state_records, resolution_records = collect_features(
         graph=graph,
         ledger=ledger,
         core_coverage=core_coverage,
@@ -876,10 +1023,10 @@ def run_finish(args: argparse.Namespace) -> None:
             (rec.chrom, rec.side): (rec.somatic_port, rec.somatic_depth_ratio) for rec in end_state_records
         }
 
-        end_state_records, quirk_records = engine.identify_and_resolve_gaps(
+        end_state_records, resolution_records = engine.identify_and_resolve_gaps(
             paf_source=args.ont_paf,
             end_states=end_state_records,
-            quirks=quirk_records,
+            quirks=resolution_records,
             reads_sequences=args.ont_reads,
         )
 
@@ -909,7 +1056,7 @@ def run_finish(args: argparse.Namespace) -> None:
                     rec.state = d_erec.state
                     rec.resolved = d_erec.resolved
                     rec.notes = d_erec.notes
-                    quirk_records.append(d_qrec)
+                    resolution_records.append(d_qrec)
 
         for rec in end_state_records:
             som_port, som_ratio = pre_somatic.get((rec.chrom, rec.side), (None, None))
@@ -960,17 +1107,17 @@ def run_finish(args: argparse.Namespace) -> None:
                     new_ends.append(rec_to_add)
                 end_state_records = new_ends
 
-            new_quirks: list[QuirkRecord] = []
-            rep_q = False
-            for qr in quirk_records:
-                if qr.chrom == chrom and qr.side == side and qr.quirk_type == IntervalQuirk.RDNA_CASSETTE:
-                    new_quirks.append(res.quirk_record)
-                    rep_q = True
+            new_res: list[ResolutionRecord] = []
+            rep_r = False
+            for qr in resolution_records:
+                if qr.chrom == chrom and qr.side == side and qr.resolution_type == ResolutionType.RDNA_CASSETTE:
+                    new_res.append(res.resolution_record)
+                    rep_r = True
                 else:
-                    new_quirks.append(qr)
-            if not rep_q:
-                new_quirks.append(res.quirk_record)
-            quirk_records = new_quirks
+                    new_res.append(qr)
+            if not rep_r:
+                new_res.append(res.resolution_record)
+            resolution_records = new_res
 
     end_state_records = [rec for rec in end_state_records if rec.chrom not in rdna_chained_names]
 
@@ -980,7 +1127,7 @@ def run_finish(args: argparse.Namespace) -> None:
         graph=graph,
         ledger_map=ledger_map,
         end_states=end_state_records,
-        quirks=quirk_records,
+        resolutions=resolution_records,
         gap_resolutions=engine.gap_resolutions,
         dropout_resolutions=engine.dropout_resolutions,
         rdna_resolutions=rdna_resolutions,
@@ -1006,7 +1153,10 @@ def run_finish(args: argparse.Namespace) -> None:
     emit_tsv_ledger(ledger, args.out_dir / "ledger.tsv")
     emit_junctions_tsv(junction_records, args.out_dir / "junctions.tsv")
     emit_end_states_tsv(end_state_records, args.out_dir / "end_states.tsv")
-    emit_quirks_tsv(quirk_records, args.out_dir / "quirks.tsv")
+    res_target = (
+        args.resolutions if getattr(args, "resolutions", None) is not None else args.out_dir / "resolutions.tsv"
+    )
+    emit_resolutions_tsv(resolution_records, res_target)
 
 
 def main(args: list[str] | None = None) -> int:

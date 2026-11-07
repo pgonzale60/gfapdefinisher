@@ -23,14 +23,14 @@ from gfapdefinisher.graph import BidirectedGraph
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import DovetailEdge, SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY, Policy
-from gfapdefinisher.quirks import (
+from gfapdefinisher.resolutions import (
     EndState,
     EndStateRecord,
-    IntervalQuirk,
-    QuirkRecord,
+    ResolutionRecord,
+    ResolutionType,
     build_feature_id,
     emit_end_states_tsv,
-    emit_quirks_tsv,
+    emit_resolutions_tsv,
 )
 from gfapdefinisher.resolver import reverse_complement
 
@@ -43,7 +43,7 @@ class RdnaResolution:
     side: str
     state: EndState
     end_state_record: EndStateRecord
-    quirk_record: QuirkRecord
+    resolution_record: ResolutionRecord
     path: list[SegmentPort]
     sequence: str | None = None
     distal_cap_port: SegmentPort | None = None
@@ -52,18 +52,56 @@ class RdnaResolution:
     unlinked_join_indices: tuple[int, ...] = ()
     excluded_unitigs: tuple[str, ...] = ()
 
+    def __init__(
+        self,
+        chrom: str,
+        side: str,
+        state: EndState,
+        end_state_record: EndStateRecord,
+        resolution_record: ResolutionRecord | None = None,
+        path: list[SegmentPort] | None = None,
+        sequence: str | None = None,
+        distal_cap_port: SegmentPort | None = None,
+        capped_via_heuristic: bool = False,
+        reached_distal_cap: bool = False,
+        unlinked_join_indices: tuple[int, ...] = (),
+        excluded_unitigs: tuple[str, ...] = (),
+        *,
+        quirk_record: ResolutionRecord | None = None,
+    ) -> None:
+        self.chrom = chrom
+        self.side = side
+        self.state = state
+        self.end_state_record = end_state_record
+        res_rec = resolution_record if resolution_record is not None else quirk_record
+        if res_rec is None:
+            raise ValueError("resolution_record cannot be empty.")
+        self.resolution_record = res_rec
+        self.path = path if path is not None else []
+        self.sequence = sequence
+        self.distal_cap_port = distal_cap_port
+        self.capped_via_heuristic = capped_via_heuristic
+        self.reached_distal_cap = reached_distal_cap
+        self.unlinked_join_indices = unlinked_join_indices
+        self.excluded_unitigs = excluded_unitigs
+
+    @property
+    def quirk_record(self) -> ResolutionRecord:
+        """Alias for backward compatibility with quirk record access."""
+        return self.resolution_record
+
     def __iter__(self):
-        """Enable tuple unpacking into (end_state_record, quirk_record)."""
-        return iter((self.end_state_record, self.quirk_record))
+        """Enable tuple unpacking into (end_state_record, resolution_record)."""
+        return iter((self.end_state_record, self.resolution_record))
 
     def emit_end_states_tsv(self, out_file: TextIO | Path | str | None = None) -> str:
         """Emit EndStateRecord to TSV stream or string."""
         return emit_end_states_tsv([self.end_state_record], out_file)
 
-    def emit_quirks_tsv(self, out_file: TextIO | Path | str | None = None) -> str:
-        """Emit QuirkRecord to TSV stream or string."""
+    def emit_resolutions_tsv(self, out_file: TextIO | Path | str | None = None) -> str:
+        """Emit ResolutionRecord to TSV stream or string."""
         buf = StringIO()
-        emit_quirks_tsv([self.quirk_record], buf)
+        emit_resolutions_tsv([self.resolution_record], buf)
         content = buf.getvalue()
         if out_file is not None:
             if isinstance(out_file, str | Path):
@@ -72,6 +110,8 @@ class RdnaResolution:
             else:
                 out_file.write(content)
         return content
+
+    emit_quirks_tsv = emit_resolutions_tsv
 
 
 class RdnaCassetteResolver:
@@ -730,13 +770,13 @@ class RdnaCassetteResolver:
             rdna_unitigs = tuple(p.name for p in path_to_cap if self.is_rdna_unitig(p))
 
             feature_id_end = build_feature_id(EndState.END_SHARED_EXEMPT, chrom, side)
-            feature_id_quirk = build_feature_id(IntervalQuirk.RDNA_CASSETTE, chrom, side, index=gap_index)
+            feature_id_res = build_feature_id(ResolutionType.RDNA_CASSETTE, chrom, side, index=gap_index)
 
-            quirk_notes = (
+            res_notes = (
                 f"rDNA cassette chained {len(rdna_unitigs)} copies terminating at distal cap {cap_port.to_symbol()}"
             )
             if notes:
-                quirk_notes = f"{quirk_notes}; {notes}"
+                res_notes = f"{res_notes}; {notes}"
 
             end_notes = f"Shared exempt rDNA cassette resolved to distal telomeric cap {cap_port.to_symbol()}"
             if notes:
@@ -751,11 +791,11 @@ class RdnaCassetteResolver:
                 if ev is not None and ev.depth > 0:
                     core_cov = ev.depth
 
-            quirk_record = QuirkRecord(
-                feature_id=feature_id_quirk,
+            resolution_record = ResolutionRecord(
+                feature_id=feature_id_res,
                 chrom=chrom,
                 side=side,
-                quirk_type=IntervalQuirk.RDNA_CASSETTE,
+                resolution_type=ResolutionType.RDNA_CASSETTE,
                 length_min_bp=path_len,
                 length_median_bp=path_len,
                 length_max_bp=path_len,
@@ -766,7 +806,7 @@ class RdnaCassetteResolver:
                 unitig_ids=all_unitigs,
                 core_coverage_bp_median=core_cov,
                 representative_sequence_selected=assembled_seq is not None,
-                notes=quirk_notes,
+                notes=res_notes,
             )
 
             end_state_record = EndStateRecord(
@@ -787,7 +827,7 @@ class RdnaCassetteResolver:
                 side=side,
                 state=EndState.END_SHARED_EXEMPT,
                 end_state_record=end_state_record,
-                quirk_record=quirk_record,
+                resolution_record=resolution_record,
                 path=path_to_cap,
                 sequence=assembled_seq,
                 distal_cap_port=cap_port,
@@ -797,7 +837,7 @@ class RdnaCassetteResolver:
 
         # Distal cap not reached
         feature_id_end = build_feature_id(EndState.END_SHARED_EXEMPT, chrom, side)
-        feature_id_quirk = build_feature_id(IntervalQuirk.RDNA_CASSETTE, chrom, side, index=gap_index)
+        feature_id_res = build_feature_id(ResolutionType.RDNA_CASSETTE, chrom, side, index=gap_index)
 
         unresolved_path = self.traverse_rdna_cassette(entry_port, include_anchor=True)
         unlinked_join_indices: list[int] = []
@@ -893,7 +933,7 @@ class RdnaCassetteResolver:
             right_str = distal_cap_port.to_symbol()
             agp_component = "U"
             agp_evidence = "rna_tangle"
-            unresolved_quirk_notes = (
+            unresolved_res_notes = (
                 f"rDNA cassette tangle capped via heuristic at distal cap {distal_cap_port.to_symbol()}"
             )
             unresolved_end_notes = f"Shared exempt rDNA cassette capped via heuristic at {distal_cap_port.to_symbol()}"
@@ -901,11 +941,11 @@ class RdnaCassetteResolver:
             right_str = None
             agp_component = "U"
             agp_evidence = "unresolved-tangle"
-            unresolved_quirk_notes = "Unresolved rDNA cassette tangle: distal telomere cap not reached"
+            unresolved_res_notes = "Unresolved rDNA cassette tangle: distal telomere cap not reached"
             unresolved_end_notes = "Unresolved rDNA cassette end"
 
         if notes:
-            unresolved_quirk_notes = f"{unresolved_quirk_notes}; {notes}"
+            unresolved_res_notes = f"{unresolved_res_notes}; {notes}"
             unresolved_end_notes = f"{unresolved_end_notes}; {notes}"
 
         unresolved_cov: float | None = None
@@ -917,11 +957,11 @@ class RdnaCassetteResolver:
             if ev is not None and ev.depth > 0:
                 unresolved_cov = ev.depth
 
-        quirk_record = QuirkRecord(
-            feature_id=feature_id_quirk,
+        resolution_record = ResolutionRecord(
+            feature_id=feature_id_res,
             chrom=chrom,
             side=side,
-            quirk_type=IntervalQuirk.RDNA_CASSETTE,
+            resolution_type=ResolutionType.RDNA_CASSETTE,
             length_min_bp=path_len,
             length_median_bp=path_len,
             length_max_bp=path_len,
@@ -932,7 +972,8 @@ class RdnaCassetteResolver:
             unitig_ids=all_unitigs,
             core_coverage_bp_median=unresolved_cov,
             representative_sequence_selected=assembled_seq is not None,
-            notes=unresolved_quirk_notes,
+            notes=unresolved_res_notes,
+            excluded_unitig_ids=excluded_unitigs,
         )
 
         end_state_record = EndStateRecord(
@@ -950,7 +991,7 @@ class RdnaCassetteResolver:
             side=side,
             state=EndState.END_SHARED_EXEMPT,
             end_state_record=end_state_record,
-            quirk_record=quirk_record,
+            resolution_record=resolution_record,
             path=full_path,
             sequence=assembled_seq,
             distal_cap_port=distal_cap_port,
@@ -968,7 +1009,7 @@ class RdnaCassetteResolver:
         gap_index: int = 1,
         notes: str = "",
     ) -> RdnaResolution:
-        """Assemble traversed rDNA path and emit EndStateRecord and QuirkRecord."""
+        """Assemble traversed rDNA path and emit EndStateRecord and ResolutionRecord."""
         resolved_entry: SegmentPort | None
         if entry_port is None:
             entries = self.find_rdna_entry_ports()
@@ -978,12 +1019,12 @@ class RdnaCassetteResolver:
 
         if resolved_entry is None:
             feature_id_end = build_feature_id(EndState.END_SHARED_EXEMPT, chrom, side)
-            feature_id_quirk = build_feature_id(IntervalQuirk.RDNA_CASSETTE, chrom, side, index=gap_index)
-            quirk_record = QuirkRecord(
-                feature_id=feature_id_quirk,
+            feature_id_res = build_feature_id(ResolutionType.RDNA_CASSETTE, chrom, side, index=gap_index)
+            resolution_record = ResolutionRecord(
+                feature_id=feature_id_res,
                 chrom=chrom,
                 side=side,
-                quirk_type=IntervalQuirk.RDNA_CASSETTE,
+                resolution_type=ResolutionType.RDNA_CASSETTE,
                 length_min_bp=None,
                 length_median_bp=None,
                 length_max_bp=None,
@@ -1010,7 +1051,7 @@ class RdnaCassetteResolver:
                 side=side,
                 state=EndState.END_SHARED_EXEMPT,
                 end_state_record=end_state_record,
-                quirk_record=quirk_record,
+                resolution_record=resolution_record,
                 path=[],
                 sequence=None,
                 distal_cap_port=None,
@@ -1026,22 +1067,22 @@ class RdnaCassetteResolver:
             notes=notes,
         )
 
-    def collect_unresolved_tangles(self, chained_segments: set[str] | Sequence[str] = ()) -> list[QuirkRecord]:
-        """Record any remaining eukaryotic rDNA segments not reached from an entry stem as single-segment unresolved-tangle quirks."""
+    def collect_unresolved_tangles(self, chained_segments: set[str] | Sequence[str] = ()) -> list[ResolutionRecord]:
+        """Record any remaining eukaryotic rDNA segments not reached from an entry stem as single-segment unresolved-tangle resolutions."""
         chained = set(chained_segments)
         rdna_segs = sorted(self._get_rdna_segments())
-        quirks: list[QuirkRecord] = []
+        resolutions: list[ResolutionRecord] = []
         for seg_name in rdna_segs:
             if seg_name in chained:
                 continue
             seg = self.graph.segments.get(seg_name)
             seg_len = seg.length if seg is not None else None
-            q_fid = build_feature_id(IntervalQuirk.RDNA_CASSETTE, seg_name, "mid", index=1)
-            q_rec = QuirkRecord(
+            q_fid = build_feature_id(ResolutionType.RDNA_CASSETTE, seg_name, "mid", index=1)
+            q_rec = ResolutionRecord(
                 feature_id=q_fid,
                 chrom=seg_name,
                 side="mid",
-                quirk_type=IntervalQuirk.RDNA_CASSETTE,
+                resolution_type=ResolutionType.RDNA_CASSETTE,
                 length_min_bp=seg_len,
                 length_median_bp=seg_len,
                 length_max_bp=seg_len,
@@ -1054,5 +1095,5 @@ class RdnaCassetteResolver:
                 representative_sequence_selected=False,
                 notes=f"Unresolved unanchored eukaryotic rDNA segment: {seg_name}",
             )
-            quirks.append(q_rec)
-        return quirks
+            resolutions.append(q_rec)
+        return resolutions

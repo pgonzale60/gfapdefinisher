@@ -10,7 +10,7 @@ from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY
-from gfapdefinisher.quirks import (
+from gfapdefinisher.resolutions import (
     EndState,
     EndStateRecord,
     IntervalQuirk,

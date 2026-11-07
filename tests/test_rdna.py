@@ -9,13 +9,13 @@ from gfapdefinisher.annotations import BarrnapHit, NodeAnnotations, load_barrnap
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
-from gfapdefinisher.quirks import (
+from gfapdefinisher.rdna import RdnaCassetteResolver
+from gfapdefinisher.resolutions import (
     EndState,
     IntervalQuirk,
     parse_end_states_tsv,
     parse_quirks_tsv,
 )
-from gfapdefinisher.rdna import RdnaCassetteResolver
 
 BENCHMARK_DIR = Path("data/benchmark/DF5120")
 

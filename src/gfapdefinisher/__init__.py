@@ -28,33 +28,27 @@ from gfapdefinisher.policy import (
     DEFAULT_POLICY,
     Policy,
 )
-from gfapdefinisher.quirks import (
+from gfapdefinisher.rdna import (
+    RdnaCassetteResolver,
+    RdnaResolution,
+)
+from gfapdefinisher.resolutions import (
     END_STATE_TSV_COLUMNS,
     JUNCTION_TSV_COLUMNS,
-    QUIRK_COLUMNS,
-    QUIRK_TSV_COLUMNS,
     RESOLUTION_COLUMNS,
     RESOLUTION_TSV_COLUMNS,
     EndState,
     EndStateRecord,
-    IntervalQuirk,
     JunctionClass,
     JunctionRecord,
-    QuirkRecord,
     ResolutionRecord,
     ResolutionType,
     emit_end_states_tsv,
     emit_junctions_tsv,
-    emit_quirks_tsv,
     emit_resolutions_tsv,
     parse_end_states_tsv,
     parse_junctions_tsv,
-    parse_quirks_tsv,
     parse_resolutions_tsv,
-)
-from gfapdefinisher.rdna import (
-    RdnaCassetteResolver,
-    RdnaResolution,
 )
 from gfapdefinisher.resolver import (
     GapDistribution,
@@ -79,7 +73,6 @@ __all__ = [
     "EndStateRecord",
     "FastaAgpEmitter",
     "GapDistribution",
-    "IntervalQuirk",
     "JUNCTION_TSV_COLUMNS",
     "JunctionClass",
     "JunctionRecord",
@@ -90,9 +83,6 @@ __all__ = [
     "Policy",
     "PortClassification",
     "Provenance",
-    "QUIRK_COLUMNS",
-    "QUIRK_TSV_COLUMNS",
-    "QuirkRecord",
     "RESOLUTION_COLUMNS",
     "RESOLUTION_TSV_COLUMNS",
     "RdnaCassetteResolver",
@@ -114,7 +104,6 @@ __all__ = [
     "emit_end_states_tsv",
     "emit_fasta",
     "emit_junctions_tsv",
-    "emit_quirks_tsv",
     "emit_resolutions_tsv",
     "emit_scaffold",
     "hello",
@@ -122,6 +111,5 @@ __all__ = [
     "parse_end_states_tsv",
     "parse_junctions_tsv",
     "parse_paf_hits",
-    "parse_quirks_tsv",
     "parse_resolutions_tsv",
 ]

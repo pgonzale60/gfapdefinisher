@@ -1,10 +1,8 @@
-"""Biological quirk, junction, and chromosome end-state taxonomy.
+"""Curator resolution audit table, junction, and chromosome end-state taxonomy.
 
 Defines the ratified 3-layer biological feature schema for assembly graph
 finishing, capturing chromosome end completeness, somatic diminution (PDE)
-junctions, and interval-level structural quirks.
-
-Ratified in Issue #26.
+junctions, and interval-level structural resolutions and heuristic bridges.
 """
 
 from __future__ import annotations
@@ -82,8 +80,8 @@ class JunctionClass(str, Enum):
     pde_intercalary = "pde_intercalary"
 
 
-class IntervalQuirk(str, Enum):
-    """Interval-level biological quirk or assembly graph idiosyncrasy."""
+class ResolutionType(str, Enum):
+    """Classification for chromosome end resolutions, structural gaps, and heuristic bridges."""
 
     SAT_GAP_VARIABLE = "sat_gap_variable"
     SAT_GAP_FIXED = "sat_gap_fixed"
@@ -113,6 +111,9 @@ class IntervalQuirk(str, Enum):
     intercalary_grs_bridge = "intercalary_grs_bridge"
     pde_terminal_cap = "pde_terminal_cap"
     subtelomeric_satellite_cap = "subtelomeric_satellite_cap"
+
+
+IntervalQuirk = ResolutionType
 
 
 def build_feature_id(
@@ -271,14 +272,14 @@ class JunctionRecord:
 
 
 @dataclass(slots=True)
-class QuirkRecord:
-    """Layer 3 record documenting an interval-level biological quirk or assembly idiosyncrasy.
+class ResolutionRecord:
+    """Record documenting a biological feature resolution or assembly heuristic in resolutions.tsv.
 
     Attributes:
-        feature_id: Canonical identifier (e.g. 'sat_gap_variable:IV:3p:1').
+        feature_id: Canonical identifier (e.g. 'sat_gap_variable:IV:3p:1', 'rdna_cassette:II:5p:1').
         chrom: Chromosome name.
         side: Arm end or locus.
-        quirk_type: IntervalQuirk enum classification.
+        resolution_type: ResolutionType enum classification.
         spanning_read_count: Number of reads anchoring both flanking unitigs.
         length_min_bp: Minimum observed interval length across spanning reads.
         length_median_bp: Median observed interval length across spanning reads.
@@ -289,19 +290,24 @@ class QuirkRecord:
         left_anchor_port: Bounding unitig port on the proximal side.
         right_anchor_port: Bounding unitig port on the distal side.
         agp_component_type: AGP component designation (e.g. 'W' or 'U').
-        agp_linkage_evidence: AGP linkage evidence designation (e.g. 'ont-spanning').
+        agp_linkage_evidence: AGP linkage evidence designation (e.g. 'hifi-spanning').
         unitig_ids: Tuple of involved assembly graph unitig identifiers.
         read_count: Total distinct reads supporting this segment/feature.
         core_coverage_bp_median: Somatic core reference depth ($C_{core}$).
         core_depth_ratio: Feature depth relative to somatic core coverage ($D / C_{core}$).
         representative_sequence_selected: Whether a real read sequence was chosen (BIO-004).
+        sequence_provenance: Empirical provenance string.
+        unpolished: Whether representative sequence is unpolished raw long-read data.
         notes: Contextual notes or provenance information.
+        agp_start: Optional 1-based start coordinate along chromosome scaffold AGP.
+        agp_end: Optional 1-based end coordinate along chromosome scaffold AGP.
+        excluded_unitig_ids: Unitigs deliberately excluded during resolution.
     """
 
     feature_id: str
     chrom: str
     side: str
-    quirk_type: IntervalQuirk
+    resolution_type: ResolutionType
     spanning_read_count: int | None = None
     length_min_bp: int | None = None
     length_median_bp: int | None = None
@@ -325,32 +331,90 @@ class QuirkRecord:
     agp_end: int | None = None
     excluded_unitig_ids: tuple[str, ...] = field(default_factory=tuple)
 
-    def __post_init__(self) -> None:
-        if not self.chrom:
+    def __init__(
+        self,
+        feature_id: str,
+        chrom: str,
+        side: str,
+        resolution_type: ResolutionType | str | None = None,
+        spanning_read_count: int | None = None,
+        length_min_bp: int | None = None,
+        length_median_bp: int | None = None,
+        length_max_bp: int | None = None,
+        length_iqr_bp: int | None = None,
+        repeat_monomer_len_bp: int | None = None,
+        copy_number_range: str | None = None,
+        left_anchor_port: str | None = None,
+        right_anchor_port: str | None = None,
+        agp_component_type: str | None = None,
+        agp_linkage_evidence: str | None = None,
+        unitig_ids: tuple[str, ...] | Sequence[str] = (),
+        read_count: int | None = None,
+        core_coverage_bp_median: float | None = None,
+        core_depth_ratio: float | None = None,
+        representative_sequence_selected: bool = False,
+        sequence_provenance: str | None = None,
+        unpolished: bool = False,
+        notes: str = "",
+        agp_start: int | None = None,
+        agp_end: int | None = None,
+        excluded_unitig_ids: tuple[str, ...] | Sequence[str] = (),
+        *,
+        quirk_type: ResolutionType | str | None = None,
+    ) -> None:
+        if not chrom:
             raise ValueError("Chromosome cannot be empty.")
-        if not self.side:
+        if not side:
             raise ValueError("Side cannot be empty.")
-        if isinstance(self.quirk_type, str) and not isinstance(self.quirk_type, IntervalQuirk):
-            self.quirk_type = IntervalQuirk(self.quirk_type)
-        if not isinstance(self.unitig_ids, tuple):
-            self.unitig_ids = tuple(self.unitig_ids)
-        if not isinstance(self.excluded_unitig_ids, tuple):
-            self.excluded_unitig_ids = tuple(self.excluded_unitig_ids)
-        if (
-            self.length_min_bp is not None
-            and self.length_max_bp is not None
-            and self.length_min_bp > self.length_max_bp
-        ):
-            raise ValueError(
-                f"length_min_bp ({self.length_min_bp}) cannot exceed length_max_bp ({self.length_max_bp})."
-            )
-        if self.agp_start is not None and self.agp_end is not None and self.agp_start > self.agp_end:
-            raise ValueError(f"agp_start ({self.agp_start}) cannot exceed agp_end ({self.agp_end}).")
+        chosen_type = resolution_type if resolution_type is not None else quirk_type
+        if chosen_type is None:
+            raise ValueError("resolution_type cannot be empty.")
+        if isinstance(chosen_type, str) and not isinstance(chosen_type, ResolutionType):
+            chosen_type = ResolutionType(chosen_type)
+        u_ids = tuple(unitig_ids) if not isinstance(unitig_ids, tuple) else unitig_ids
+        excl_ids = tuple(excluded_unitig_ids) if not isinstance(excluded_unitig_ids, tuple) else excluded_unitig_ids
+        if length_min_bp is not None and length_max_bp is not None and length_min_bp > length_max_bp:
+            raise ValueError(f"length_min_bp ({length_min_bp}) cannot exceed length_max_bp ({length_max_bp}).")
+        if agp_start is not None and agp_end is not None and agp_start > agp_end:
+            raise ValueError(f"agp_start ({agp_start}) cannot exceed agp_end ({agp_end}).")
+
+        self.feature_id = feature_id
+        self.chrom = chrom
+        self.side = side
+        self.resolution_type = chosen_type
+        self.spanning_read_count = spanning_read_count
+        self.length_min_bp = length_min_bp
+        self.length_median_bp = length_median_bp
+        self.length_max_bp = length_max_bp
+        self.length_iqr_bp = length_iqr_bp
+        self.repeat_monomer_len_bp = repeat_monomer_len_bp
+        self.copy_number_range = copy_number_range
+        self.left_anchor_port = left_anchor_port
+        self.right_anchor_port = right_anchor_port
+        self.agp_component_type = agp_component_type
+        self.agp_linkage_evidence = agp_linkage_evidence
+        self.unitig_ids = u_ids
+        self.read_count = read_count
+        self.core_coverage_bp_median = core_coverage_bp_median
+        self.core_depth_ratio = core_depth_ratio
+        self.representative_sequence_selected = representative_sequence_selected
+        self.sequence_provenance = sequence_provenance
+        self.unpolished = unpolished
+        self.notes = notes
+        self.agp_start = agp_start
+        self.agp_end = agp_end
+        self.excluded_unitig_ids = excl_ids
+
+    @property
+    def quirk_type(self) -> ResolutionType:
+        """Alias for backward compatibility with quirk inspection."""
+        return self.resolution_type
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize record to dictionary with string enum representations."""
         d = asdict(self)
-        d["quirk_type"] = self.quirk_type.value
+        d["resolution_type"] = self.resolution_type.value
+        d["quirk_type"] = self.resolution_type.value
         d["unitig_ids"] = list(self.unitig_ids)
         d["excluded_unitig_ids"] = list(self.excluded_unitig_ids)
         return d
@@ -361,7 +425,7 @@ class QuirkRecord:
             self.feature_id,
             self.chrom,
             self.side,
-            self.quirk_type.value,
+            self.resolution_type.value,
             str(self.spanning_read_count) if self.spanning_read_count is not None else "",
             str(self.length_min_bp) if self.length_min_bp is not None else "",
             str(self.length_median_bp) if self.length_median_bp is not None else "",
@@ -387,11 +451,13 @@ class QuirkRecord:
         ]
 
 
-QUIRK_TSV_COLUMNS: list[str] = [
+QuirkRecord = ResolutionRecord
+
+RESOLUTION_TSV_COLUMNS: list[str] = [
     "feature_id",
     "chrom",
     "side",
-    "quirk_type",
+    "resolution_type",
     "spanning_read_count",
     "length_min_bp",
     "length_median_bp",
@@ -416,12 +482,9 @@ QUIRK_TSV_COLUMNS: list[str] = [
     "excluded_unitig_ids",
 ]
 
-QUIRK_COLUMNS: list[str] = QUIRK_TSV_COLUMNS
-RESOLUTION_COLUMNS: list[str] = QUIRK_COLUMNS
-RESOLUTION_TSV_COLUMNS: list[str] = QUIRK_TSV_COLUMNS
-
-ResolutionType = IntervalQuirk
-ResolutionRecord = QuirkRecord
+RESOLUTION_COLUMNS: list[str] = RESOLUTION_TSV_COLUMNS
+QUIRK_TSV_COLUMNS: list[str] = RESOLUTION_TSV_COLUMNS
+QUIRK_COLUMNS: list[str] = RESOLUTION_TSV_COLUMNS
 
 
 def _clean_tsv_stream(stream: Iterable[str]) -> list[str]:
@@ -440,14 +503,14 @@ def _clean_tsv_stream(stream: Iterable[str]) -> list[str]:
     return cleaned
 
 
-def emit_quirks_tsv(
-    records: Iterable[QuirkRecord],
+def emit_resolutions_tsv(
+    records: Iterable[ResolutionRecord],
     out_file: TextIO | Path | str | None = None,
 ) -> str:
-    """Emit a list or iterable of QuirkRecords as a standardized TSV string (and optional file).
+    """Emit a list or iterable of ResolutionRecords as a standardized TSV string (and optional file).
 
     Args:
-        records: Iterable of QuirkRecord objects.
+        records: Iterable of ResolutionRecord objects.
         out_file: Optional destination file path or open text file object.
 
     Returns:
@@ -455,7 +518,7 @@ def emit_quirks_tsv(
     """
     buffer = StringIO()
     writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
-    writer.writerow(QUIRK_TSV_COLUMNS)
+    writer.writerow(RESOLUTION_TSV_COLUMNS)
     for rec in records:
         writer.writerow(rec.to_tsv_row())
     content = buffer.getvalue()
@@ -470,7 +533,7 @@ def emit_quirks_tsv(
     return content
 
 
-emit_resolutions_tsv = emit_quirks_tsv
+emit_quirks_tsv = emit_resolutions_tsv
 
 
 def _to_int_or_none(row: dict[str, str], key: str) -> int | None:
@@ -483,23 +546,26 @@ def _to_float_or_none(row: dict[str, str], key: str) -> float | None:
     return float(val) if val else None
 
 
-def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
-    """Parse a standardized quirks or resolutions TSV content string, stream, or file into a list of QuirkRecord objects.
+def parse_resolutions_tsv(file: TextIO | Path | str) -> list[ResolutionRecord]:
+    """Parse a standardized resolutions TSV content string, stream, or file into a list of ResolutionRecord objects.
 
     Args:
         file: Input file path, open text stream, or TSV content string.
 
     Returns:
-        List of deserialized QuirkRecord instances.
+        List of deserialized ResolutionRecord instances.
     """
 
-    def _parse_rows(reader: csv.DictReader[str]) -> list[QuirkRecord]:
-        records: list[QuirkRecord] = []
+    def _parse_rows(reader: csv.DictReader[str]) -> list[ResolutionRecord]:
+        records: list[ResolutionRecord] = []
         for row in reader:
             if not row:
                 continue
             fid = row.get("feature_id")
             if not fid or fid.startswith("#"):
+                continue
+            r_type_raw = (row.get("resolution_type") or row.get("quirk_type", "")).strip()
+            if not r_type_raw:
                 continue
             utg_str = row.get("unitig_ids", "")
             unitig_ids = tuple(x.strip() for x in utg_str.split(",") if x.strip())
@@ -512,11 +578,11 @@ def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
             unpolished = unpol_raw in ("true", "1")
 
             records.append(
-                QuirkRecord(
+                ResolutionRecord(
                     feature_id=fid.strip(),
                     chrom=row["chrom"].strip(),
                     side=row["side"].strip(),
-                    quirk_type=IntervalQuirk(row["quirk_type"].strip()),
+                    resolution_type=ResolutionType(r_type_raw),
                     spanning_read_count=_to_int_or_none(row, "spanning_read_count"),
                     length_min_bp=_to_int_or_none(row, "length_min_bp"),
                     length_median_bp=_to_int_or_none(row, "length_median_bp"),
@@ -560,7 +626,7 @@ def parse_quirks_tsv(file: TextIO | Path | str) -> list[QuirkRecord]:
     return _parse_rows(csv.DictReader(_clean_tsv_stream(file), delimiter="\t"))
 
 
-parse_resolutions_tsv = parse_quirks_tsv
+parse_quirks_tsv = parse_resolutions_tsv
 
 
 END_STATE_TSV_COLUMNS: list[str] = [
@@ -909,8 +975,8 @@ def collect_features(
     ledger: Sequence[EndEvidence] | Mapping[Any, EndEvidence],
     core_coverage: float,
     policy: Policy = DEFAULT_POLICY,
-) -> tuple[list[JunctionRecord], list[EndStateRecord], list[QuirkRecord]]:
-    """Aggregate Layer 1 EndStates, Layer 2 Junctions, and Layer 3 Quirks from graph evidence."""
+) -> tuple[list[JunctionRecord], list[EndStateRecord], list[ResolutionRecord]]:
+    """Aggregate Layer 1 EndStates, Layer 2 Junctions, and Layer 3 Resolutions from graph evidence."""
     ledger_list: list[EndEvidence]
     ledger_by_port: dict[Any, EndEvidence] = {}
     if isinstance(ledger, Sequence) and not isinstance(ledger, Mapping):
@@ -927,7 +993,7 @@ def collect_features(
 
     junction_records: list[JunctionRecord] = []
     end_state_records: list[EndStateRecord] = []
-    quirk_records: list[QuirkRecord] = []
+    resolution_records: list[ResolutionRecord] = []
 
     accounted_ports: set[str] = set()
 
@@ -1024,6 +1090,27 @@ def collect_features(
         if som_capped and (germ_capped or germ_intercalary):
             state = EndState.END_COMPLETE
             resolved = True
+            if germ_capped and germ_cap_path:
+                pde_fid = build_feature_id(ResolutionType.PDE_TERMINAL_CAP, ev.segment_name, ev.end, index=1)
+                som_excl = (pde_call.somatic_port.name,) if pde_call.somatic_port else ()
+                pde_rec = ResolutionRecord(
+                    feature_id=pde_fid,
+                    chrom=ev.segment_name,
+                    side=ev.end,
+                    resolution_type=ResolutionType.PDE_TERMINAL_CAP,
+                    left_anchor_port=ev.port.to_symbol(),
+                    right_anchor_port=germ_cap_path[-1].to_symbol(),
+                    unitig_ids=tuple(p.name for p in germ_cap_path),
+                    excluded_unitig_ids=som_excl,
+                    core_coverage_bp_median=core_coverage,
+                    notes=(
+                        f"Resolved terminal PDE junction via germline continuation chain "
+                        f"{' -> '.join(p.to_symbol() for p in germ_cap_path)} to telomeric cap "
+                        f"{germ_cap_path[-1].to_symbol()}; dismissed somatic sister stub "
+                        f"{pde_call.somatic_port.to_symbol() if pde_call.somatic_port else ''}"
+                    ),
+                )
+                resolution_records.append(pde_rec)
         elif som_capped and not (germ_capped or germ_intercalary):
             state = EndState.END_GERMLINE_ORPHAN
             resolved = False
@@ -1063,12 +1150,12 @@ def collect_features(
         end_state_records.append(end_rec)
 
         if not (germ_capped or germ_intercalary):
-            q_fid = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, ev.segment_name, ev.end, index=1)
-            q_rec = QuirkRecord(
+            q_fid = build_feature_id(ResolutionType.SAT_GAP_VARIABLE, ev.segment_name, ev.end, index=1)
+            q_rec = ResolutionRecord(
                 feature_id=q_fid,
                 chrom=ev.segment_name,
                 side=ev.end,
-                quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+                resolution_type=ResolutionType.SAT_GAP_VARIABLE,
                 left_anchor_port=germ_sym or ev.port.to_symbol(),
                 agp_component_type="U",
                 agp_linkage_evidence="unbridged",
@@ -1077,7 +1164,7 @@ def collect_features(
                 representative_sequence_selected=False,
                 notes="Unbridged variable satellite gap",
             )
-            quirk_records.append(q_rec)
+            resolution_records.append(q_rec)
 
     # Step 2: Evaluate remaining ports for capped ends, orphan caps, and tips
     for ev in ledger_list:
@@ -1098,13 +1185,13 @@ def collect_features(
             else:
                 if ev.rdna_hit_count > 0 or ev.has_terminal_rdna:
                     state = EndState.END_SHARED_EXEMPT
-                    q_fid = build_feature_id(IntervalQuirk.RDNA_CASSETTE, ev.segment_name, ev.end, index=1)
-                    quirk_records.append(
-                        QuirkRecord(
+                    q_fid = build_feature_id(ResolutionType.RDNA_CASSETTE, ev.segment_name, ev.end, index=1)
+                    resolution_records.append(
+                        ResolutionRecord(
                             feature_id=q_fid,
                             chrom=ev.segment_name,
                             side=ev.end,
-                            quirk_type=IntervalQuirk.RDNA_CASSETTE,
+                            resolution_type=ResolutionType.RDNA_CASSETTE,
                             left_anchor_port=ev.port.to_symbol(),
                             agp_component_type="W",
                             agp_linkage_evidence="graph",
@@ -1146,5 +1233,5 @@ def collect_features(
 
     junction_records.sort(key=lambda r: r.feature_id)
     end_state_records.sort(key=lambda r: r.feature_id)
-    quirk_records.sort(key=lambda r: r.feature_id)
-    return junction_records, end_state_records, quirk_records
+    resolution_records.sort(key=lambda r: r.feature_id)
+    return junction_records, end_state_records, resolution_records

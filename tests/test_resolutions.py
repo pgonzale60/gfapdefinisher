@@ -7,7 +7,7 @@ import pytest
 
 from gfapdefinisher.classifier import PdeJunctionCall
 from gfapdefinisher.models import SegmentPort, Strand
-from gfapdefinisher.quirks import (
+from gfapdefinisher.resolutions import (
     END_STATE_TSV_COLUMNS,
     JUNCTION_TSV_COLUMNS,
     QUIRK_COLUMNS,
@@ -784,15 +784,13 @@ def test_create_junction_record_repeat_entry():
 
 def test_top_level_package_exports():
     import gfapdefinisher as g
-    import gfapdefinisher.quirks as gq
+    import gfapdefinisher.resolutions as gq
 
     assert hasattr(g, "EndStateRecord")
     assert hasattr(g, "JunctionRecord")
-    assert hasattr(g, "QuirkRecord")
     assert hasattr(g, "ResolutionRecord")
     assert hasattr(g, "EndState")
     assert hasattr(g, "JunctionClass")
-    assert hasattr(g, "IntervalQuirk")
     assert hasattr(g, "ResolutionType")
     assert hasattr(g, "DEFAULT_POLICY")
     assert hasattr(g, "Policy")
@@ -966,7 +964,7 @@ def test_benchmark_df5120_collect_features_intercalary_grs_bridges():
     from gfapdefinisher.classifier import compute_core_coverage
     from gfapdefinisher.graph import load_gfa
     from gfapdefinisher.ledger import build_end_evidence_ledger
-    from gfapdefinisher.quirks import collect_features
+    from gfapdefinisher.resolutions import collect_features
 
     graph = load_gfa(gfa_path)
     annotations = aggregate_node_annotations(

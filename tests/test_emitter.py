@@ -30,7 +30,7 @@ from gfapdefinisher.emitter import (
     parse_agp,
 )
 from gfapdefinisher.models import SegmentPort, Strand
-from gfapdefinisher.quirks import (
+from gfapdefinisher.resolutions import (
     IntervalQuirk,
     QuirkRecord,
     emit_quirks_tsv,
