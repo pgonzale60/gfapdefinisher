@@ -12,21 +12,13 @@ build/
 .venv/
 env/
 
-# Large benchmark data files (keep metadata & small tables, ignore large GFA/BAM/FASTQ/FASTA/PAF)
-data/benchmark/**/*.gfa.gz
-data/benchmark/**/*.fa.gz
-data/benchmark/**/*.bam
-data/benchmark/**/*.fastq.gz
-data/benchmark/**/*.fa
-data/benchmark/**/*.fasta
-data/benchmark/**/*.paf
-data/benchmark/**/*.gfa
+# Benchmark data files
+data/benchmark/
 
 # Testing & tool caches
 .pytest_cache/
 .coverage
 htmlcov/
-data/
 
 # Local agent & editor configurations
 .agent/

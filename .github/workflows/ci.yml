@@ -37,5 +37,18 @@ jobs:
       - name: Check Ruff Formatting
         run: uv run ruff format --check .
 
+      - name: Restore DF5120 benchmark cache
+        id: benchmark-cache
+        uses: actions/cache@v4
+        with:
+          path: data/benchmark/DF5120
+          key: df5120-benchmark-v1
+
+      - name: Fetch benchmark dataset on cache miss
+        if: steps.benchmark-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch_benchmark_data.sh
+
       - name: Run Pytest Suite
         run: uv run pytest
