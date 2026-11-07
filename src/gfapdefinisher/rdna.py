@@ -86,6 +86,7 @@ class RdnaCassetteResolver:
     ) -> None:
         self.graph = graph
         self.ledger = ledger
+        self.ledger_by_port: dict[str, EndEvidence] = ledger
         self.policy = policy
         self.annotations = annotations
 
@@ -93,6 +94,99 @@ class RdnaCassetteResolver:
         for ev in self.ledger.values():
             if isinstance(ev, EndEvidence):
                 self._ledger_by_name[ev.segment_name].append(ev)
+
+    def _is_contaminant(self, seg_name: str) -> bool:
+        """Check whether a segment is flagged as contaminant or non-eukaryotic."""
+        clean_name = seg_name.rstrip("+-") if isinstance(seg_name, str) else seg_name.name
+        contam_classes = {
+            "bacteria",
+            "archaea",
+            "prokarya",
+            "contaminant",
+            "organelle",
+            "mitochondrion",
+            "plastid",
+        }
+        if self.annotations is not None and clean_name in self.annotations:
+            ann = self.annotations[clean_name]
+            if getattr(ann, "is_contaminant", None) and ann.is_contaminant():
+                return True
+            tiara_cls = getattr(ann, "tiara_classification", None)
+            if tiara_cls and str(tiara_cls).lower().strip() in contam_classes:
+                return True
+
+        port_keys = (
+            f"{clean_name}+",
+            f"{clean_name}-",
+            f"{clean_name}:5p",
+            f"{clean_name}:3p",
+            clean_name,
+        )
+        for key in port_keys:
+            ev = self.ledger_by_port.get(key)
+            if ev is not None:
+                if getattr(ev, "is_contaminant", False):
+                    return True
+                cls_str = str(getattr(ev, "tiara_class", "")).lower().strip()
+                if cls_str in contam_classes:
+                    return True
+
+        for ev in self._ledger_by_name.get(clean_name, []):
+            if getattr(ev, "is_contaminant", False):
+                return True
+            cls_str = str(getattr(ev, "tiara_class", "")).lower().strip()
+            if cls_str in contam_classes:
+                return True
+
+        return False
+
+    def _get_usco_count(self, seg_name: str) -> int:
+        """Retrieve total USCO hit count for segment."""
+        clean_name = seg_name.rstrip("+-") if isinstance(seg_name, str) else seg_name.name
+        count = 0
+        if self.annotations is not None and clean_name in self.annotations:
+            count += len(self.annotations[clean_name].compleasm_hits)
+        for ev in self._ledger_by_name.get(clean_name, []):
+            if ev.usco_hit_count > count:
+                count = ev.usco_hit_count
+        return count
+
+    def _has_any_usco(self) -> bool:
+        """Check if any segment in the graph or ledger has USCO hits."""
+        if self.annotations is not None:
+            for ann in self.annotations.values():
+                if len(ann.compleasm_hits) > 0:
+                    return True
+        for ev_list in self._ledger_by_name.values():
+            for ev in ev_list:
+                if ev.usco_hit_count > 0:
+                    return True
+        if hasattr(self, "ledger_by_port") and self.ledger_by_port:
+            for ev in self.ledger_by_port.values():
+                if isinstance(ev, EndEvidence) and ev.usco_hit_count > 0:
+                    return True
+        return False
+
+    def _get_rdna_segments(self) -> set[str]:
+        """Return the set of valid eukaryotic rDNA-bearing segment names."""
+        rdna_segs: set[str] = set()
+        for seg_name in self.graph.segments:
+            if self._is_contaminant(seg_name):
+                continue
+            if self.is_rdna_unitig(seg_name):
+                rdna_segs.add(seg_name)
+        return rdna_segs
+
+    def _is_telomeric_cap(self, port: SegmentPort) -> bool:
+        """Check whether a port qualifies as a distal telomeric cap."""
+        if self._is_contaminant(port.name):
+            return False
+        if self._get_usco_count(port.name) > 0:
+            return False
+        ev = self._lookup_evidence(port)
+        if ev is not None:
+            return bool(ev.has_terminal_telomere)
+        return False
 
     def _lookup_evidence(self, port: SegmentPort) -> EndEvidence | None:
         """Look up EndEvidence for a port across common indexing keys."""
@@ -112,6 +206,9 @@ class RdnaCassetteResolver:
     def is_rdna_unitig(self, seg_or_port: SegmentPort | str) -> bool:
         """Check whether a segment or port carries ribosomal RNA gene features."""
         name = seg_or_port.name if isinstance(seg_or_port, SegmentPort) else str(seg_or_port).rstrip("+-")
+
+        if self._is_contaminant(name):
+            return False
 
         # Core chromosome arms with single-copy ortholog genes are stems, not repeat unitigs
         if self.annotations is not None and name in self.annotations:
@@ -135,6 +232,13 @@ class RdnaCassetteResolver:
 
     def is_distal_telomere_cap(self, seg_or_port: SegmentPort | str) -> bool:
         """Check whether a segment or port qualifies as a distal telomeric cap."""
+        name = seg_or_port.name if isinstance(seg_or_port, SegmentPort) else str(seg_or_port).rstrip("+-")
+
+        if self._is_contaminant(name):
+            return False
+        if self._get_usco_count(name) > 0:
+            return False
+
         if isinstance(seg_or_port, SegmentPort):
             port = seg_or_port
             ev = self._lookup_evidence(port)
@@ -226,6 +330,9 @@ class RdnaCassetteResolver:
 
     def is_consistent_rdna_orientation(self, port: SegmentPort, previous_ports: Sequence[SegmentPort] = ()) -> bool:
         """Verify that port traversal maintains consistent head-to-tail orientation."""
+        if not self.is_rdna_unitig(port):
+            return False
+
         intrinsic = self.get_intrinsic_rdna_orientation(port.name)
         if intrinsic is not None:
             if port.strand != intrinsic:
@@ -247,36 +354,41 @@ class RdnaCassetteResolver:
 
         return True
 
-    def find_rdna_entry_ports(self) -> list[SegmentPort]:
+    def _find_entry_stems(self) -> list[SegmentPort]:
         """Identify chromosome core stems connecting to rDNA-bearing unitigs."""
+        rdna_segments = self._get_rdna_segments()
+        has_usco = self._has_any_usco()
         entry_ports: list[SegmentPort] = []
+
         for seg_name in self.graph.segments:
-            if self.is_rdna_unitig(seg_name):
+            if self._is_contaminant(seg_name):
+                continue
+            if seg_name in rdna_segments:
                 continue
             if self.is_distal_telomere_cap(seg_name):
                 continue
+            if has_usco and self._get_usco_count(seg_name) == 0:
+                continue
+
             for strand in (Strand.FORWARD, Strand.REVERSE):
                 port = SegmentPort(seg_name, strand)
                 outgoing = self.graph.get_outgoing(port)
-                if any(self.is_rdna_unitig(e.to_port) for e in outgoing):
+                if any(e.to_port.name in rdna_segments for e in outgoing):
                     entry_ports.append(port)
 
         def rank_entry(p: SegmentPort) -> tuple[int, int, str, str]:
-            has_usco = 0
-            if self.annotations is not None and p.name in self.annotations:
-                if len(self.annotations[p.name].compleasm_hits) > 0:
-                    has_usco = 1
-            for ev in self._ledger_by_name.get(p.name, []):
-                if ev.usco_hit_count > 0:
-                    has_usco = 1
-                    break
+            usco_flag = 1 if self._get_usco_count(p.name) > 0 else 0
             seg = self.graph.segments.get(p.name)
             seg_len = seg.length if seg is not None else 0
             # Sort descending by USCO presence and length, with deterministic name/strand
-            return (-has_usco, -seg_len, p.name, p.strand.to_symbol())
+            return (-usco_flag, -seg_len, p.name, p.strand.to_symbol())
 
         entry_ports.sort(key=rank_entry)
         return entry_ports
+
+    def find_rdna_entry_ports(self) -> list[SegmentPort]:
+        """Identify chromosome core stems connecting to rDNA-bearing unitigs."""
+        return self._find_entry_stems()
 
     def identify_entry_anchor(self) -> SegmentPort | None:
         """Find the core chromosome arm port connecting into the rDNA tangle."""
@@ -288,6 +400,7 @@ class RdnaCassetteResolver:
         max_hops = len(self.graph.segments)
         cap_paths: list[list[SegmentPort]] = []
         rdna_paths: list[list[SegmentPort]] = []
+        rdna_segments = self._get_rdna_segments()
 
         stack: list[tuple[SegmentPort, list[SegmentPort], set[str]]] = [(entry_port, [entry_port], {entry_port.name})]
 
@@ -304,17 +417,20 @@ class RdnaCassetteResolver:
                 nxt = edge.to_port
                 if nxt.name in visited:
                     continue
+                if self._is_contaminant(nxt.name):
+                    continue
 
-                if self.is_distal_telomere_cap(nxt):
+                is_cap = self._is_telomeric_cap(nxt) and self._get_usco_count(nxt.name) == 0
+                if is_cap:
                     # Distal telomeric cap terminates an rDNA cassette only if rDNA was traversed
-                    if any(self.is_rdna_unitig(p) for p in path) or self.is_rdna_unitig(nxt):
+                    if any(p.name in rdna_segments for p in path) or (nxt.name in rdna_segments):
                         new_path = list(path)
                         new_path.append(nxt)
                         cap_paths.append(new_path)
                         advanced = True
                     continue
 
-                if self.is_rdna_unitig(nxt):
+                if nxt.name in rdna_segments:
                     if not self.is_consistent_rdna_orientation(nxt, path):
                         continue
 
@@ -372,6 +488,9 @@ class RdnaCassetteResolver:
 
         if resolved_entry is None:
             return []
+
+        if resolved_entry.name in self._get_rdna_segments():
+            return [resolved_entry] if include_anchor else []
 
         cap_paths, rdna_paths = self._find_paths(resolved_entry)
 
@@ -638,3 +757,34 @@ class RdnaCassetteResolver:
             path=unresolved_path,
             sequence=assembled_seq,
         )
+
+    def collect_unresolved_tangles(self, chained_segments: set[str] | Sequence[str] = ()) -> list[QuirkRecord]:
+        """Record any remaining eukaryotic rDNA segments not reached from an entry stem as single-segment unresolved-tangle quirks."""
+        chained = set(chained_segments)
+        rdna_segs = sorted(self._get_rdna_segments())
+        quirks: list[QuirkRecord] = []
+        for seg_name in rdna_segs:
+            if seg_name in chained:
+                continue
+            seg = self.graph.segments.get(seg_name)
+            seg_len = seg.length if seg is not None else None
+            q_fid = build_feature_id(IntervalQuirk.RDNA_CASSETTE, seg_name, "mid", index=1)
+            q_rec = QuirkRecord(
+                feature_id=q_fid,
+                chrom=seg_name,
+                side="mid",
+                quirk_type=IntervalQuirk.RDNA_CASSETTE,
+                length_min_bp=seg_len,
+                length_median_bp=seg_len,
+                length_max_bp=seg_len,
+                left_anchor_port=f"{seg_name}+",
+                right_anchor_port=None,
+                agp_component_type="U",
+                agp_linkage_evidence="unresolved-tangle",
+                unitig_ids=(seg_name,),
+                core_coverage_bp_median=seg.depth if seg is not None else None,
+                representative_sequence_selected=False,
+                notes=f"Unresolved unanchored eukaryotic rDNA segment: {seg_name}",
+            )
+            quirks.append(q_rec)
+        return quirks

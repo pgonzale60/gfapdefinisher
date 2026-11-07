@@ -6,13 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from gfapdefinisher.graph import BidirectedGraph
+from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.quirks import (
     EndState,
+    EndStateRecord,
     IntervalQuirk,
+    QuirkRecord,
     emit_end_states_tsv,
     emit_quirks_tsv,
     parse_end_states_tsv,
@@ -849,3 +851,195 @@ def test_collect_spanning_read_ids(tmp_path: Path):
     engine = OntBridgingEngine()
     target_ids = engine.collect_spanning_read_ids(paf_lines)
     assert target_ids == {"span_1", "span_2"}
+
+
+def test_benchmark_df5120_identify_orphan_caps():
+    """Verify that identify_orphan_caps on DF5120 benchmark dataset returns the 10 isolated caps."""
+    gfa_path = Path("data/benchmark/DF5120/asm.p_utg.gfa.gz")
+    if not gfa_path.exists():
+        gfa_path = Path("data/benchmark/DF5120/asm.p_utg.gfa")
+    ledger_path = Path("data/benchmark/DF5120/df5120_end_evidence_ledger.tsv")
+
+    if not gfa_path.exists() or not ledger_path.exists():
+        pytest.skip("Benchmark DF5120 dataset not present in data/benchmark/DF5120.")
+
+    graph = load_gfa(gfa_path)
+    ledger: dict[str, EndEvidence] = {}
+    with open(ledger_path, encoding="utf-8") as f:
+        _ = next(f)
+        for line in f:
+            row = line.strip().split("\t")
+            if not row or len(row) < 17:
+                continue
+            seg_name = row[0]
+            end = row[1]
+            port_sym = row[2]
+            length = int(row[3])
+            depth = float(row[4])
+            degree = int(row[5])
+            is_tip = row[6] == "True"
+            out_neigh = tuple(row[7].split(",")) if row[7] else ()
+            has_tel = row[12] == "True"
+            rdna_count = int(row[13])
+            has_rdna = row[15] == "True"
+            usco_count = int(row[16]) if len(row) > 16 and row[16] else 0
+            strand = Strand.MINUS if end == "5p" else Strand.PLUS
+            port = SegmentPort(seg_name, strand)
+            ev = EndEvidence(
+                segment_name=seg_name,
+                end=end,
+                port=port,
+                length=length,
+                depth=depth,
+                degree=degree,
+                is_tip=is_tip,
+                outgoing_neighbors=out_neigh,
+                has_terminal_telomere=has_tel,
+                rdna_hit_count=rdna_count,
+                has_terminal_rdna=has_rdna,
+                usco_hit_count=usco_count,
+            )
+            ledger[port_sym] = ev
+            ledger[f"{seg_name}:{end}"] = ev
+
+    engine = OntBridgingEngine(graph=graph, ledger=ledger)
+    orphan_caps = engine.identify_orphan_caps()
+
+    expected_caps = {
+        "utg000053l",
+        "utg000056l",
+        "utg000098l",
+        "utg000126l",
+        "utg000150l",
+        "utg000153l",
+        "utg000160l",
+        "utg000197l",
+        "utg000213l",
+        "utg000217l",
+    }
+    assert set(orphan_caps.keys()) == expected_caps
+    assert "utg000009l" not in orphan_caps
+
+
+def test_identify_and_resolve_gaps_prevents_overwrite_on_shared_target():
+    """Verify identify_and_resolve_gaps does not overwrite an already-matched EndStateRecord.
+
+    When multiple spanning pairs share a target name (e.g. chr_grs), the first resolved
+    end must be retained and not overwritten by subsequent pairs sharing the target.
+    """
+    graph = BidirectedGraph()
+    graph.add_segment("chr_stem", 50000)
+    graph.add_segment("chr_som", 25000)
+    graph.add_segment("chr_grs", 30000)
+    graph.add_segment("orphan_cap1", 10000)
+    graph.add_segment("orphan_cap2", 10000)
+
+    ev1_plus = EndEvidence(
+        segment_name="orphan_cap1",
+        end="3p",
+        port=SegmentPort("orphan_cap1", Strand.PLUS),
+        length=10000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=True,
+        usco_hit_count=0,
+    )
+    ev1_minus = EndEvidence(
+        segment_name="orphan_cap1",
+        end="5p",
+        port=SegmentPort("orphan_cap1", Strand.MINUS),
+        length=10000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=False,
+        usco_hit_count=0,
+    )
+    ev2_plus = EndEvidence(
+        segment_name="orphan_cap2",
+        end="3p",
+        port=SegmentPort("orphan_cap2", Strand.PLUS),
+        length=10000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=True,
+        usco_hit_count=0,
+    )
+    ev2_minus = EndEvidence(
+        segment_name="orphan_cap2",
+        end="5p",
+        port=SegmentPort("orphan_cap2", Strand.MINUS),
+        length=10000,
+        depth=5.0,
+        degree=0,
+        is_tip=True,
+        outgoing_neighbors=(),
+        has_terminal_telomere=False,
+        usco_hit_count=0,
+    )
+
+    ledger = {
+        "orphan_cap1+": ev1_plus,
+        "orphan_cap1-": ev1_minus,
+        "orphan_cap2+": ev2_plus,
+        "orphan_cap2-": ev2_minus,
+    }
+
+    engine = OntBridgingEngine(graph=graph, ledger=ledger)
+    orphan_caps = engine.identify_orphan_caps()
+    assert "orphan_cap1" in orphan_caps
+    assert "orphan_cap2" in orphan_caps
+
+    initial_end = EndStateRecord(
+        feature_id="end_chr_stem_3p",
+        chrom="chr_stem",
+        side="3p",
+        state=EndState.END_SOMATIC_MISSING,
+        somatic_port="chr_som+",
+        germline_port="chr_grs+",
+        resolved=False,
+    )
+    initial_quirk = QuirkRecord(
+        feature_id="q_chr_stem_3p",
+        chrom="chr_stem",
+        side="3p",
+        quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+    )
+
+    # Pair 1: chr_grs to orphan_cap1 (3 spanning reads)
+    # Pair 2: chr_grs to orphan_cap2 (3 spanning reads, sharing chr_grs target)
+    paf_lines = [
+        _make_paf_line("r1", 20000, 1000, 2500, "+", "chr_grs", 30000, 28500, 30000),
+        _make_paf_line("r1", 20000, 4000, 5500, "+", "orphan_cap1", 10000, 0, 1500),
+        _make_paf_line("r2", 20000, 1000, 2500, "+", "chr_grs", 30000, 28500, 30000),
+        _make_paf_line("r2", 20000, 4000, 5500, "+", "orphan_cap1", 10000, 0, 1500),
+        _make_paf_line("r3", 20000, 1000, 2500, "+", "chr_grs", 30000, 28500, 30000),
+        _make_paf_line("r3", 20000, 4000, 5500, "+", "orphan_cap1", 10000, 0, 1500),
+        _make_paf_line("r4", 20000, 1000, 2500, "+", "chr_grs", 30000, 28500, 30000),
+        _make_paf_line("r4", 20000, 4000, 5500, "+", "orphan_cap2", 10000, 0, 1500),
+        _make_paf_line("r5", 20000, 1000, 2500, "+", "chr_grs", 30000, 28500, 30000),
+        _make_paf_line("r5", 20000, 4000, 5500, "+", "orphan_cap2", 10000, 0, 1500),
+        _make_paf_line("r6", 20000, 1000, 2500, "+", "chr_grs", 30000, 28500, 30000),
+        _make_paf_line("r6", 20000, 4000, 5500, "+", "orphan_cap2", 10000, 0, 1500),
+    ]
+
+    end_states, quirks = engine.identify_and_resolve_gaps(
+        paf_source=paf_lines,
+        end_states=[initial_end],
+        quirks=[initial_quirk],
+    )
+
+    stem_ends = [e for e in end_states if e.chrom == "chr_stem" and e.side == "3p"]
+    assert len(stem_ends) == 1
+    resolved_stem = stem_ends[0]
+
+    # Verify that chr_stem:3p resolved to orphan_cap1 and was NOT overwritten by orphan_cap2
+    assert resolved_stem.state == EndState.END_COMPLETE
+    assert resolved_stem.resolved is True
+    assert resolved_stem.somatic_port == "chr_som+"
+    assert resolved_stem.germline_port == "orphan_cap1+"

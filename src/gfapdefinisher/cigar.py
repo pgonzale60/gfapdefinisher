@@ -78,6 +78,13 @@ def cigar_target_consumption(ops: list[CigarOp] | str) -> int:
     return sum(op.length for op in parsed if op.op in TARGET_CONSUMING_OPS)
 
 
+def parse_dovetail_overlap_len(cigar_str: str | list[CigarOp] | None) -> int:
+    """Return effective query consumption overlap length parsed from a CIGAR string."""
+    if not cigar_str or cigar_str == "*":
+        return 0
+    return cigar_query_consumption(cigar_str)
+
+
 def cigar_overlap_length(cigar_str: str | list[CigarOp]) -> int:
     """Robustly compute the effective overlap length represented by a CIGAR string.
 

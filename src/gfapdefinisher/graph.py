@@ -221,6 +221,14 @@ class BidirectedGraph:
         resolved = self._resolve_port(port, strand)
         return list(self.edges.get(resolved, []))
 
+    def edges_from(self, port: SegmentPort | str, strand: Strand | str | None = None) -> list[DovetailEdge]:
+        """Return list of outgoing dovetail edges extending from port."""
+        return self.get_outgoing(port, strand)
+
+    def neighbors(self, port: SegmentPort | str, strand: Strand | str | None = None) -> list[SegmentPort]:
+        """Return list of target ports directly reachable via outgoing dovetail edges."""
+        return [e.to_port for e in self.get_outgoing(port, strand)]
+
     def get_incoming(self, port: SegmentPort | str, strand: Strand | str | None = None) -> list[DovetailEdge]:
         """Return list of incoming dovetail edges entering port."""
         resolved = self._resolve_port(port, strand)

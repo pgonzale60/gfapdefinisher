@@ -740,3 +740,104 @@ def test_create_junction_record_core_depth_ratio_precedence():
         junction_class=JunctionClass.PDE_TERMINAL,
     )
     assert rec.core_depth_ratio == 0.155
+
+
+@pytest.mark.bio
+@pytest.mark.benchmark
+def test_benchmark_df5120_collect_features_intercalary_grs_bridges():
+    """Verify collect_features recognizes Chr X intercalary GRS bridges and emits only 3 genuine SAT_GAP_VARIABLE quirks."""
+    benchmark_dir = Path("data/benchmark/DF5120")
+    if not benchmark_dir.exists():
+        pytest.skip(f"Benchmark DF5120 dataset not present in {benchmark_dir}")
+
+    gfa_candidates = [
+        benchmark_dir / "asm.p_utg.gfa.gz",
+        benchmark_dir / "asm.p_utg.gfa",
+    ]
+    gfa_path = next((p for p in gfa_candidates if p.exists()), None)
+    if gfa_path is None:
+        pytest.skip(f"GFA file missing in {benchmark_dir}")
+
+    tiara_path = benchmark_dir / "tiara_unitigs.txt"
+    tidk_path = benchmark_dir / "tidk_telomeres_telomeric_repeat_windows.tsv"
+    barrnap_path = benchmark_dir / "barrnap_rdna.gff"
+    compleasm_path = benchmark_dir / "compleasm_unitigs_full_table.tsv"
+
+    if not (tiara_path.exists() and tidk_path.exists() and barrnap_path.exists() and compleasm_path.exists()):
+        pytest.skip(f"Benchmark annotation files missing in {benchmark_dir}")
+
+    from gfapdefinisher.annotations import aggregate_node_annotations
+    from gfapdefinisher.classifier import compute_core_coverage
+    from gfapdefinisher.graph import load_gfa
+    from gfapdefinisher.ledger import build_end_evidence_ledger
+    from gfapdefinisher.quirks import collect_features
+
+    graph = load_gfa(gfa_path)
+    annotations = aggregate_node_annotations(
+        tiara=tiara_path,
+        tidk=tidk_path,
+        barrnap=barrnap_path,
+        compleasm=compleasm_path,
+        sequence_ids=graph.segments.keys(),
+    )
+    ledger = build_end_evidence_ledger(graph=graph, annotations=annotations)
+    core_coverage = compute_core_coverage(graph, ledger)
+
+    junction_recs, end_recs, quirk_recs = collect_features(
+        graph=graph,
+        ledger=ledger,
+        core_coverage=core_coverage,
+    )
+
+    # 1. Verify Chr X internal bridges are classified as END_COMPLETE and resolved
+    end_map = {(r.chrom, r.side): r for r in end_recs}
+
+    # utg000019l:3p connects to utg000071l+ (bridge to utg000021l-)
+    assert ("utg000019l", "3p") in end_map
+    rec_19_3p = end_map[("utg000019l", "3p")]
+    assert rec_19_3p.state == EndState.END_COMPLETE
+    assert rec_19_3p.resolved is True
+    assert rec_19_3p.germline_port == "utg000071l+"
+
+    # utg000019l:5p connects to utg000145l+ (bridge to utg000027l+)
+    assert ("utg000019l", "5p") in end_map
+    rec_19_5p = end_map[("utg000019l", "5p")]
+    assert rec_19_5p.state == EndState.END_COMPLETE
+    assert rec_19_5p.resolved is True
+    assert rec_19_5p.germline_port == "utg000145l+"
+
+    # utg000021l:5p connects to utg000071l- (bridge to utg000019l+)
+    assert ("utg000021l", "5p") in end_map
+    rec_21_5p = end_map[("utg000021l", "5p")]
+    assert rec_21_5p.state == EndState.END_COMPLETE
+    assert rec_21_5p.resolved is True
+    assert rec_21_5p.germline_port == "utg000071l-"
+
+    # utg000027l:3p connects to utg000145l- (bridge to utg000019l-)
+    assert ("utg000027l", "3p") in end_map
+    rec_27_3p = end_map[("utg000027l", "3p")]
+    assert rec_27_3p.state == EndState.END_COMPLETE
+    assert rec_27_3p.resolved is True
+    assert rec_27_3p.germline_port == "utg000145l-"
+
+    # 2. Somatic dropout stub utg000004l:3p is END_SOMATIC_MISSING and unresolved
+    assert ("utg000004l", "3p") in end_map
+    rec_4_3p = end_map[("utg000004l", "3p")]
+    assert rec_4_3p.state == EndState.END_SOMATIC_MISSING
+    assert rec_4_3p.resolved is False
+
+    # 3. Chr II 3p utg000013l:3p reaches distal telomere cap utg000205l+ via utg000033l- and is END_COMPLETE
+    assert ("utg000013l", "3p") in end_map
+    rec_13_3p = end_map[("utg000013l", "3p")]
+    assert rec_13_3p.state == EndState.END_COMPLETE
+    assert rec_13_3p.resolved is True
+    assert rec_13_3p.germline_port == "utg000033l-"
+
+    # 4. Only the 2 genuine terminal SAT_GAP_VARIABLE quirks are emitted
+    sat_gap_quirks = [q for q in quirk_recs if q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE]
+    sat_gap_ends = {(q.chrom, q.side) for q in sat_gap_quirks}
+    assert sat_gap_ends == {
+        ("utg000002l", "5p"),
+        ("utg000009l", "5p"),
+    }
+    assert len(sat_gap_quirks) == 2
