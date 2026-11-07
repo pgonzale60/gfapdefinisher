@@ -156,6 +156,8 @@ def test_finish_subcommand_synthetic_and_non_empty_tsvs(tmp_path: Path):
     end_state_recs = parse_end_states_tsv(end_states_file)
     assert len(end_state_recs) >= 1
     assert any(es.state == EndState.END_GERMLINE_ORPHAN for es in end_state_recs)
+    # Ensure orphan_cap unitig is not emitted as a separate chromosome
+    assert not any(es.chrom == "orphan_cap" for es in end_state_recs)
 
     quirk_recs = parse_quirks_tsv(quirks_file)
     assert len(quirk_recs) >= 1
@@ -220,6 +222,10 @@ def test_finish_subcommand_with_ont_paf_bridging(tmp_path: Path):
     complete_ends = [es for es in end_state_recs if es.state == EndState.END_COMPLETE]
     assert len(complete_ends) >= 1
     assert any(es.resolved is True for es in complete_ends)
+    resolved_end = [es for es in complete_ends if es.chrom == "chr_stem"][0]
+    assert resolved_end.somatic_port == "chr_som+"
+    assert resolved_end.germline_port == "orphan_cap+"
+    assert not any(es.chrom == "orphan_cap" for es in end_state_recs)
 
     quirk_recs = parse_quirks_tsv(quirks_file)
     sat_quirks = [q for q in quirk_recs if q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE]
@@ -229,3 +235,100 @@ def test_finish_subcommand_with_ont_paf_bridging(tmp_path: Path):
     assert bridged_quirk.representative_sequence_selected is True
     assert bridged_quirk.agp_linkage_evidence == "ont-spanning"
     assert bridged_quirk.length_median_bp == 1500
+
+
+def test_finish_subcommand_with_annotations_and_window(tmp_path: Path):
+    """Verify finish subcommand consumes annotations and terminal-window argument."""
+    gfa_path = tmp_path / "test.gfa"
+    _build_synthetic_gfa(gfa_path)
+    out_dir = tmp_path / "finish_annot_out"
+
+    # Synthetic TIDK file
+    tidk_path = tmp_path / "telomere.tsv"
+    tidk_lines = [
+        "sequence\tstart\tend\tForward_Matches\tReverse_Matches",
+        "chr_som\t24000\t25000\t35\t0",
+    ]
+    tidk_path.write_text("\n".join(tidk_lines) + "\n", encoding="utf-8")
+
+    # Synthetic Barrnap GFF3 file
+    barrnap_path = tmp_path / "rrna.gff"
+    barrnap_lines = [
+        "##gff-version 3",
+        "chr_som\tbarrnap:0.9\trRNA\t1000\t2800\t0.0\t+\t.\tName=18S_rRNA",
+    ]
+    barrnap_path.write_text("\n".join(barrnap_lines) + "\n", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "finish",
+            "--gfa",
+            str(gfa_path),
+            "--out-dir",
+            str(out_dir),
+            "--tidk",
+            str(tidk_path),
+            "--barrnap",
+            str(barrnap_path),
+            "--terminal-window",
+            "5000",
+        ]
+    )
+    assert exit_code == 0
+    ledger_file = out_dir / "ledger.tsv"
+    assert ledger_file.is_file()
+    ledger_text = ledger_file.read_text(encoding="utf-8")
+    assert "chr_som" in ledger_text
+    assert "18S_rRNA" in ledger_text or "chr_stem" in ledger_text
+
+
+def test_finish_subcommand_with_fastq_reads(tmp_path: Path):
+    """Verify finish subcommand supports FASTQ-formatted reads with quality headers."""
+    gfa_path = tmp_path / "test.gfa"
+    _build_synthetic_gfa(gfa_path)
+    out_dir = tmp_path / "finish_fastq_out"
+
+    paf_path = tmp_path / "spanning.paf"
+    paf_lines = [
+        _make_paf_line("fq_read1", 20000, 1000, 2500, "+", "chr_grs", 30000, 28500, 30000),
+        _make_paf_line("fq_read1", 20000, 4000, 5500, "+", "orphan_cap", 10000, 0, 1500),
+        _make_paf_line("fq_read2", 20000, 1000, 2500, "+", "chr_grs", 30000, 28500, 30000),
+        _make_paf_line("fq_read2", 20000, 4000, 5500, "+", "orphan_cap", 10000, 0, 1500),
+    ]
+    paf_path.write_text("\n".join(paf_lines) + "\n", encoding="utf-8")
+
+    fastq_path = tmp_path / "reads.fq"
+    gap_seq = "ACGT" * 375
+    read_seq = ("A" * 2500) + gap_seq + ("T" * 16000)
+    qual_seq = "I" * len(read_seq)
+    fastq_lines = [
+        "@fq_read1 sample fastq read 1",
+        read_seq,
+        "+",
+        qual_seq,
+        "@fq_read2 sample fastq read 2",
+        read_seq,
+        "+",
+        qual_seq,
+    ]
+    fastq_path.write_text("\n".join(fastq_lines) + "\n", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "finish",
+            "--gfa",
+            str(gfa_path),
+            "--out-dir",
+            str(out_dir),
+            "--ont-paf",
+            str(paf_path),
+            "--ont-reads",
+            str(fastq_path),
+        ]
+    )
+    assert exit_code == 0
+    quirks_file = out_dir / "quirks.tsv"
+    quirk_recs = parse_quirks_tsv(quirks_file)
+    sat_quirks = [q for q in quirk_recs if q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE]
+    assert len(sat_quirks) >= 1
+    assert sat_quirks[0].representative_sequence_selected is True

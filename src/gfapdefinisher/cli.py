@@ -126,15 +126,35 @@ def run_finish(args: argparse.Namespace) -> None:
         core_coverage=core_coverage,
     )
 
+    engine = OntBridgingEngine(graph, ledger)
+    orphan_caps = engine.identify_orphan_caps()
+
     if args.ont_paf is not None:
-        engine = OntBridgingEngine(graph, ledger)
         reads_dict = load_reads_sequences(args.ont_reads) if args.ont_reads is not None else None
+        pre_somatic: dict[tuple[str, str], tuple[str | None, float | None]] = {
+            (rec.chrom, rec.side): (rec.somatic_port, rec.somatic_depth_ratio) for rec in end_state_records
+        }
+
         end_state_records, quirk_records = engine.identify_and_resolve_gaps(
             paf_source=args.ont_paf,
             end_states=end_state_records,
             quirks=quirk_records,
             reads_sequences=reads_dict,
         )
+
+        for rec in end_state_records:
+            som_port, som_ratio = pre_somatic.get((rec.chrom, rec.side), (None, None))
+            if som_port is not None and rec.somatic_port != som_port:
+                rec.somatic_port = som_port
+            if som_ratio is not None and rec.somatic_depth_ratio is None:
+                rec.somatic_depth_ratio = som_ratio
+            if rec.germline_port is not None:
+                cap_seg = rec.germline_port.rstrip("+-")
+                if cap_seg in orphan_caps:
+                    rec.germline_port = orphan_caps[cap_seg][0]
+
+    orphan_names = set(orphan_caps.keys())
+    end_state_records = [rec for rec in end_state_records if rec.chrom not in orphan_names]
 
     emit_tsv_ledger(ledger, args.out_dir / "ledger.tsv")
     emit_junctions_tsv(junction_records, args.out_dir / "junctions.tsv")

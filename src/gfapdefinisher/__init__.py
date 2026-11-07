@@ -21,6 +21,10 @@ from gfapdefinisher.quirks import (
     JunctionRecord,
     QuirkRecord,
 )
+from gfapdefinisher.rdna import (
+    RdnaCassetteResolver,
+    RdnaResolution,
+)
 from gfapdefinisher.resolver import (
     GapDistribution,
     OntBridgingEngine,
@@ -50,6 +54,8 @@ __all__ = [
     "PortClassification",
     "Provenance",
     "QuirkRecord",
+    "RdnaCassetteResolver",
+    "RdnaResolution",
     "SatelliteGapResolution",
     "SpanningRead",
     "TerminalFeature",
