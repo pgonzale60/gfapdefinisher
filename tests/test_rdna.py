@@ -1040,7 +1040,8 @@ def test_resolve_entry_stem_concatenates_all_rdna_unitigs_and_records_excluded_c
     assert res.unlinked_join_indices == (2,)  # jump at rdna_2
     assert res.distal_cap_port == SegmentPort("cap_high", Strand.FORWARD)
     assert res.excluded_unitigs == ("cap_low",)
-    assert res.quirk_record.unitig_ids == ("stem", "rdna_1", "rdna_2", "rdna_3", "cap_high")
+    assert res.quirk_record.unitig_ids == ("rdna_1", "rdna_2", "rdna_3", "cap_high")
+    assert "stem" not in res.quirk_record.unitig_ids
 
 
 @pytest.mark.bio
@@ -1081,7 +1082,9 @@ def test_benchmark_df5120_full_rdna_concatenation_and_cap_exclusion():
     assert res.path[0] == p_anchor
     assert res.distal_cap_port == SegmentPort("utg000053l", Strand.REVERSE)
     assert res.excluded_unitigs == ("utg000098l",)
-    assert len(res.quirk_record.unitig_ids) == 17
+    assert len(res.quirk_record.unitig_ids) == 16
+    assert "utg000053l" in res.quirk_record.unitig_ids
+    assert "utg000013l" not in res.quirk_record.unitig_ids
     assert res.quirk_record.right_anchor_port == "utg000053l-"
     assert res.quirk_record.agp_linkage_evidence == "rna_tangle"
 

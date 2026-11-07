@@ -867,7 +867,9 @@ class RdnaCassetteResolver:
             cap_port = path_to_cap[-1]
             assembled_seq = self.assemble_contiguous_path(path_to_cap)
             path_len = self.compute_path_length(path_to_cap)
-            all_unitigs = tuple(p.name for p in path_to_cap)
+            all_unitigs = tuple(p.name for p in path_to_cap if p.name != entry_port.name)
+            if not all_unitigs and len(path_to_cap) > 0:
+                all_unitigs = tuple(p.name for p in path_to_cap)
             rdna_unitigs = tuple(p.name for p in path_to_cap if self.is_rdna_unitig(p))
 
             for p in path_to_cap:
@@ -1073,9 +1075,15 @@ class RdnaCassetteResolver:
                 is_intercalary = True
                 full_path.append(exit_stem_port)
 
-        all_unitigs = tuple(p.name for p in full_path)
+        all_unitigs = tuple(
+            p.name
+            for p in full_path
+            if p.name != entry_port.name and (exit_stem_port is None or p.name != exit_stem_port.name)
+        )
         if distal_cap_port is not None:
             all_unitigs = all_unitigs + (distal_cap_port.name,)
+        if not all_unitigs and len(full_path) > 0:
+            all_unitigs = tuple(p.name for p in full_path)
         path_len = self.compute_path_length(full_path) if len(full_path) > 0 else None
         assembled_seq = self.assemble_contiguous_path(full_path) if len(full_path) > 0 else None
 

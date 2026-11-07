@@ -1271,6 +1271,12 @@ def build_scaffolds(
                 rec.chrom = target_scaf
                 rec.agp_start = min(s[0] for s in spans)
                 rec.agp_end = max(s[1] for s in spans)
+                scaf_len = len(scaffolds[target_scaf]) if target_scaf in scaffolds else None
+                if scaf_len is not None and rec.side in ("5p", "3p"):
+                    if rec.agp_end == scaf_len and rec.agp_start > 1:
+                        rec.side = "3p"
+                    elif rec.agp_start == 1 and rec.agp_end < scaf_len:
+                        rec.side = "5p"
                 if rec.resolution_type == ResolutionType.INTERCALARY_GRS_BRIDGE:
                     if rec.left_anchor_port and rec.right_anchor_port:
                         l_u = rec.left_anchor_port.rstrip("+-")
@@ -1302,6 +1308,12 @@ def build_scaffolds(
                     rec.chrom = target_scaf
                     rec.agp_start = min(s[0] for s in anchor_spans)
                     rec.agp_end = max(s[1] for s in anchor_spans)
+                    scaf_len = len(scaffolds[target_scaf]) if target_scaf in scaffolds else None
+                    if scaf_len is not None and rec.side in ("5p", "3p"):
+                        if rec.agp_end == scaf_len and rec.agp_start > 1:
+                            rec.side = "3p"
+                        elif rec.agp_start == 1 and rec.agp_end < scaf_len:
+                            rec.side = "5p"
                     retained.append(rec)
 
         active_resolutions.clear()
