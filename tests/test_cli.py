@@ -813,7 +813,6 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     compleasm_path = benchmark_dir / "compleasm_unitigs_full_table.tsv"
     ont_paf_candidates = [
         benchmark_dir / "ont_to_utgs.paf",
-        benchmark_dir / "ont_to_flanks.paf",
         Path("tests/data/df5120_ont_slice.paf.gz"),
     ]
     ont_paf_path = next((p for p in ont_paf_candidates if p.exists()), None)
