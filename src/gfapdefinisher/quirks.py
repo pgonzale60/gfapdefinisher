@@ -791,6 +791,7 @@ def collect_features(
     accounted_ports: set[str] = set()
 
     # Step 1: Detect PDE junctions across all candidate ports
+    pde_calls_with_ev: list[tuple[EndEvidence, PdeJunctionCall]] = []
     for ev in ledger_list:
         pde_call = classify_pde_junction(
             ev.port,
@@ -800,91 +801,136 @@ def collect_features(
             core_coverage=core_coverage,
         )
         if pde_call.is_pde_junction:
-            j_class = JunctionClass.PDE_TERMINAL if pde_call.somatic_port is not None else JunctionClass.PDE_INTERCALARY
-            j_rec = create_junction_record(
-                call=pde_call,
-                chrom=ev.segment_name,
-                side=ev.end,
-                junction_class=j_class,
+            pde_calls_with_ev.append((ev, pde_call))
+
+    called_stem_ports: set[Any] = set()
+    for _, c in pde_calls_with_ev:
+        sp = getattr(c, "stem_port", getattr(c, "port", None))
+        if sp is not None:
+            called_stem_ports.add(sp)
+            if hasattr(sp, "to_symbol"):
+                called_stem_ports.add(sp.to_symbol())
+            if hasattr(sp, "name"):
+                called_stem_ports.add(sp.name)
+            if isinstance(sp, str):
+                called_stem_ports.add(graph._resolve_port(sp))
+
+    def _get_seg_usco(s_name: str) -> int:
+        for k in (f"{s_name}+", f"{s_name}-", f"{s_name}:5p", f"{s_name}:3p", s_name):
+            ev_item = ledger_by_port.get(k)
+            if ev_item is not None and getattr(ev_item, "usco_hit_count", 0) > 0:
+                return ev_item.usco_hit_count
+        return 0
+
+    for ev, pde_call in pde_calls_with_ev:
+        j_class = JunctionClass.PDE_TERMINAL if pde_call.somatic_port is not None else JunctionClass.PDE_INTERCALARY
+        j_rec = create_junction_record(
+            call=pde_call,
+            chrom=ev.segment_name,
+            side=ev.end,
+            junction_class=j_class,
+        )
+        junction_records.append(j_rec)
+
+        accounted_ports.add(ev.port.to_symbol())
+        if pde_call.somatic_port:
+            accounted_ports.add(pde_call.somatic_port.to_symbol())
+        if pde_call.germline_port:
+            accounted_ports.add(pde_call.germline_port.to_symbol())
+
+        is_som_dropout = getattr(pde_call, "is_somatic_dropout", False)
+        som_capped = (not is_som_dropout) and (pde_call.somatic_port is not None)
+        germ_ev = _lookup_evidence(ledger_by_port, pde_call.germline_port) if pde_call.germline_port else None
+        germ_capped = (
+            pde_call.germline_port is not None
+            and germ_ev is not None
+            and germ_ev.has_terminal_telomere
+            and (
+                graph.degree(pde_call.germline_port) == 0
+                if pde_call.germline_port.name in graph.segments
+                else germ_ev.is_tip
             )
-            junction_records.append(j_rec)
+        )
 
-            accounted_ports.add(ev.port.to_symbol())
-            if pde_call.somatic_port:
-                accounted_ports.add(pde_call.somatic_port.to_symbol())
-            if pde_call.germline_port:
-                accounted_ports.add(pde_call.germline_port.to_symbol())
-
-            som_capped = (not pde_call.is_somatic_dropout) and (pde_call.somatic_port is not None)
-            germ_ev = _lookup_evidence(ledger_by_port, pde_call.germline_port) if pde_call.germline_port else None
-            germ_capped = (
-                pde_call.germline_port is not None
-                and germ_ev is not None
-                and germ_ev.has_terminal_telomere
-                and (
-                    graph.degree(pde_call.germline_port) == 0
-                    if pde_call.germline_port.name in graph.segments
-                    else germ_ev.is_tip
-                )
-            )
-
-            if som_capped and germ_capped:
-                state = EndState.END_COMPLETE
-                resolved = True
-            elif som_capped and not germ_capped:
-                state = EndState.END_GERMLINE_ORPHAN
-                resolved = False
-            elif not som_capped and germ_capped:
-                state = EndState.END_SOMATIC_MISSING
-                resolved = False
+        germ_intercalary = False
+        if pde_call.germline_port is not None and pde_call.germline_port.name in graph.segments and not germ_capped:
+            if hasattr(graph, "neighbors"):
+                neighbors = list(graph.neighbors(pde_call.germline_port))
             else:
-                state = EndState.END_GERMLINE_ORPHAN
-                resolved = False
+                neighbors = [e.to_port for e in graph.get_outgoing(pde_call.germline_port)]
 
-            fid = build_feature_id(state, ev.segment_name, ev.end)
-            som_sym = pde_call.somatic_port.to_symbol() if pde_call.somatic_port else None
-            germ_sym = pde_call.germline_port.to_symbol() if pde_call.germline_port else None
+            for nb in neighbors:
+                inv_nb = nb.invert() if hasattr(nb, "invert") else (nb.inverted() if hasattr(nb, "inverted") else ~nb)
+                if (
+                    inv_nb in called_stem_ports
+                    or nb in called_stem_ports
+                    or (hasattr(inv_nb, "to_symbol") and inv_nb.to_symbol() in called_stem_ports)
+                    or (hasattr(nb, "to_symbol") and nb.to_symbol() in called_stem_ports)
+                ):
+                    germ_intercalary = True
+                    break
+                nb_name = nb.name if hasattr(nb, "name") else str(nb).rstrip("+-")
+                if nb_name != ev.segment_name and _get_seg_usco(nb_name) > 0:
+                    germ_intercalary = True
+                    break
 
-            som_seg = graph.segments.get(pde_call.somatic_port.name) if pde_call.somatic_port else None
-            som_depth = som_seg.depth if som_seg is not None else None
-            som_ratio = (som_depth / core_coverage) if (som_depth is not None and core_coverage > 0) else None
-            germ_ratio = (
-                pde_call.core_depth_ratio
-                if pde_call.core_depth_ratio > 0
-                else (pde_call.depth_ratio if pde_call.depth_ratio > 0 else None)
-            )
+        if som_capped and (germ_capped or germ_intercalary):
+            state = EndState.END_COMPLETE
+            resolved = True
+        elif som_capped and not (germ_capped or germ_intercalary):
+            state = EndState.END_GERMLINE_ORPHAN
+            resolved = False
+        elif not som_capped and (germ_capped or germ_intercalary):
+            state = EndState.END_SOMATIC_MISSING
+            resolved = False
+        else:
+            state = EndState.END_SOMATIC_MISSING if is_som_dropout else EndState.END_GERMLINE_ORPHAN
+            resolved = False
 
-            end_rec = EndStateRecord(
-                feature_id=fid,
+        fid = build_feature_id(state, ev.segment_name, ev.end)
+        som_sym = pde_call.somatic_port.to_symbol() if pde_call.somatic_port else None
+        germ_sym = pde_call.germline_port.to_symbol() if pde_call.germline_port else None
+
+        som_seg = graph.segments.get(pde_call.somatic_port.name) if pde_call.somatic_port else None
+        som_depth = som_seg.depth if som_seg is not None else None
+        som_ratio = (som_depth / core_coverage) if (som_depth is not None and core_coverage > 0) else None
+        germ_ratio = (
+            pde_call.core_depth_ratio
+            if pde_call.core_depth_ratio > 0
+            else (pde_call.depth_ratio if pde_call.depth_ratio > 0 else None)
+        )
+
+        end_rec = EndStateRecord(
+            feature_id=fid,
+            chrom=ev.segment_name,
+            side=ev.end,
+            state=state,
+            somatic_port=som_sym,
+            germline_port=germ_sym,
+            core_coverage_bp_median=core_coverage,
+            somatic_depth_ratio=som_ratio,
+            germline_depth_ratio=germ_ratio,
+            resolved=resolved,
+            notes=f"PDE junction at {ev.port.to_symbol()}",
+        )
+        end_state_records.append(end_rec)
+
+        if not (germ_capped or germ_intercalary):
+            q_fid = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, ev.segment_name, ev.end, index=1)
+            q_rec = QuirkRecord(
+                feature_id=q_fid,
                 chrom=ev.segment_name,
                 side=ev.end,
-                state=state,
-                somatic_port=som_sym,
-                germline_port=germ_sym,
+                quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+                left_anchor_port=germ_sym or ev.port.to_symbol(),
+                agp_component_type="U",
+                agp_linkage_evidence="unbridged",
+                unitig_ids=(ev.segment_name,),
                 core_coverage_bp_median=core_coverage,
-                somatic_depth_ratio=som_ratio,
-                germline_depth_ratio=germ_ratio,
-                resolved=resolved,
-                notes=f"PDE junction at {ev.port.to_symbol()}",
+                representative_sequence_selected=False,
+                notes="Unbridged variable satellite gap",
             )
-            end_state_records.append(end_rec)
-
-            if not germ_capped:
-                q_fid = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, ev.segment_name, ev.end, index=1)
-                q_rec = QuirkRecord(
-                    feature_id=q_fid,
-                    chrom=ev.segment_name,
-                    side=ev.end,
-                    quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
-                    left_anchor_port=germ_sym or ev.port.to_symbol(),
-                    agp_component_type="U",
-                    agp_linkage_evidence="unbridged",
-                    unitig_ids=(ev.segment_name,),
-                    core_coverage_bp_median=core_coverage,
-                    representative_sequence_selected=False,
-                    notes="Unbridged variable satellite gap",
-                )
-                quirk_records.append(q_rec)
+            quirk_records.append(q_rec)
 
     # Step 2: Evaluate remaining ports for capped ends, orphan caps, and tips
     for ev in ledger_list:

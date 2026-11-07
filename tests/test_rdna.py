@@ -763,3 +763,65 @@ def test_compute_path_length_matches_assembled_sequence_with_indels():
     assembled = resolver.assemble_contiguous_path(path)
     assert assembled is not None
     assert len(assembled) == resolver.compute_path_length(path)
+
+
+@pytest.mark.bio
+@pytest.mark.benchmark
+def test_benchmark_df5120_rdna_chains_eukaryotic_and_rejects_bacterial_contaminants():
+    """Verify RdnaCassetteResolver chains utg000013l- -> utg000020l- -> utg000082l- and rejects bacterial contigs."""
+    if not BENCHMARK_DIR.exists():
+        pytest.skip(f"Benchmark DF5120 dataset not present in {BENCHMARK_DIR}")
+
+    gfa_candidates = [
+        BENCHMARK_DIR / "asm.p_utg.gfa.gz",
+        BENCHMARK_DIR / "asm.p_utg.gfa",
+    ]
+    gfa_path = next((p for p in gfa_candidates if p.exists()), None)
+    if gfa_path is None:
+        pytest.skip(f"GFA file missing in {BENCHMARK_DIR}")
+
+    tiara_path = BENCHMARK_DIR / "tiara_unitigs.txt"
+    tidk_path = BENCHMARK_DIR / "tidk_telomeres_telomeric_repeat_windows.tsv"
+    barrnap_path = BENCHMARK_DIR / "barrnap_rdna.gff"
+    compleasm_path = BENCHMARK_DIR / "compleasm_unitigs_full_table.tsv"
+
+    if not (tiara_path.exists() and tidk_path.exists() and barrnap_path.exists() and compleasm_path.exists()):
+        pytest.skip(f"Benchmark annotation files missing in {BENCHMARK_DIR}")
+
+    from gfapdefinisher.annotations import aggregate_node_annotations
+    from gfapdefinisher.ledger import build_end_evidence_ledger
+
+    graph = load_gfa(gfa_path)
+    annotations = aggregate_node_annotations(
+        tiara=tiara_path,
+        tidk=tidk_path,
+        barrnap=barrnap_path,
+        compleasm=compleasm_path,
+        sequence_ids=graph.segments.keys(),
+    )
+    ledger = build_end_evidence_ledger(graph=graph, annotations=annotations)
+    ledger_map = {ev.port.to_symbol(): ev for ev in ledger} | {f"{ev.segment_name}:{ev.end}": ev for ev in ledger}
+
+    resolver = RdnaCassetteResolver(graph, ledger_map, annotations=annotations)
+
+    # 1. Contaminant detection checks
+    assert resolver._is_contaminant("utg000005l") is True
+    assert resolver._is_contaminant("utg000008l") is True
+    assert resolver._is_contaminant("utg000013l") is False
+    assert resolver._is_contaminant("utg000020l") is False
+    assert resolver._is_contaminant("utg000082l") is False
+
+    # 2. Entry port detection excludes bacterial contigs
+    entries = resolver.find_rdna_entry_ports()
+    p_anchor = SegmentPort("utg000013l", Strand.REVERSE)
+    assert p_anchor in entries
+    entry_names = {p.name for p in entries}
+    banned_bacterial = {"utg000005l", "utg000008l", "utg000075l", "utg000156l", "utg000192l"}
+    for b in banned_bacterial:
+        assert b not in entry_names
+
+    # 3. Traversal chains eukaryotic rDNA copies utg000013l- -> utg000020l- -> utg000082l-
+    chain = resolver.traverse_rdna_cassette(p_anchor, include_anchor=True)
+    chain_symbols = [p.to_symbol() for p in chain]
+    assert chain_symbols == ["utg000013l-", "utg000020l-", "utg000082l-"]
+    assert not any(p.name in banned_bacterial for p in chain)
