@@ -29,6 +29,7 @@ def _make_evidence(
     rdna_hit_count: int = 0,
     has_terminal_rdna: bool = False,
     rdna_features: tuple[str, ...] = (),
+    usco_hit_count: int = 0,
 ) -> EndEvidence:
     strand = Strand.MINUS if end == "5p" else Strand.PLUS
     port = SegmentPort(segment_name, strand)
@@ -45,6 +46,7 @@ def _make_evidence(
         rdna_hit_count=rdna_hit_count,
         rdna_features=rdna_features,
         has_terminal_rdna=has_terminal_rdna,
+        usco_hit_count=usco_hit_count,
         tiara_class="eukarya",
     )
 
@@ -546,3 +548,218 @@ def test_benchmark_df5120_rdna_traversal_chr_ii():
     assert res.quirk_record.quirk_type == IntervalQuirk.RDNA_CASSETTE
     assert res.quirk_record.left_anchor_port == "utg000013l-"
     assert res.quirk_record.right_anchor_port == "utg000053l-"
+
+
+def test_distal_cap_not_misidentified_as_entry_port():
+    """Verify distal telomeric cap is not misidentified as entry port due to bidirected duality."""
+    graph = BidirectedGraph()
+    graph.add_segment("z_stem", length=20000, depth=60.0, sequence="A" * 20000)
+    graph.add_segment("rdna_1", length=10000, depth=200.0, sequence="C" * 10000)
+    # Alphabetically earlier name than z_stem
+    graph.add_segment("a_cap", length=5000, depth=30.0, sequence="T" * 5000)
+
+    p_stem = SegmentPort("z_stem", Strand.FORWARD)
+    p_r1 = SegmentPort("rdna_1", Strand.FORWARD)
+    p_cap = SegmentPort("a_cap", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_r1, cigar="100M")
+    graph.add_edge(p_r1, p_cap, cigar="100M")
+
+    annotations = {
+        "rdna_1": NodeAnnotations(
+            sequence_id="rdna_1",
+            barrnap_hits=[
+                BarrnapHit("rdna_1", 100, 1800, "+", "18S_rRNA", 1e-40),
+                BarrnapHit("rdna_1", 2500, 6000, "+", "28S_rRNA", 1e-60),
+            ],
+        ),
+    }
+
+    ledger = {
+        "z_stem+": _make_evidence("z_stem", "3p"),
+        "a_cap+": _make_evidence("a_cap", "3p", has_terminal_telomere=True),
+        "a_cap-": _make_evidence("a_cap", "5p", has_terminal_telomere=False),
+        "rdna_1+": _make_evidence("rdna_1", "3p", rdna_hit_count=3),
+    }
+
+    resolver = RdnaCassetteResolver(graph, ledger, annotations=annotations)
+
+    # find_rdna_entry_ports must NOT include a_cap-
+    entry_ports = resolver.find_rdna_entry_ports()
+    assert entry_ports == [p_stem]
+    assert resolver.identify_entry_anchor() == p_stem
+
+    # Automatic resolution without explicit entry_port must succeed
+    res = resolver.resolve_rdna_cassette()
+    assert res.end_state_record.resolved is True
+    assert res.end_state_record.shared_port == "a_cap+"
+    assert res.quirk_record.left_anchor_port == "z_stem+"
+    assert res.quirk_record.right_anchor_port == "a_cap+"
+
+
+def test_distal_cap_wrong_strand_not_accepted():
+    """Verify distal telomeric cap entered with non-telomeric exit strand is rejected."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=20000, depth=60.0)
+    graph.add_segment("rdna", length=10000, depth=200.0)
+    graph.add_segment("cap", length=5000, depth=30.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_rdna = SegmentPort("rdna", Strand.FORWARD)
+    # cap has telomere only at 5p (cap-). Edge connects to cap+ (3p), which is naked.
+    p_cap_naked = SegmentPort("cap", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_rdna, cigar="100M")
+    graph.add_edge(p_rdna, p_cap_naked, cigar="100M")
+
+    annotations = {
+        "rdna": NodeAnnotations(
+            sequence_id="rdna",
+            barrnap_hits=[BarrnapHit("rdna", 100, 1800, "+", "18S_rRNA", 1e-40)],
+        ),
+    }
+
+    ledger = {
+        "stem+": _make_evidence("stem", "3p"),
+        "cap+": _make_evidence("cap", "3p", has_terminal_telomere=False),
+        "cap-": _make_evidence("cap", "5p", has_terminal_telomere=True),
+        "rdna+": _make_evidence("rdna", "3p", rdna_hit_count=1),
+    }
+
+    resolver = RdnaCassetteResolver(graph, ledger, annotations=annotations)
+    assert resolver.is_distal_telomere_cap(p_cap_naked) is False
+    assert resolver.is_distal_telomere_cap(SegmentPort("cap", Strand.REVERSE)) is True
+
+    # Path to cap+ cannot be accepted as distal telomere cap
+    assert resolver.reach_distal_telomere_cap(p_stem) is None
+
+
+def test_internal_inversion_switch_rejected():
+    """Verify unitigs with internal inverted rRNA orders (28S before 18S) or mixed strands are rejected."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=20000, depth=60.0)
+    graph.add_segment("rdna_inverted", length=10000, depth=200.0)
+    graph.add_segment("rdna_chimera", length=10000, depth=200.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_inv = SegmentPort("rdna_inverted", Strand.FORWARD)
+    p_chim = SegmentPort("rdna_chimera", Strand.FORWARD)
+
+    graph.add_edge(p_stem, p_inv, cigar="100M")
+    graph.add_edge(p_stem, p_chim, cigar="100M")
+
+    annotations = {
+        # Inverted: 28S at 100..2000, 18S at 3000..4800 on + strand
+        "rdna_inverted": NodeAnnotations(
+            sequence_id="rdna_inverted",
+            barrnap_hits=[
+                BarrnapHit("rdna_inverted", 100, 2000, "+", "28S_rRNA", 1e-50),
+                BarrnapHit("rdna_inverted", 3000, 4800, "+", "18S_rRNA", 1e-50),
+            ],
+        ),
+        # Chimera: 18S on +, 28S on -
+        "rdna_chimera": NodeAnnotations(
+            sequence_id="rdna_chimera",
+            barrnap_hits=[
+                BarrnapHit("rdna_chimera", 100, 1800, "+", "18S_rRNA", 1e-50),
+                BarrnapHit("rdna_chimera", 2500, 6000, "-", "28S_rRNA", 1e-50),
+            ],
+        ),
+    }
+
+    ledger = {
+        "stem+": _make_evidence("stem", "3p"),
+        "rdna_inverted+": _make_evidence("rdna_inverted", "3p", rdna_hit_count=2),
+        "rdna_chimera+": _make_evidence("rdna_chimera", "3p", rdna_hit_count=2),
+    }
+
+    resolver = RdnaCassetteResolver(graph, ledger, annotations=annotations)
+
+    # Inverted unitig has no valid intrinsic orientation and cannot be traversed on either strand
+    assert resolver.get_intrinsic_rdna_orientation("rdna_inverted") is None
+    assert resolver.is_consistent_rdna_orientation(p_inv) is False
+    assert resolver.is_consistent_rdna_orientation(SegmentPort("rdna_inverted", Strand.REVERSE)) is False
+
+    # Chimeric unitig is likewise rejected
+    assert resolver.get_intrinsic_rdna_orientation("rdna_chimera") is None
+    assert resolver.is_consistent_rdna_orientation(p_chim) is False
+    assert resolver.is_consistent_rdna_orientation(SegmentPort("rdna_chimera", Strand.REVERSE)) is False
+
+
+def test_entry_port_ranking_prefers_usco_core_stem():
+    """Verify entry anchor selection prioritizes chromosome core stem with USCO genes over debris."""
+    graph = BidirectedGraph()
+    graph.add_segment("a_debris", length=500, depth=20.0)
+    graph.add_segment("z_stem", length=50000, depth=60.0)
+    graph.add_segment("rdna", length=10000, depth=200.0)
+
+    p_debris = SegmentPort("a_debris", Strand.FORWARD)
+    p_stem = SegmentPort("z_stem", Strand.FORWARD)
+    p_rdna = SegmentPort("rdna", Strand.FORWARD)
+
+    graph.add_edge(p_debris, p_rdna, cigar="100M")
+    graph.add_edge(p_stem, p_rdna, cigar="100M")
+
+    annotations = {
+        "rdna": NodeAnnotations(
+            sequence_id="rdna",
+            barrnap_hits=[BarrnapHit("rdna", 100, 1800, "+", "18S_rRNA", 1e-40)],
+        ),
+    }
+
+    ledger = {
+        "a_debris+": _make_evidence("a_debris", "3p", length=500, usco_hit_count=0),
+        "z_stem+": _make_evidence("z_stem", "3p", length=50000, usco_hit_count=15),
+        "rdna+": _make_evidence("rdna", "3p", rdna_hit_count=1),
+    }
+
+    resolver = RdnaCassetteResolver(graph, ledger, annotations=annotations)
+
+    # z_stem must be ranked first despite a_debris coming first alphabetically
+    entry_ports = resolver.find_rdna_entry_ports()
+    assert entry_ports[0] == p_stem
+    assert resolver.identify_entry_anchor() == p_stem
+
+
+def test_direct_stem_to_cap_edge_without_rdna_not_accepted():
+    """Verify direct connection from stem to cap without rDNA is not accepted as rDNA cassette."""
+    graph = BidirectedGraph()
+    graph.add_segment("stem", length=20000, depth=60.0)
+    graph.add_segment("cap", length=5000, depth=30.0)
+
+    p_stem = SegmentPort("stem", Strand.FORWARD)
+    p_cap = SegmentPort("cap", Strand.FORWARD)
+
+    # Direct stem -> cap edge (no rDNA)
+    graph.add_edge(p_stem, p_cap, cigar="100M")
+
+    ledger = {
+        "stem+": _make_evidence("stem", "3p"),
+        "cap+": _make_evidence("cap", "3p", has_terminal_telomere=True),
+    }
+
+    resolver = RdnaCassetteResolver(graph, ledger)
+    assert resolver.reach_distal_telomere_cap(p_stem) is None
+    assert resolver.traverse_rdna_cassette(p_stem) == []
+
+
+def test_compute_path_length_matches_assembled_sequence_with_indels():
+    """Verify compute_path_length accurately reflects assembled sequence length with CIGAR indels."""
+    graph = BidirectedGraph()
+    # seg1: 1000 bp, seg2: 500 bp. CIGAR has 2 bp insertion (query consumes 100 bp, target consumes 98 bp)
+    seq1 = "A" * 1000
+    seq2 = "C" * 500
+    graph.add_segment("s1", length=1000, sequence=seq1)
+    graph.add_segment("s2", length=500, sequence=seq2)
+
+    p1 = SegmentPort("s1", Strand.FORWARD)
+    p2 = SegmentPort("s2", Strand.FORWARD)
+
+    graph.add_edge(p1, p2, cigar="50M2I48M")
+
+    resolver = RdnaCassetteResolver(graph, {})
+    path = [p1, p2]
+
+    assembled = resolver.assemble_contiguous_path(path)
+    assert assembled is not None
+    assert len(assembled) == resolver.compute_path_length(path)
