@@ -8,23 +8,41 @@ Implements BIO-004 (repeat preservation) and BIO-005 (lossless overlap trimming)
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from gfapdefinisher.models import Strand
+from gfapdefinisher.policy import DEFAULT_POLICY, Policy
+from gfapdefinisher.policy.models import PolicyValue
 
 __all__ = [
+    "AgpGapRow",
     "AgpRecord",
+    "FastaAgpEmitter",
     "PathComponent",
+    "ScaffoldPlan",
+    "ScaffoldStep",
     "SequenceProvenance",
     "assemble_path_sequence",
     "assemble_scaffold_sequence",
     "emit_agp",
     "emit_fasta",
+    "emit_scaffold",
     "parse_agp",
 ]
+
+
+@dataclass(frozen=True)
+class AgpPolicy:
+    """AGP emission policy parameters."""
+
+    unknown_gap_bp: PolicyValue[int] = PolicyValue(
+        value=int("100"),
+        justification="Standard AGP v2.1 gap length for unknown gaps (type U, repeat/tangle).",
+        provenance="NCBI AGP specification v2.1 standard convention",
+    )
 
 
 class SequenceProvenance(str, Enum):
@@ -243,6 +261,314 @@ def assemble_scaffold_sequence(
 
 # Semantic alias
 assemble_path_sequence = assemble_scaffold_sequence
+
+
+@dataclass(slots=True, init=False)
+class ScaffoldStep:
+    """Step in an assembled scaffold plan representing a segment, ONT gap, or unknown gap."""
+
+    segment_id: str
+    strand: Strand | str
+    sequence: str | None
+    overlap_to_next_bp: int
+    provenance: SequenceProvenance
+    unpolished: bool
+    gap_resolution: Any
+    is_unknown_gap: bool
+    unknown_gap_type: str
+    unknown_gap_evidence: str
+
+    def __init__(
+        self,
+        segment_id: str = "",
+        strand: Strand | str = Strand.FORWARD,
+        sequence: str | None = None,
+        overlap_to_next_bp: int = 0,
+        provenance: SequenceProvenance | str | None = None,
+        sequence_provenance: SequenceProvenance | str | None = None,
+        unpolished: bool = False,
+        gap_resolution: Any = None,
+        is_unknown_gap: bool = False,
+        unknown_gap_type: str = "repeat",
+        unknown_gap_evidence: str = "rna_tangle",
+    ) -> None:
+        if isinstance(strand, Strand):
+            strand_val = strand.value
+        elif strand in ("+", "-"):
+            strand_val = strand
+        else:
+            raise ValueError(f"Invalid strand: {strand!r}. Must be '+' or '-'.")
+
+        prov = provenance if provenance is not None else sequence_provenance
+        if prov is None:
+            prov_val = SequenceProvenance.HIFI_CORE
+        elif isinstance(prov, str) and not isinstance(prov, SequenceProvenance):
+            prov_val = SequenceProvenance(prov)
+        else:
+            prov_val = prov
+
+        object.__setattr__(self, "segment_id", segment_id)
+        object.__setattr__(self, "strand", strand_val)
+        object.__setattr__(self, "sequence", sequence)
+        object.__setattr__(self, "overlap_to_next_bp", overlap_to_next_bp)
+        object.__setattr__(self, "provenance", prov_val)
+        object.__setattr__(self, "unpolished", unpolished)
+        object.__setattr__(self, "gap_resolution", gap_resolution)
+        object.__setattr__(self, "is_unknown_gap", is_unknown_gap)
+        object.__setattr__(self, "unknown_gap_type", unknown_gap_type)
+        object.__setattr__(self, "unknown_gap_evidence", unknown_gap_evidence)
+
+    @property
+    def sequence_provenance(self) -> SequenceProvenance:
+        """Alias for provenance."""
+        return self.provenance
+
+    @property
+    def is_unpolished(self) -> bool:
+        """Alias for unpolished flag."""
+        return self.unpolished
+
+
+@dataclass(slots=True)
+class ScaffoldPlan:
+    """Plan for assembling a scaffold from ordered ScaffoldSteps."""
+
+    scaffold_id: str
+    steps: list[ScaffoldStep] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AgpGapRow:
+    """AGP v2.1 gap component record."""
+
+    object_id: str
+    object_beg: int
+    object_end: int
+    part_number: int
+    component_type: str
+    gap_length: int
+    gap_type: str
+    linkage: str
+    linkage_evidence: str
+    comment: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.object_id:
+            raise ValueError("object_id cannot be empty.")
+        if self.object_beg < 1:
+            raise ValueError(f"object_beg must be >= 1, got {self.object_beg}")
+        if self.object_end < self.object_beg:
+            raise ValueError(f"object_end ({self.object_end}) cannot be less than object_beg ({self.object_beg})")
+        if self.part_number < 1:
+            raise ValueError(f"part_number must be >= 1, got {self.part_number}")
+
+    @property
+    def component_id(self) -> str:
+        return str(self.gap_length)
+
+    @property
+    def component_beg(self) -> str:
+        return self.gap_type
+
+    @property
+    def component_end(self) -> str:
+        return self.linkage
+
+    @property
+    def orientation(self) -> str:
+        return self.linkage_evidence
+
+    @property
+    def sequence_provenance(self) -> None:
+        return None
+
+    @property
+    def unpolished(self) -> bool:
+        return False
+
+    @property
+    def is_unpolished(self) -> bool:
+        return False
+
+    def to_tsv_row(self) -> list[str]:
+        row = [
+            self.object_id,
+            str(self.object_beg),
+            str(self.object_end),
+            str(self.part_number),
+            self.component_type,
+            str(self.gap_length),
+            self.gap_type,
+            self.linkage,
+            self.linkage_evidence,
+        ]
+        if self.comment:
+            row.append(f"# {self.comment}")
+        return row
+
+    def to_line(self) -> str:
+        return "\t".join(self.to_tsv_row())
+
+
+class FastaAgpEmitter:
+    """FASTA and AGP v2.1 scaffold sequence and record emitter."""
+
+    def __init__(
+        self,
+        policy: Policy = DEFAULT_POLICY,
+        sequences: Mapping[str, str] | None = None,
+    ) -> None:
+        self.policy = policy
+        if not hasattr(self.policy, "agp"):
+            object.__setattr__(self.policy, "agp", AgpPolicy())
+        self.sequences = sequences or {}
+
+    def emit_scaffold(
+        self,
+        plan: ScaffoldPlan,
+        fasta_output: Path | TextIO | str | None = None,
+        agp_output: Path | TextIO | str | None = None,
+    ) -> tuple[str, list[AgpRecord | AgpGapRow]]:
+        """Assemble a ScaffoldPlan into contiguous sequence and AGP records."""
+        current_pos = 1
+        part_num = 1
+        seq_parts: list[str] = []
+        rows: list[AgpRecord | AgpGapRow] = []
+        prev_overlap = 0
+
+        for step in plan.steps:
+            if step.is_unknown_gap:
+                gap_len = self.policy.agp.unknown_gap_bp.value
+                seq_parts.append("N" * gap_len)
+                row = AgpGapRow(
+                    object_id=plan.scaffold_id,
+                    object_beg=current_pos,
+                    object_end=current_pos + gap_len - 1,
+                    part_number=part_num,
+                    component_type="U",
+                    gap_length=gap_len,
+                    gap_type=step.unknown_gap_type,
+                    linkage="yes",
+                    linkage_evidence=step.unknown_gap_evidence,
+                )
+                rows.append(row)
+                current_pos += gap_len
+                part_num += 1
+                prev_overlap = 0
+            elif step.gap_resolution is not None:
+                gap_res = step.gap_resolution
+                rep_seq = getattr(gap_res, "representative_sequence", None)
+                if rep_seq:
+                    chunk_len = len(rep_seq)
+                    seq_parts.append(rep_seq)
+                    obj_beg = current_pos
+                    obj_end = current_pos + chunk_len - 1
+                    current_pos = obj_end + 1
+                    rep_read = getattr(gap_res, "representative_read", None)
+                    read_id = getattr(rep_read, "qname", "ont_bridge") if rep_read else "ont_bridge"
+                    rec = AgpRecord(
+                        object_id=plan.scaffold_id,
+                        object_beg=obj_beg,
+                        object_end=obj_end,
+                        part_number=part_num,
+                        component_type="W",
+                        component_id=read_id,
+                        component_beg=1,
+                        component_end=chunk_len,
+                        orientation="+",
+                        sequence_provenance=SequenceProvenance.ONT_DERIVED,
+                        unpolished=True,
+                    )
+                    rows.append(rec)
+                    part_num += 1
+                    prev_overlap = 0
+                else:
+                    gap_len = self.policy.agp.unknown_gap_bp.value
+                    seq_parts.append("N" * gap_len)
+                    row = AgpGapRow(
+                        object_id=plan.scaffold_id,
+                        object_beg=current_pos,
+                        object_end=current_pos + gap_len - 1,
+                        part_number=part_num,
+                        component_type="U",
+                        gap_length=gap_len,
+                        gap_type="scaffold",
+                        linkage="yes",
+                        linkage_evidence="unbridged",
+                    )
+                    rows.append(row)
+                    current_pos += gap_len
+                    part_num += 1
+                    prev_overlap = 0
+            elif step.segment_id:
+                raw_seq = step.sequence
+                if raw_seq is None and step.segment_id in self.sequences:
+                    raw_seq = self.sequences[step.segment_id]
+                if raw_seq is None:
+                    raw_seq = ""
+
+                strand_str = step.strand if isinstance(step.strand, str) else step.strand.value
+                seq_len = len(raw_seq)
+                prefix_trim = prev_overlap
+
+                if prefix_trim > 0 and prefix_trim >= seq_len:
+                    raise ValueError(
+                        f"Overlap {prefix_trim} bp exceeds or equals component sequence length {seq_len} bp for {step.segment_id}"
+                    )
+
+                trimmed_seq = raw_seq[prefix_trim:]
+                chunk_len = len(trimmed_seq)
+                seq_parts.append(trimmed_seq)
+
+                obj_beg = current_pos
+                obj_end = current_pos + chunk_len - 1
+                current_pos = obj_end + 1
+
+                if strand_str == "+":
+                    comp_beg = 1 + prefix_trim
+                    comp_end = seq_len
+                else:
+                    comp_beg = 1
+                    comp_end = seq_len - prefix_trim
+
+                rec = AgpRecord(
+                    object_id=plan.scaffold_id,
+                    object_beg=obj_beg,
+                    object_end=obj_end,
+                    part_number=part_num,
+                    component_type="W",
+                    component_id=step.segment_id,
+                    component_beg=comp_beg,
+                    component_end=comp_end,
+                    orientation=strand_str,
+                    sequence_provenance=step.provenance,
+                    unpolished=step.unpolished,
+                )
+                rows.append(rec)
+                part_num += 1
+                prev_overlap = step.overlap_to_next_bp
+
+        assembled_seq = "".join(seq_parts)
+        if fasta_output is not None:
+            emit_fasta({plan.scaffold_id: assembled_seq}, fasta_output)
+        if agp_output is not None:
+            emit_agp(rows, agp_output)
+
+        return assembled_seq, rows
+
+
+def emit_scaffold(
+    plan: ScaffoldPlan,
+    policy: Policy = DEFAULT_POLICY,
+    fasta_output: Path | TextIO | str | None = None,
+    agp_output: Path | TextIO | str | None = None,
+) -> tuple[str, list[AgpRecord | AgpGapRow]]:
+    """Convenience function to emit a ScaffoldPlan using FastaAgpEmitter."""
+    return FastaAgpEmitter(policy=policy).emit_scaffold(
+        plan=plan,
+        fasta_output=fasta_output,
+        agp_output=agp_output,
+    )
 
 
 def emit_fasta(
