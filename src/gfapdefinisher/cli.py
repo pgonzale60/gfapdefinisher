@@ -40,7 +40,6 @@ from gfapdefinisher.resolver import (
     OntBridgingEngine,
     SatelliteGapResolution,
     _parse_port_spec,
-    load_reads_sequences,
     reverse_complement,
 )
 
@@ -551,7 +550,7 @@ def build_scaffolds(
                         if gres.median_gap_bp
                         else DEFAULT_AGP_POLICY.unknown_gap_bp.value
                     )
-                    gap_type = "repeat" if (qrec and "satellite" in qrec.quirk_type.value) else "scaffold"
+                    gap_type = "repeat" if (qrec and qrec.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE) else "scaffold"
                     comp_type = "U" if gap_len == DEFAULT_AGP_POLICY.unknown_gap_bp.value else "N"
                     comps.append(
                         PathComponent(
@@ -784,7 +783,7 @@ def build_scaffolds(
                 gap_len = (
                     int(round(gres.median_gap_bp)) if gres.median_gap_bp else DEFAULT_AGP_POLICY.unknown_gap_bp.value
                 )
-                gap_type = "repeat" if (qrec and "satellite" in qrec.quirk_type.value) else "scaffold"
+                gap_type = "repeat" if (qrec and qrec.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE) else "scaffold"
                 comp_type = "U" if gap_len == DEFAULT_AGP_POLICY.unknown_gap_bp.value else "N"
                 comps.append(
                     PathComponent(
@@ -872,18 +871,7 @@ def run_finish(args: argparse.Namespace) -> None:
     engine = OntBridgingEngine(graph, ledger_map)
     orphan_caps = engine.identify_orphan_caps()
 
-    reads_dict: dict[str, str] | None = None
     if args.ont_paf is not None:
-        if args.ont_reads is not None:
-            target_ids = engine.collect_spanning_read_ids(args.ont_paf)
-            for er in end_state_records:
-                if er.state == EndState.END_SOMATIC_MISSING and er.somatic_port and er.germline_port:
-                    stem_p = SegmentPort(er.chrom, Strand.FORWARD if er.side == "3p" else Strand.REVERSE)
-                    g_name, g_strand = _parse_port_spec(er.germline_port)
-                    for sr in engine.collect_spanning_reads(args.ont_paf, stem_p, SegmentPort(g_name, g_strand)):
-                        target_ids.add(sr.qname)
-            reads_dict = load_reads_sequences(args.ont_reads, target_qnames=target_ids)
-
         pre_somatic: dict[tuple[str, str], tuple[str | None, float | None]] = {
             (rec.chrom, rec.side): (rec.somatic_port, rec.somatic_depth_ratio) for rec in end_state_records
         }
@@ -892,11 +880,16 @@ def run_finish(args: argparse.Namespace) -> None:
             paf_source=args.ont_paf,
             end_states=end_state_records,
             quirks=quirk_records,
-            reads_sequences=reads_dict,
+            reads_sequences=args.ont_reads,
         )
 
         for rec in end_state_records:
-            if rec.state == EndState.END_SOMATIC_MISSING and rec.somatic_port and rec.germline_port:
+            if (
+                rec.state == EndState.END_SOMATIC_MISSING
+                and rec.somatic_port
+                and rec.germline_port
+                and not engine._has_terminal_telomere(rec.germline_port)
+            ):
                 stem_p = SegmentPort(rec.chrom, Strand.FORWARD if rec.side == "3p" else Strand.REVERSE)
                 g_name, g_strand = _parse_port_spec(rec.germline_port)
                 s_name, s_strand = _parse_port_spec(rec.somatic_port)
@@ -907,7 +900,7 @@ def run_finish(args: argparse.Namespace) -> None:
                     germline_port=SegmentPort(g_name, g_strand),
                     somatic_port=SegmentPort(s_name, s_strand),
                     paf_path=args.ont_paf,
-                    reads_fasta=reads_dict,
+                    reads_fasta=args.ont_reads,
                     core_coverage_bp_median=rec.core_coverage_bp_median,
                     somatic_depth_ratio=rec.somatic_depth_ratio,
                     germline_depth_ratio=rec.germline_depth_ratio,

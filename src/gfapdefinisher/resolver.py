@@ -538,6 +538,7 @@ class OntBridgingEngine:
         """Identify candidate variable satellite gap pairs and resolve them via ONT bridging."""
         orphan_caps = self.identify_orphan_caps()
         unlinked_grs = self.identify_unlinked_grs_unitigs()
+        has_pde_forks = any(bool(e.somatic_port) for e in end_states)
         resolved_end_keys: set[tuple[str, str]] = set()
         for er in end_states:
             if er.resolved:
@@ -565,10 +566,7 @@ class OntBridgingEngine:
             hits_by_read[hit.qname].append(hit)
 
         active_reads: Mapping[str, str] | None = None
-        if isinstance(reads_sequences, str | Path):
-            target_ids = self.collect_spanning_read_ids(all_hits)
-            active_reads = load_reads_sequences(reads_sequences, target_qnames=target_ids)
-        else:
+        if not isinstance(reads_sequences, str | Path):
             active_reads = reads_sequences
 
         pair_counts: dict[tuple[str, str], int] = defaultdict(int)
@@ -595,6 +593,10 @@ class OntBridgingEngine:
 
             for er in end_states:
                 if er.resolved or er.germline_port is None:
+                    continue
+                if er.chrom in orphan_caps or er.germline_port.rstrip("+-") in orphan_caps:
+                    continue
+                if has_pde_forks and not er.somatic_port:
                     continue
                 end_key = (getattr(er, "segment_id", er.chrom), er.side)
                 if end_key in resolved_end_keys or (er.chrom, er.side) in resolved_end_keys:
@@ -701,7 +703,7 @@ class OntBridgingEngine:
                     right_port=right_port,
                     paf_source=all_hits,
                     spanning_reads=spanning,
-                    reads_sequences=active_reads,
+                    reads_sequences=reads_sequences,
                     core_coverage_bp_median=matched_end.core_coverage_bp_median if matched_end else None,
                     core_depth_ratio=matched_end.germline_depth_ratio if matched_end else None,
                     somatic_depth_ratio=matched_end.somatic_depth_ratio if matched_end else None,
@@ -742,6 +744,10 @@ class OntBridgingEngine:
                 or end_key in resolved_end_keys
                 or (er.chrom, er.side) in resolved_end_keys
             ):
+                continue
+            if er.chrom in orphan_caps or er.germline_port.rstrip("+-") in orphan_caps:
+                continue
+            if has_pde_forks and not er.somatic_port:
                 continue
 
             anchor_name, anchor_strand = _parse_port_spec(er.germline_port)
@@ -814,7 +820,7 @@ class OntBridgingEngine:
                     paf_source=all_hits,
                     gap_index=1,
                     spanning_reads=sp1,
-                    reads_sequences=active_reads,
+                    reads_sequences=reads_sequences,
                     core_coverage_bp_median=er.core_coverage_bp_median,
                     core_depth_ratio=er.germline_depth_ratio,
                     somatic_depth_ratio=er.somatic_depth_ratio,
@@ -830,7 +836,7 @@ class OntBridgingEngine:
                     paf_source=all_hits,
                     gap_index=2,
                     spanning_reads=sp2,
-                    reads_sequences=active_reads,
+                    reads_sequences=reads_sequences,
                     core_coverage_bp_median=er.core_coverage_bp_median,
                     core_depth_ratio=er.germline_depth_ratio,
                     somatic_depth_ratio=er.somatic_depth_ratio,
@@ -902,6 +908,7 @@ class OntBridgingEngine:
         unknown_gap = getattr(self.policy, "agp", AgpPolicy()).unknown_gap_bp.value
         canonical_fwd = self.policy.telomere.motif_forward.value
         canonical_rev = self.policy.telomere.motif_reverse.value
+        has_pde_forks = any(bool(e.somatic_port) for e in end_states)
 
         for er in list(end_states):
             end_key = (getattr(er, "segment_id", er.chrom), er.side)
@@ -911,6 +918,10 @@ class OntBridgingEngine:
                 or end_key in resolved_end_keys
                 or (er.chrom, er.side) in resolved_end_keys
             ):
+                continue
+            if er.chrom in orphan_caps or er.germline_port.rstrip("+-") in orphan_caps:
+                continue
+            if has_pde_forks and not er.somatic_port:
                 continue
 
             anchor_name, anchor_strand = _parse_port_spec(er.germline_port)
@@ -938,6 +949,8 @@ class OntBridgingEngine:
             rc_top = reverse_complement(top_kmer)
 
             for cap_id in sorted(orphan_caps.keys() - used_cap_segs):
+                if cap_id == anchor_name or cap_id == er.chrom:
+                    continue
                 cap_seg = self.graph.segments.get(cap_id)
                 if cap_seg is None or not cap_seg.sequence:
                     continue
@@ -1251,7 +1264,7 @@ class OntBridgingEngine:
         *,
         gap_index: int = 1,
         spanning_reads: Sequence[SpanningRead] | None = None,
-        reads_sequences: Mapping[str, str] | None = None,
+        reads_sequences: Mapping[str, str] | Path | str | None = None,
         repeat_monomer_len_bp: int | None = None,
         core_coverage_bp_median: float | None = None,
         core_depth_ratio: float | None = None,
@@ -1326,9 +1339,14 @@ class OntBridgingEngine:
             )
 
             rep_seq = best_read.sequence
-            if rep_seq is None and reads_sequences and best_read.qname in reads_sequences:
-                raw_seq = reads_sequences[best_read.qname][best_read.q_from : best_read.q_to]
-                rep_seq = reverse_complement(raw_seq) if best_read.strand == "-" else raw_seq
+            if rep_seq is None and reads_sequences:
+                if isinstance(reads_sequences, str | Path):
+                    seqs_map = load_reads_sequences(reads_sequences, target_qnames={best_read.qname})
+                else:
+                    seqs_map = reads_sequences
+                if best_read.qname in seqs_map:
+                    raw_seq = seqs_map[best_read.qname][best_read.q_from : best_read.q_to]
+                    rep_seq = reverse_complement(raw_seq) if best_read.strand == "-" else raw_seq
 
             if rep_seq is not None and best_read.sequence is None:
                 best_read = SpanningRead(
@@ -1519,7 +1537,7 @@ class OntBridgingEngine:
         germline_port: SegmentPort,
         somatic_port: SegmentPort,
         paf_path: str | Path,
-        reads_fasta: dict[str, str] | None = None,
+        reads_fasta: dict[str, str] | Path | str | None = None,
         *,
         core_coverage_bp_median: float | None = None,
         somatic_depth_ratio: float | None = None,
@@ -1616,9 +1634,14 @@ class OntBridgingEngine:
             )
 
             rep_seq = best_read.sequence
-            if rep_seq is None and reads_fasta and best_read.qname in reads_fasta:
-                raw_seq = reads_fasta[best_read.qname][best_read.q_from : best_read.q_to]
-                rep_seq = reverse_complement(raw_seq) if best_read.strand == "-" else raw_seq
+            if rep_seq is None and reads_fasta:
+                if isinstance(reads_fasta, str | Path):
+                    seqs_map = load_reads_sequences(reads_fasta, target_qnames={best_read.qname})
+                else:
+                    seqs_map = reads_fasta
+                if best_read.qname in seqs_map:
+                    raw_seq = seqs_map[best_read.qname][best_read.q_from : best_read.q_to]
+                    rep_seq = reverse_complement(raw_seq) if best_read.strand == "-" else raw_seq
 
             state = EndState.END_COMPLETE
             feature_id_end = build_feature_id(state, chrom, side)

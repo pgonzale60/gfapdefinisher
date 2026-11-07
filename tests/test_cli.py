@@ -8,6 +8,7 @@ import pytest
 from pyfaidx import Fasta
 
 from gfapdefinisher.cli import main
+from gfapdefinisher.emitter import SequenceProvenance, parse_agp
 from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.quirks import (
     EndState,
@@ -809,13 +810,18 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     tidk_path = benchmark_dir / "tidk_telomeres_telomeric_repeat_windows.tsv"
     barrnap_path = benchmark_dir / "barrnap_rdna.gff"
     compleasm_path = benchmark_dir / "compleasm_unitigs_full_table.tsv"
-    ont_paf_path = benchmark_dir / "ont_to_flanks.paf"
+    ont_paf_candidates = [
+        benchmark_dir / "ont_to_utgs.paf",
+        benchmark_dir / "ont_to_flanks.paf",
+    ]
+    ont_paf_path = next((p for p in ont_paf_candidates if p.exists()), None)
 
     if not (
         tiara_path.exists()
         and tidk_path.exists()
         and barrnap_path.exists()
         and compleasm_path.exists()
+        and ont_paf_path is not None
         and ont_paf_path.exists()
     ):
         pytest.skip(f"Benchmark annotation/PAF files missing in {benchmark_dir}")
@@ -886,16 +892,27 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
 
     # 2. quirks.tsv has required variable satellite gaps and rDNA cassette
     quirks = parse_quirks_tsv(out_dir / "quirks.tsv")
+    assert len(quirks) == 3
     quirk_ids = {q.feature_id for q in quirks}
-    assert "sat_gap_variable:utg000002l:5p:1" in quirk_ids
-    assert "sat_gap_variable:utg000009l:5p:1" in quirk_ids
-    assert "rdna_cassette:utg000013l:5p:1" in quirk_ids
+    assert quirk_ids == {
+        "sat_gap_variable:utg000002l:5p:1",
+        "sat_gap_variable:utg000009l:5p:1",
+        "rdna_cassette:utg000013l:5p:1",
+    }
 
     # 3. utg000009l is fully resolved in end_states.tsv
     end_states = parse_end_states_tsv(out_dir / "end_states.tsv")
     utg9_feature_ids = {e.feature_id for e in end_states if e.chrom == "utg000009l"}
     assert "end_complete:utg000009l:3p" in utg9_feature_ids
     assert "end_complete:utg000009l:5p" in utg9_feature_ids
+
+    # Verify scaffolds.agp contains the ONT-derived component for utg000009l:5p
+    agp_records = parse_agp(out_dir / "scaffolds.agp")
+    utg9_agp = [r for r in agp_records if r.object_id == "utg000009l"]
+    ont_comps = [r for r in utg9_agp if getattr(r, "component_id", None) == "e59ed077-450e-4e48-ab71-19a19d3490b9"]
+    assert len(ont_comps) == 1
+    assert ont_comps[0].sequence_provenance == SequenceProvenance.ONT_DERIVED
+    assert ont_comps[0].unpolished is True
 
     # 4. In scaffolds.fasta - ALL 6 chromosomes achieve bilateral T2T (>100 GCCTAA 5', >100 TTAGGC 3')
     fasta = Fasta(str(out_dir / "scaffolds.fasta"))
