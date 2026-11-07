@@ -273,6 +273,21 @@ def build_scaffolds(
     bridge_forward: dict[SegmentPort, tuple[SegmentPort, SegmentPort]] = {}
     has_incoming_bridge: set[SegmentPort] = set()
 
+    stem_names = {j.stem_port.rstrip("+-") for j in junctions}
+
+    def _has_telomere(port: SegmentPort) -> bool:
+        ev = ledger_map.get(port.to_symbol())
+        return bool(ev and getattr(ev, "has_terminal_telomere", False))
+
+    def _is_core(name: str) -> bool:
+        return (name in stem_names or _get_usco_count(ledger_map, name) > 0) and not _is_contam_unitig(ledger_map, name)
+
+    seen_pde_stems = {
+        (rec.left_anchor_port.rstrip("+-"), rec.side)
+        for rec in (active_resolutions or [])
+        if rec.resolution_type == ResolutionType.PDE_TERMINAL_CAP and rec.left_anchor_port
+    }
+
     seen_bridges: set[str] = set()
     for j in junctions:
         if j.germline_continuation_port:
@@ -315,14 +330,67 @@ def build_scaffolds(
                     )
                     active_resolutions.append(bridge_rec)
 
-    stem_names = {j.stem_port.rstrip("+-") for j in junctions}
+                if active_resolutions is not None:
+                    for j_elem in (j, j2):
+                        j_key = (j_elem.chrom, j_elem.side)
+                        if j_key not in seen_pde_stems:
+                            seen_pde_stems.add(j_key)
+                            som_excl = (
+                                (j_elem.somatic_terminus_port.rstrip("+-"),) if j_elem.somatic_terminus_port else ()
+                            )
+                            j_fid = build_feature_id(
+                                ResolutionType.PDE_TERMINAL_CAP, j_elem.chrom, j_elem.side, index=1
+                            )
+                            j_rec = ResolutionRecord(
+                                feature_id=j_fid,
+                                chrom=j_elem.chrom,
+                                side=j_elem.side,
+                                resolution_type=ResolutionType.PDE_TERMINAL_CAP,
+                                left_anchor_port=j_elem.stem_port,
+                                right_anchor_port=j_elem.germline_continuation_port,
+                                unitig_ids=(_parse_port(j_elem.germline_continuation_port).name,)
+                                if j_elem.germline_continuation_port
+                                else (),
+                                excluded_unitig_ids=som_excl,
+                                core_coverage_bp_median=(
+                                    graph.segments[j_elem.chrom].depth if j_elem.chrom in graph.segments else None
+                                ),
+                                notes=(
+                                    f"Resolved PDE junction via germline continuation "
+                                    f"{j_elem.germline_continuation_port}; dismissed somatic sister stub "
+                                    f"{j_elem.somatic_terminus_port or ''}"
+                                ),
+                            )
+                            active_resolutions.append(j_rec)
 
-    def _has_telomere(port: SegmentPort) -> bool:
-        ev = ledger_map.get(port.to_symbol())
-        return bool(ev and getattr(ev, "has_terminal_telomere", False))
-
-    def _is_core(name: str) -> bool:
-        return (name in stem_names or _get_usco_count(ledger_map, name) > 0) and not _is_contam_unitig(ledger_map, name)
+    if active_resolutions is not None:
+        for j in junctions:
+            j_key = (j.chrom, j.side)
+            if j_key not in seen_pde_stems and j.germline_continuation_port:
+                gp = _parse_port(j.germline_continuation_port)
+                cap_path = _trace_germline_chain(graph, ledger_map, gp, max_hops)
+                if cap_path and _has_telomere(cap_path[-1]):
+                    seen_pde_stems.add(j_key)
+                    som_excl = (j.somatic_terminus_port.rstrip("+-"),) if j.somatic_terminus_port else ()
+                    j_fid = build_feature_id(ResolutionType.PDE_TERMINAL_CAP, j.chrom, j.side, index=1)
+                    j_rec = ResolutionRecord(
+                        feature_id=j_fid,
+                        chrom=j.chrom,
+                        side=j.side,
+                        resolution_type=ResolutionType.PDE_TERMINAL_CAP,
+                        left_anchor_port=j.stem_port,
+                        right_anchor_port=cap_path[-1].to_symbol(),
+                        unitig_ids=tuple(p.name for p in cap_path),
+                        excluded_unitig_ids=som_excl,
+                        core_coverage_bp_median=(graph.segments[j.chrom].depth if j.chrom in graph.segments else None),
+                        notes=(
+                            f"Resolved terminal PDE junction via germline continuation chain "
+                            f"{' -> '.join(p.to_symbol() for p in cap_path)} to telomeric cap "
+                            f"{cap_path[-1].to_symbol()}; dismissed somatic sister stub "
+                            f"{j.somatic_terminus_port or ''}"
+                        ),
+                    )
+                    active_resolutions.append(j_rec)
 
     consumed: set[str] = set()
     if active_resolutions is not None:

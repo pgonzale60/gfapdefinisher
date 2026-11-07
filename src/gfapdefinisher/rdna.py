@@ -11,7 +11,7 @@ at verified distal telomeric caps.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -45,6 +45,16 @@ def _is_45s_hit(hit: BarrnapHit) -> bool:
     """Return True ONLY if not prokaryotic rRNA and hit product contains 18S, 5.8S, or 28S."""
     prod = getattr(hit, "product", getattr(hit, "feature_name", ""))
     return (not _is_prokaryotic_rRNA(hit)) and any(sub in prod for sub in ("18S", "5.8S", "28S"))
+
+
+def is_rdna_unitig(
+    seg_or_port: SegmentPort | str,
+    ledger: Mapping[str, Any] | None = None,
+    annotations: Mapping[str, NodeAnnotations] | None = None,
+) -> bool:
+    """Check whether a segment or port carries 45S ribosomal RNA gene features."""
+    resolver = RdnaCassetteResolver(BidirectedGraph(), ledger or {}, annotations=annotations)
+    return resolver.is_rdna_unitig(seg_or_port)
 
 
 @dataclass(slots=True)
