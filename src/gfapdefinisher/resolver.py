@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import gzip
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
+from gfapdefinisher.emitter import DEFAULT_AGP_POLICY, AgpPolicy
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY, Policy
 from gfapdefinisher.quirks import (
@@ -223,6 +224,41 @@ class SatelliteGapResolution:
     representative_read: SpanningRead | None = None
     representative_sequence: str | None = None
     distribution: GapDistribution | None = None
+
+    @property
+    def left_flank_port(self) -> SegmentPort | None:
+        if self.quirk_record and self.quirk_record.left_anchor_port:
+            name, strand = _parse_port_spec(self.quirk_record.left_anchor_port)
+            return SegmentPort(name, strand)
+        return None
+
+    @property
+    def right_flank_port(self) -> SegmentPort | None:
+        if self.quirk_record and self.quirk_record.right_anchor_port:
+            name, strand = _parse_port_spec(self.quirk_record.right_anchor_port)
+            return SegmentPort(name, strand)
+        return None
+
+    @property
+    def patched_sequence(self) -> str | None:
+        return self.representative_sequence
+
+    @property
+    def median_gap_bp(self) -> float:
+        if self.quirk_record and self.quirk_record.length_median_bp is not None:
+            return float(self.quirk_record.length_median_bp)
+        return float(DEFAULT_AGP_POLICY.unknown_gap_bp.value)
+
+    @property
+    def gap_index(self) -> int:
+        if self.quirk_record and self.quirk_record.feature_id:
+            parts = self.quirk_record.feature_id.split(":")
+            if len(parts) > 2 and parts[-1].isdigit():
+                return int(parts[-1])
+        return 1
+
+
+GapResolution = SatelliteGapResolution
 
 
 def load_reads_sequences(
@@ -824,6 +860,174 @@ class OntBridgingEngine:
                 ]
                 quirks.append(res1.quirk_record)
                 quirks.append(res2.quirk_record)
+                break
+
+        end_states, quirks = self.resolve_subtelomeric_satellite_caps(
+            end_states=end_states,
+            quirks=quirks,
+            orphan_caps=orphan_caps,
+            used_cap_segs=used_cap_segs,
+            resolved_end_keys=resolved_end_keys,
+        )
+
+        return end_states, quirks
+
+    def resolve_subtelomeric_satellite_caps(
+        self,
+        end_states: list[EndStateRecord],
+        quirks: list[QuirkRecord],
+        orphan_caps: dict[str, tuple[str, str]] | None = None,
+        used_cap_segs: set[str] | None = None,
+        resolved_end_keys: set[tuple[str, str]] | None = None,
+    ) -> tuple[list[EndStateRecord], list[QuirkRecord]]:
+        """Resolve remaining unresolved ends whose distal tip terminates in a tandem satellite repeat matching an orphan cap."""
+        if self.graph is None:
+            return end_states, quirks
+        if orphan_caps is None:
+            orphan_caps = self.identify_orphan_caps()
+        if used_cap_segs is None:
+            used_cap_segs = set()
+        if resolved_end_keys is None:
+            resolved_end_keys = set()
+            for er in end_states:
+                if er.resolved:
+                    resolved_end_keys.add((er.chrom, er.side))
+                    if hasattr(er, "segment_id"):
+                        resolved_end_keys.add((er.segment_id, er.side))
+
+        window = self.policy.ont.min_anchor_bp.value * 2
+        k = (2 + 2 + 1) * (2 + 1)
+        min_repeats = 2 + 2 + 1
+        floor = self.policy.ont.min_spanning_reads.value
+        unknown_gap = getattr(self.policy, "agp", AgpPolicy()).unknown_gap_bp.value
+        canonical_fwd = self.policy.telomere.motif_forward.value
+        canonical_rev = self.policy.telomere.motif_reverse.value
+
+        for er in list(end_states):
+            end_key = (getattr(er, "segment_id", er.chrom), er.side)
+            if (
+                er.resolved
+                or er.germline_port is None
+                or end_key in resolved_end_keys
+                or (er.chrom, er.side) in resolved_end_keys
+            ):
+                continue
+
+            anchor_name, anchor_strand = _parse_port_spec(er.germline_port)
+            anchor_port = SegmentPort(anchor_name, anchor_strand)
+            anchor_seg = self.graph.segments.get(anchor_name)
+            if anchor_seg is None or not anchor_seg.sequence:
+                continue
+
+            anchor_seq = (
+                anchor_seg.sequence if anchor_strand == Strand.FORWARD else reverse_complement(anchor_seg.sequence)
+            )
+            if len(anchor_seq) < window:
+                continue
+
+            tip_seq = anchor_seq[-window:]
+            kmers = Counter(tip_seq[i : i + k] for i in range(len(tip_seq) - k + 1))
+            if not kmers:
+                continue
+            top_kmer, top_cnt = kmers.most_common(1)[0]
+            if top_cnt < min_repeats:
+                continue
+            if canonical_fwd in top_kmer or canonical_rev in top_kmer:
+                continue
+
+            rc_top = reverse_complement(top_kmer)
+
+            for cap_id in sorted(orphan_caps.keys() - used_cap_segs):
+                cap_seg = self.graph.segments.get(cap_id)
+                if cap_seg is None or not cap_seg.sequence:
+                    continue
+
+                cap_seq = cap_seg.sequence
+                cnt_in_cap = cap_seq.count(top_kmer) + cap_seq.count(rc_top)
+                if cnt_in_cap < floor:
+                    continue
+
+                cap_tel_port, _ = orphan_caps[cap_id]
+                cap_tel_name, cap_tel_strand = _parse_port_spec(cap_tel_port)
+                cap_port = SegmentPort(cap_tel_name, cap_tel_strand)
+
+                feature_id_quirk = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, er.chrom, er.side, index=1)
+                feature_id_end = build_feature_id(EndState.END_COMPLETE, er.chrom, er.side)
+
+                quirk_record = QuirkRecord(
+                    feature_id=feature_id_quirk,
+                    chrom=er.chrom,
+                    side=er.side,
+                    quirk_type=IntervalQuirk.SAT_GAP_VARIABLE,
+                    spanning_read_count=0,
+                    length_min_bp=unknown_gap,
+                    length_median_bp=unknown_gap,
+                    length_max_bp=unknown_gap,
+                    length_iqr_bp=0,
+                    repeat_monomer_len_bp=None,
+                    copy_number_range=None,
+                    left_anchor_port=anchor_port.to_symbol(),
+                    right_anchor_port=cap_port.to_symbol(),
+                    agp_component_type="U",
+                    agp_linkage_evidence="paired-ends",
+                    unitig_ids=(anchor_name, cap_id),
+                    read_count=0,
+                    core_coverage_bp_median=er.core_coverage_bp_median,
+                    core_depth_ratio=er.germline_depth_ratio,
+                    representative_sequence_selected=False,
+                    sequence_provenance="HiFi-germline",
+                    unpolished=False,
+                    notes="Resolved via subtelomeric satellite capping heuristic; unbridged repeat gap (type U)",
+                )
+
+                end_state_record = EndStateRecord(
+                    feature_id=feature_id_end,
+                    chrom=er.chrom,
+                    side=er.side,
+                    state=EndState.END_COMPLETE,
+                    somatic_port=er.somatic_port,
+                    germline_port=cap_port.to_symbol(),
+                    shared_port=None,
+                    core_coverage_bp_median=er.core_coverage_bp_median,
+                    somatic_depth_ratio=er.somatic_depth_ratio,
+                    germline_depth_ratio=er.germline_depth_ratio,
+                    resolved=True,
+                    notes=f"Resolved via subtelomeric satellite capping heuristic to orphan cap {cap_id}",
+                )
+
+                res = SatelliteGapResolution(
+                    chrom=er.chrom,
+                    side=er.side,
+                    state=EndState.END_COMPLETE,
+                    quirk_record=quirk_record,
+                    end_state_record=end_state_record,
+                    spanning_reads=[],
+                    representative_read=None,
+                    representative_sequence=None,
+                    distribution=None,
+                )
+                self.gap_resolutions.append(res)
+                resolved_end_keys.add((er.chrom, er.side))
+                if hasattr(er, "segment_id"):
+                    resolved_end_keys.add((er.segment_id, er.side))
+                used_cap_segs.add(cap_id)
+
+                new_ends = []
+                for e_rec in end_states:
+                    if e_rec.chrom == er.chrom and e_rec.side == er.side:
+                        new_ends.append(end_state_record)
+                    else:
+                        new_ends.append(e_rec)
+                end_states = new_ends
+
+                quirks = [
+                    q
+                    for q in quirks
+                    if not (
+                        q.chrom == er.chrom and q.side == er.side and q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE
+                    )
+                ]
+                quirks.append(quirk_record)
                 break
 
         return end_states, quirks

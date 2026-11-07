@@ -19,7 +19,9 @@ from gfapdefinisher.policy.models import PolicyValue
 
 __all__ = [
     "AgpGapRow",
+    "AgpPolicy",
     "AgpRecord",
+    "DEFAULT_AGP_POLICY",
     "FastaAgpEmitter",
     "PathComponent",
     "ScaffoldPlan",
@@ -43,6 +45,9 @@ class AgpPolicy:
         justification="Standard AGP v2.1 gap length for unknown gaps (type U, repeat/tangle).",
         provenance="NCBI AGP specification v2.1 standard convention",
     )
+
+
+DEFAULT_AGP_POLICY = AgpPolicy()
 
 
 class SequenceProvenance(str, Enum):
@@ -73,30 +78,81 @@ class PathComponent:
         overlap_to_next_bp: Exact dovetail overlap length to next component in bp.
         sequence_provenance: Empirical provenance category.
         unpolished: Whether sequence is unpolished raw long-read data.
+        is_gap: Whether this component represents an unsequenced AGP gap.
+        gap_length: Length of gap in bp.
+        gap_type: AGP gap type (e.g. 'repeat', 'scaffold').
+        linkage: AGP linkage flag ('yes' or 'no').
+        linkage_evidence: AGP linkage evidence (e.g. 'rna_tangle', 'paired-ends').
+        gap_component_type: AGP component designation ('N' or 'U').
     """
 
-    segment_id: str
-    strand: Strand | str
-    sequence: str
+    segment_id: str = ""
+    strand: Strand | str = "+"
+    sequence: str = ""
     overlap_to_next_bp: int = 0
     sequence_provenance: SequenceProvenance = SequenceProvenance.HIFI_CORE
     unpolished: bool = False
+    is_gap: bool = False
+    gap_length: int = 0
+    gap_type: str = "scaffold"
+    linkage: str = "yes"
+    linkage_evidence: str = "paired-ends"
+    gap_component_type: str = "N"
 
-    def __post_init__(self) -> None:
-        if not self.segment_id:
+    def __init__(
+        self,
+        segment_id: str | None = None,
+        strand: Strand | str = "+",
+        sequence: str = "",
+        overlap_to_next_bp: int = 0,
+        sequence_provenance: SequenceProvenance | str = SequenceProvenance.HIFI_CORE,
+        unpolished: bool = False,
+        *,
+        component_id: str | None = None,
+        overlap_to_next: int | None = None,
+        provenance: SequenceProvenance | str | None = None,
+        is_gap: bool = False,
+        gap_length: int = 0,
+        gap_type: str = "scaffold",
+        linkage: str = "yes",
+        linkage_evidence: str = "paired-ends",
+        gap_component_type: str = "N",
+    ) -> None:
+        seg_id = segment_id if segment_id is not None else (component_id or "")
+        ov = overlap_to_next if overlap_to_next is not None else overlap_to_next_bp
+        prov = provenance if provenance is not None else sequence_provenance
+        if is_gap and not sequence and gap_length > 0:
+            sequence = "N" * gap_length
+
+        if not seg_id and not is_gap:
             raise ValueError("segment_id cannot be empty.")
-        if isinstance(self.strand, Strand):
-            object.__setattr__(self, "strand", self.strand.value)
-        elif self.strand not in ("+", "-"):
-            raise ValueError(f"Invalid strand: {self.strand!r}. Must be '+' or '-'.")
-        if self.overlap_to_next_bp < 0:
-            raise ValueError(f"overlap_to_next_bp cannot be negative: {self.overlap_to_next_bp}")
-        if self.overlap_to_next_bp > len(self.sequence):
-            raise ValueError(
-                f"overlap_to_next_bp ({self.overlap_to_next_bp}) cannot exceed sequence length ({len(self.sequence)})."
-            )
-        if isinstance(self.sequence_provenance, str) and not isinstance(self.sequence_provenance, SequenceProvenance):
-            object.__setattr__(self, "sequence_provenance", SequenceProvenance(self.sequence_provenance))
+        if not seg_id and is_gap:
+            seg_id = "gap"
+
+        strand_val = strand.value if isinstance(strand, Strand) else strand
+        if strand_val not in ("+", "-"):
+            raise ValueError(f"Invalid strand: {strand!r}. Must be '+' or '-'.")
+
+        if ov < 0:
+            raise ValueError(f"overlap_to_next_bp cannot be negative: {ov}")
+        if not is_gap and ov > len(sequence):
+            raise ValueError(f"overlap_to_next_bp ({ov}) cannot exceed sequence length ({len(sequence)}).")
+
+        if isinstance(prov, str) and not isinstance(prov, SequenceProvenance):
+            prov = SequenceProvenance(prov)
+
+        object.__setattr__(self, "segment_id", seg_id)
+        object.__setattr__(self, "strand", strand_val)
+        object.__setattr__(self, "sequence", sequence)
+        object.__setattr__(self, "overlap_to_next_bp", ov)
+        object.__setattr__(self, "sequence_provenance", prov)
+        object.__setattr__(self, "unpolished", unpolished)
+        object.__setattr__(self, "is_gap", is_gap)
+        object.__setattr__(self, "gap_length", gap_length if gap_length > 0 else len(sequence))
+        object.__setattr__(self, "gap_type", gap_type)
+        object.__setattr__(self, "linkage", linkage)
+        object.__setattr__(self, "linkage_evidence", linkage_evidence)
+        object.__setattr__(self, "gap_component_type", gap_component_type)
 
     @property
     def is_unpolished(self) -> bool:
@@ -210,10 +266,39 @@ def assemble_scaffold_sequence(
     current_scaffold_pos = 1
     part_number = 1
     chunks: list[str] = []
-    records: list[AgpRecord] = []
+    records: list[AgpRecord | AgpGapRow] = []
     prev_overlap = 0
 
     for comp in components:
+        if comp.is_gap:
+            gap_len = comp.gap_length if comp.gap_length > 0 else len(comp.sequence)
+            chunks.append("N" * gap_len)
+            obj_beg = current_scaffold_pos
+            obj_end = current_scaffold_pos + gap_len - 1
+            current_scaffold_pos = obj_end + 1
+            comp_type = comp.gap_component_type
+            if (
+                comp_type == "N"
+                and gap_len == DEFAULT_AGP_POLICY.unknown_gap_bp.value
+                and comp.linkage_evidence in ("rna_tangle", "paired-ends")
+            ):
+                comp_type = "U"
+            row = AgpGapRow(
+                object_id=scaffold_id,
+                object_beg=obj_beg,
+                object_end=obj_end,
+                part_number=part_number,
+                component_type=comp_type,
+                gap_length=gap_len,
+                gap_type=comp.gap_type,
+                linkage=comp.linkage,
+                linkage_evidence=comp.linkage_evidence,
+            )
+            records.append(row)
+            part_number += 1
+            prev_overlap = 0
+            continue
+
         strand_str = comp.strand if isinstance(comp.strand, str) else comp.strand.value
         seq_len = len(comp.sequence)
         prefix_trim = prev_overlap
