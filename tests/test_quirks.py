@@ -826,12 +826,18 @@ def test_benchmark_df5120_collect_features_intercalary_grs_bridges():
     assert rec_4_3p.state == EndState.END_SOMATIC_MISSING
     assert rec_4_3p.resolved is False
 
-    # 3. Only the 3 genuine terminal SAT_GAP_VARIABLE quirks are emitted
+    # 3. Chr II 3p utg000013l:3p reaches distal telomere cap utg000205l+ via utg000033l- and is END_COMPLETE
+    assert ("utg000013l", "3p") in end_map
+    rec_13_3p = end_map[("utg000013l", "3p")]
+    assert rec_13_3p.state == EndState.END_COMPLETE
+    assert rec_13_3p.resolved is True
+    assert rec_13_3p.germline_port == "utg000033l-"
+
+    # 4. Only the 2 genuine terminal SAT_GAP_VARIABLE quirks are emitted
     sat_gap_quirks = [q for q in quirk_recs if q.quirk_type == IntervalQuirk.SAT_GAP_VARIABLE]
     sat_gap_ends = {(q.chrom, q.side) for q in sat_gap_quirks}
     assert sat_gap_ends == {
         ("utg000002l", "5p"),
         ("utg000009l", "5p"),
-        ("utg000013l", "3p"),
     }
-    assert len(sat_gap_quirks) == 3
+    assert len(sat_gap_quirks) == 2

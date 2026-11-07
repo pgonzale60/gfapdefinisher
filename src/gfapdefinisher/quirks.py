@@ -763,6 +763,73 @@ def create_junction_record(
     )
 
 
+def _reaches_germline_telomere_cap(
+    graph: BidirectedGraph,
+    ledger_by_port: Mapping[Any, EndEvidence],
+    start_port: SegmentPort,
+    max_hops: int,
+) -> list[SegmentPort] | None:
+    """Bounded walk from a germline entry port to identify an authentic terminal telomeric cap."""
+
+    def _is_contaminant(name: str) -> bool:
+        contam_classes = ("bacteria", "archaea", "prokarya", "contaminant")
+        for key in (f"{name}+", f"{name}-", f"{name}:5p", f"{name}:3p", name):
+            ev = ledger_by_port.get(key)
+            if ev is not None:
+                if getattr(ev, "is_contaminant", False):
+                    return True
+                cls_str = str(getattr(ev, "tiara_class", "")).lower().strip()
+                if cls_str in contam_classes:
+                    return True
+        return False
+
+    def _get_usco(name: str) -> int:
+        for key in (f"{name}+", f"{name}-", f"{name}:5p", f"{name}:3p", name):
+            ev = ledger_by_port.get(key)
+            if ev is not None and getattr(ev, "usco_hit_count", 0) > 0:
+                return ev.usco_hit_count
+        return 0
+
+    ev_start = _lookup_evidence(ledger_by_port, start_port)
+    if ev_start is not None and ev_start.has_terminal_telomere:
+        deg = graph.degree(start_port) if start_port.name in graph.segments else ev_start.degree
+        if deg == 0:
+            return [start_port]
+
+    if start_port.name not in graph.segments:
+        return None
+
+    queue: list[tuple[SegmentPort, list[SegmentPort]]] = [(start_port, [start_port])]
+    visited: set[SegmentPort] = {start_port}
+
+    while queue:
+        curr, path = queue.pop(0)
+        if len(path) - 1 >= max_hops:
+            continue
+
+        neighbors = (
+            list(graph.neighbors(curr))
+            if hasattr(graph, "neighbors")
+            else [e.to_port for e in graph.get_outgoing(curr)]
+        )
+
+        for nxt in neighbors:
+            if nxt in visited:
+                continue
+            if _get_usco(nxt.name) != 0 or _is_contaminant(nxt.name):
+                continue
+
+            nxt_ev = _lookup_evidence(ledger_by_port, nxt)
+            nxt_deg = graph.degree(nxt) if nxt.name in graph.segments else (nxt_ev.degree if nxt_ev else 0)
+            if nxt_ev is not None and nxt_ev.has_terminal_telomere and nxt_deg == 0:
+                return [*path, nxt]
+
+            visited.add(nxt)
+            queue.append((nxt, [*path, nxt]))
+
+    return None
+
+
 def collect_features(
     graph: BidirectedGraph,
     ledger: Sequence[EndEvidence] | Mapping[Any, EndEvidence],
@@ -840,17 +907,23 @@ def collect_features(
 
         is_som_dropout = getattr(pde_call, "is_somatic_dropout", False)
         som_capped = (not is_som_dropout) and (pde_call.somatic_port is not None)
-        germ_ev = _lookup_evidence(ledger_by_port, pde_call.germline_port) if pde_call.germline_port else None
-        germ_capped = (
-            pde_call.germline_port is not None
-            and germ_ev is not None
-            and germ_ev.has_terminal_telomere
-            and (
-                graph.degree(pde_call.germline_port) == 0
-                if pde_call.germline_port.name in graph.segments
-                else germ_ev.is_tip
+        germ_cap_path: list[SegmentPort] | None = None
+        if pde_call.germline_port is not None:
+            max_bubble_hops = (
+                policy.graph.max_bubble_search_hops.value
+                if hasattr(policy, "graph") and hasattr(policy.graph, "max_bubble_search_hops")
+                else policy.pde.max_somatic_cap_hops.value
             )
-        )
+            germ_cap_path = _reaches_germline_telomere_cap(
+                graph=graph,
+                ledger_by_port=ledger_by_port,
+                start_port=pde_call.germline_port,
+                max_hops=max_bubble_hops,
+            )
+        germ_capped = germ_cap_path is not None
+        if germ_cap_path:
+            for gp in germ_cap_path:
+                accounted_ports.add(gp.to_symbol())
 
         germ_intercalary = False
         if pde_call.germline_port is not None and pde_call.germline_port.name in graph.segments and not germ_capped:

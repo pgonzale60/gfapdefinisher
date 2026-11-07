@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from gfapdefinisher.annotations import aggregate_node_annotations
-from gfapdefinisher.cigar import cigar_query_consumption
-from gfapdefinisher.classifier import compute_core_coverage
+from gfapdefinisher.cigar import parse_dovetail_overlap_len
+from gfapdefinisher.classifier import _lookup_evidence, compute_core_coverage
 from gfapdefinisher.emitter import (
     AgpRecord,
     PathComponent,
@@ -22,10 +22,12 @@ from gfapdefinisher.emitter import (
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import build_end_evidence_ledger, emit_tsv_ledger
 from gfapdefinisher.models import SegmentPort, Strand
+from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.quirks import (
     EndState,
     EndStateRecord,
     IntervalQuirk,
+    JunctionRecord,
     QuirkRecord,
     collect_features,
     emit_end_states_tsv,
@@ -127,6 +129,82 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_port(p_str: str) -> SegmentPort:
+    name, strand = _parse_port_spec(p_str)
+    return SegmentPort(name, strand)
+
+
+def _find_overlap_len(graph: BidirectedGraph, from_port: SegmentPort, to_port: SegmentPort) -> int:
+    """Find effective overlap length from from_port to to_port in dovetail edges."""
+    edges = graph.edges_from(from_port) if hasattr(graph, "edges_from") else graph.get_outgoing(from_port)
+    for e in edges:
+        if e.to_port == to_port:
+            return parse_dovetail_overlap_len(e.cigar) if (e.cigar and e.cigar != "*") else e.overlap_len
+    return 0
+
+
+def _trace_germline_chain(
+    graph: BidirectedGraph,
+    ledger_map: Mapping[str, Any],
+    germ_port: SegmentPort,
+    max_hops: int,
+) -> list[SegmentPort]:
+    """Trace outward germline continuation unitigs to an authentic terminal telomeric cap."""
+
+    def _is_contam(name: str) -> bool:
+        contam_classes = ("bacteria", "archaea", "prokarya", "contaminant")
+        for key in (f"{name}+", f"{name}-", f"{name}:5p", f"{name}:3p", name):
+            ev = ledger_map.get(key)
+            if ev is not None:
+                if getattr(ev, "is_contaminant", False):
+                    return True
+                cls_str = str(getattr(ev, "tiara_class", "")).lower().strip()
+                if cls_str in contam_classes:
+                    return True
+        return False
+
+    def _get_usco(name: str) -> int:
+        for key in (f"{name}+", f"{name}-", f"{name}:5p", f"{name}:3p", name):
+            ev = ledger_map.get(key)
+            if ev is not None and getattr(ev, "usco_hit_count", 0) > 0:
+                return ev.usco_hit_count
+        return 0
+
+    ev = _lookup_evidence(ledger_map, germ_port)
+    deg = graph.degree(germ_port) if germ_port.name in graph.segments else (ev.degree if ev else 0)
+    if ev is not None and ev.has_terminal_telomere and deg == 0:
+        return [germ_port]
+
+    if germ_port.name not in graph.segments:
+        return [germ_port]
+
+    queue: list[tuple[SegmentPort, list[SegmentPort]]] = [(germ_port, [germ_port])]
+    visited: set[SegmentPort] = {germ_port}
+
+    while queue:
+        curr, path = queue.pop(0)
+        if len(path) - 1 >= max_hops:
+            continue
+
+        edges = graph.edges_from(curr) if hasattr(graph, "edges_from") else graph.get_outgoing(curr)
+        for e in edges:
+            nxt = e.to_port
+            if nxt in visited:
+                continue
+            if _get_usco(nxt.name) != 0 or _is_contam(nxt.name):
+                continue
+
+            nxt_ev = _lookup_evidence(ledger_map, nxt)
+            nxt_deg = graph.degree(nxt) if nxt.name in graph.segments else (nxt_ev.degree if nxt_ev else 0)
+            if nxt_ev is not None and nxt_ev.has_terminal_telomere and nxt_deg == 0:
+                return [*path, nxt]
+
+            visited.add(nxt)
+            queue.append((nxt, [*path, nxt]))
+
+    return [germ_port]
+
+
 def build_scaffolds(
     graph: BidirectedGraph,
     ledger_map: Mapping[str, Any],
@@ -136,6 +214,7 @@ def build_scaffolds(
     dropout_resolutions: Sequence[tuple[QuirkRecord, EndStateRecord, str | None]],
     rdna_resolutions: Sequence[RdnaResolution],
     prefix: str = "",
+    junctions: Sequence[JunctionRecord] = (),
 ) -> tuple[dict[str, str], list[AgpRecord]]:
     """Assemble scaffold sequences and AGP v2.1 records with empirical provenance."""
     rdna_5p: dict[str, RdnaResolution] = {}
@@ -159,6 +238,56 @@ def build_scaffolds(
         if dseq:
             dropout_by_anchor[erec.chrom] = (qrec, erec, dseq)
 
+    junctions_by_stem: dict[str, JunctionRecord] = {j.stem_port: j for j in junctions}
+    junctions_by_germ: dict[str, JunctionRecord] = {
+        j.germline_continuation_port: j for j in junctions if j.germline_continuation_port
+    }
+    max_hops = DEFAULT_POLICY.pde.max_somatic_cap_hops.value
+
+    # Identify intercalary bridge linkages between stems
+    bridge_forward: dict[SegmentPort, tuple[SegmentPort, SegmentPort]] = {}
+    has_incoming_bridge: set[SegmentPort] = set()
+
+    for j in junctions:
+        if j.germline_continuation_port:
+            stem_p = _parse_port(j.stem_port)
+            gp = _parse_port(j.germline_continuation_port)
+            gp_inv_sym = gp.invert().to_symbol()
+            if gp_inv_sym in junctions_by_germ:
+                j2 = junctions_by_germ[gp_inv_sym]
+                next_stem_p = _parse_port(j2.stem_port).invert()
+                bridge_forward[stem_p] = (gp, next_stem_p)
+                has_incoming_bridge.add(next_stem_p)
+
+    chain_by_seg: dict[str, list[SegmentPort]] = {}
+    bridge_seg_names: set[str] = set()
+    seen_chain_segs: set[str] = set()
+
+    for start_p in bridge_forward:
+        if start_p not in has_incoming_bridge:
+            if start_p.strand != Strand.FORWARD and any(
+                p.strand == Strand.FORWARD for p in bridge_forward if p not in has_incoming_bridge
+            ):
+                continue
+            chain: list[SegmentPort] = [start_p]
+            curr = start_p
+            visited_stems: set[str] = {start_p.name}
+            while curr in bridge_forward:
+                bridge_p, next_stem = bridge_forward[curr]
+                if next_stem.name in visited_stems:
+                    break
+                chain.append(bridge_p)
+                chain.append(next_stem)
+                bridge_seg_names.add(bridge_p.name)
+                visited_stems.add(next_stem.name)
+                curr = next_stem
+            seg_set = {p.name for p in chain}
+            if seg_set & seen_chain_segs:
+                continue
+            seen_chain_segs.update(seg_set)
+            for p in chain:
+                chain_by_seg[p.name] = chain
+
     consumed: set[str] = set()
     for r in rdna_resolutions:
         if len(r.path) > 1:
@@ -179,20 +308,23 @@ def build_scaffolds(
 
         comps: list[PathComponent] = []
 
+        if seg_name in chain_by_seg:
+            core_path = chain_by_seg[seg_name]
+        else:
+            core_path = [SegmentPort(seg_name, Strand.FORWARD)]
+
+        first_port = core_path[0]
+        last_port = core_path[-1]
+
         # 5p rDNA resolution
-        if seg_name in rdna_5p:
-            r = rdna_5p[seg_name]
+        if first_port.name in rdna_5p:
+            r = rdna_5p[first_port.name]
             twin_path = [p.invert() for p in reversed(r.path)]
-            for i, port in enumerate(twin_path):
+            for i, port in enumerate(twin_path[:-1]):
                 p_seg = graph.segments[port.name]
                 p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
-                overlap = 0
-                if i < len(twin_path) - 1:
-                    nxt = twin_path[i + 1]
-                    for e in graph.get_outgoing(port):
-                        if e.to_port == nxt:
-                            overlap = cigar_query_consumption(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
-                            break
+                nxt_port = twin_path[i + 1] if i < len(twin_path) - 2 else first_port
+                overlap = _find_overlap_len(graph, port, nxt_port)
                 prov = (
                     SequenceProvenance.RDNA_CHAINED
                     if (
@@ -211,40 +343,63 @@ def build_scaffolds(
                         sequence_provenance=prov,
                     )
                 )
-                if port.name != seg_name:
-                    consumed.add(port.name)
+                consumed.add(port.name)
         else:
+            # 5p germline continuation extension
+            first_inv = first_port.invert()
+            g_chain_5p: list[SegmentPort] = []
+            if first_inv.to_symbol() in junctions_by_stem:
+                j_5p = junctions_by_stem[first_inv.to_symbol()]
+                if j_5p.germline_continuation_port:
+                    gp_5p = _parse_port(j_5p.germline_continuation_port)
+                    g_chain_5p = _trace_germline_chain(graph, ledger_map, gp_5p, max_hops)
+
+            prefix_ports = [p.invert() for p in reversed(g_chain_5p)]
+            for i, port in enumerate(prefix_ports):
+                nxt_port = prefix_ports[i + 1] if i < len(prefix_ports) - 1 else first_port
+                overlap = _find_overlap_len(graph, port, nxt_port)
+                p_seg = graph.segments[port.name]
+                p_seq = p_seg.sequence if p.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
+                comps.append(
+                    PathComponent(
+                        segment_id=port.name,
+                        strand=p.strand.to_symbol(),
+                        sequence=p_seq,
+                        overlap_to_next_bp=overlap,
+                        sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+                    )
+                )
+                consumed.add(port.name)
+
+        # Core path
+        for i, port in enumerate(core_path):
+            overlap = _find_overlap_len(graph, port, core_path[i + 1]) if i < len(core_path) - 1 else 0
+            p_seg = graph.segments[port.name]
+            p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
+            prov = SequenceProvenance.HIFI_GERMLINE if port.name in bridge_seg_names else SequenceProvenance.HIFI_CORE
             comps.append(
                 PathComponent(
-                    segment_id=seg_name,
-                    strand="+",
-                    sequence=seg.sequence,
-                    overlap_to_next_bp=0,
-                    sequence_provenance=SequenceProvenance.HIFI_CORE,
+                    segment_id=port.name,
+                    strand=port.strand.to_symbol(),
+                    sequence=p_seq,
+                    overlap_to_next_bp=overlap,
+                    sequence_provenance=prov,
                 )
             )
+            consumed.add(port.name)
 
         # 3p rDNA resolution
-        if seg_name in rdna_3p:
-            r = rdna_3p[seg_name]
-            overlap = 0
-            for e in graph.get_outgoing(r.path[0]):
-                if e.to_port == r.path[1]:
-                    overlap = cigar_query_consumption(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
-                    break
+        g_chain_3p: list[SegmentPort] = []
+        if last_port.name in rdna_3p:
+            r = rdna_3p[last_port.name]
+            overlap = _find_overlap_len(graph, r.path[0], r.path[1])
             comps[-1].overlap_to_next_bp = overlap
 
             for i in range(1, len(r.path)):
                 port = r.path[i]
                 p_seg = graph.segments[port.name]
                 p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
-                nxt_ov = 0
-                if i < len(r.path) - 1:
-                    nxt = r.path[i + 1]
-                    for e in graph.get_outgoing(port):
-                        if e.to_port == nxt:
-                            nxt_ov = cigar_query_consumption(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
-                            break
+                nxt_ov = _find_overlap_len(graph, port, r.path[i + 1]) if i < len(r.path) - 1 else 0
                 prov = SequenceProvenance.HIFI_GERMLINE if i == len(r.path) - 1 else SequenceProvenance.RDNA_CHAINED
                 comps.append(
                     PathComponent(
@@ -256,16 +411,74 @@ def build_scaffolds(
                     )
                 )
                 consumed.add(port.name)
+        elif last_port.name in dropout_by_anchor:
+            # Somatic dropout rescue
+            dqrec, derec, dseq = dropout_by_anchor[last_port.name]
+            g_sym = derec.germline_port
+            if g_sym:
+                g_name, g_strand = _parse_port_spec(g_sym)
+                comps.append(
+                    PathComponent(
+                        segment_id=f"{last_port.name}_ont_rescue",
+                        strand="+",
+                        sequence=dseq,
+                        overlap_to_next_bp=0,
+                        sequence_provenance=SequenceProvenance.ONT_DERIVED,
+                        unpolished=True,
+                    )
+                )
+                if g_name in graph.segments:
+                    g_seg = graph.segments[g_name]
+                    g_seq = g_seg.sequence if g_strand == Strand.FORWARD else reverse_complement(g_seg.sequence or "")
+                    comps.append(
+                        PathComponent(
+                            segment_id=g_name,
+                            strand=g_strand.to_symbol(),
+                            sequence=g_seq,
+                            overlap_to_next_bp=0,
+                            sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+                        )
+                    )
+                    consumed.add(g_name)
+        else:
+            # 3p germline continuation extension
+            if last_port.to_symbol() in junctions_by_stem:
+                j_3p = junctions_by_stem[last_port.to_symbol()]
+                if j_3p.germline_continuation_port:
+                    gp_3p = _parse_port(j_3p.germline_continuation_port)
+                    g_chain_3p = _trace_germline_chain(graph, ledger_map, gp_3p, max_hops)
+
+            if g_chain_3p:
+                comps[-1].overlap_to_next_bp = _find_overlap_len(graph, last_port, g_chain_3p[0])
+                for i, gp in enumerate(g_chain_3p):
+                    nxt_ov = _find_overlap_len(graph, gp, g_chain_3p[i + 1]) if i < len(g_chain_3p) - 1 else 0
+                    gp_seg = graph.segments[gp.name]
+                    gp_seq = (
+                        gp_seg.sequence if gp.strand == Strand.FORWARD else reverse_complement(gp_seg.sequence or "")
+                    )
+                    comps.append(
+                        PathComponent(
+                            segment_id=gp.name,
+                            strand=gp.strand.to_symbol(),
+                            sequence=gp_seq,
+                            overlap_to_next_bp=nxt_ov,
+                            sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+                        )
+                    )
+                    consumed.add(gp.name)
 
         # 3p gap resolution
-        gres = gap_by_left.get(seg_name)
-        if gres is None:
+        cand_left = g_chain_3p[-1].name if g_chain_3p else last_port.name
+        gres = gap_by_left.get(cand_left)
+        if gres is None and cand_left != last_port.name:
+            gres = gap_by_left.get(last_port.name)
+        if gres is None and not g_chain_3p:
             for e in graph.get_outgoing(SegmentPort(seg_name, Strand.FORWARD)):
                 target_seg = e.to_port.name
                 if target_seg in gap_by_left:
                     cand_gres = gap_by_left[target_seg]
                     gres = cand_gres
-                    e_ov = cigar_query_consumption(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
+                    e_ov = parse_dovetail_overlap_len(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
                     comps[-1].overlap_to_next_bp = e_ov
                     grs_seg = graph.segments[target_seg]
                     grs_seq = (
@@ -312,36 +525,6 @@ def build_scaffolds(
                     )
                 )
                 consumed.add(r_name)
-
-        # Somatic dropout rescue
-        if seg_name in dropout_by_anchor:
-            dqrec, derec, dseq = dropout_by_anchor[seg_name]
-            g_sym = derec.germline_port
-            if g_sym:
-                g_name, g_strand = _parse_port_spec(g_sym)
-                comps.append(
-                    PathComponent(
-                        segment_id=f"{seg_name}_ont_rescue",
-                        strand="+",
-                        sequence=dseq,
-                        overlap_to_next_bp=0,
-                        sequence_provenance=SequenceProvenance.ONT_DERIVED,
-                        unpolished=True,
-                    )
-                )
-                if g_name in graph.segments:
-                    g_seg = graph.segments[g_name]
-                    g_seq = g_seg.sequence if g_strand == Strand.FORWARD else reverse_complement(g_seg.sequence or "")
-                    comps.append(
-                        PathComponent(
-                            segment_id=g_name,
-                            strand=g_strand.to_symbol(),
-                            sequence=g_seq,
-                            overlap_to_next_bp=0,
-                            sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
-                        )
-                    )
-                    consumed.add(g_name)
 
         scaff_id = f"{prefix}{seg_name}" if prefix else seg_name
         seq, agp_recs = assemble_scaffold_sequence(comps, scaffold_id=scaff_id)
@@ -514,6 +697,7 @@ def run_finish(args: argparse.Namespace) -> None:
         dropout_resolutions=engine.dropout_resolutions,
         rdna_resolutions=rdna_resolutions,
         prefix=prefix,
+        junctions=junction_records,
     )
 
     fasta_target: Path

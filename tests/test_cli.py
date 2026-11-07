@@ -478,3 +478,211 @@ def test_finish_subcommand_rdna_cassette_wiring(tmp_path: Path):
     arm_recs = [r for r in agp_recs if r.object_id == "chr_arm"]
     assert len(arm_recs) == 3
     assert arm_recs[-1].object_end == 62900
+
+
+def test_build_scaffolds_stitches_pde_germline_caps():
+    """Verify build_scaffolds stitches multi-unitig PDE germline cap chains with exact dovetails."""
+    from gfapdefinisher.cli import build_scaffolds
+    from gfapdefinisher.emitter import SequenceProvenance
+    from gfapdefinisher.graph import BidirectedGraph, SegmentPort, Strand
+    from gfapdefinisher.ledger import EndEvidence
+    from gfapdefinisher.quirks import JunctionClass, JunctionRecord
+
+    graph = BidirectedGraph()
+    # chr_ii: 50 kb core stem
+    graph.add_segment("chr_ii", 50000, sequence="A" * 50000)
+    # chr_germ: 10 kb germline arm
+    graph.add_segment("chr_germ", 10000, sequence="C" * 10000)
+    # distal_cap: 5 kb distal telomeric cap
+    graph.add_segment("distal_cap", 5000, sequence="G" * 5000)
+
+    # Edge chr_ii+ -> chr_germ- (100M overlap)
+    graph.add_edge("chr_ii+", "chr_germ-", cigar="100M", l1=50000, l2=10000)
+    # Edge chr_germ- -> distal_cap+ (80M overlap)
+    graph.add_edge("chr_germ-", "distal_cap+", cigar="80M", l1=10000, l2=5000)
+
+    ledger_map = {
+        "distal_cap+": EndEvidence(
+            segment_name="distal_cap",
+            end="3p",
+            port=SegmentPort("distal_cap", Strand.FORWARD),
+            length=5000,
+            depth=6.0,
+            degree=0,
+            is_tip=True,
+            outgoing_neighbors=(),
+            has_terminal_telomere=True,
+            usco_hit_count=0,
+            tiara_class="eukarya",
+        ),
+        "chr_germ-": EndEvidence(
+            segment_name="chr_germ",
+            end="5p",
+            port=SegmentPort("chr_germ", Strand.REVERSE),
+            length=10000,
+            depth=6.0,
+            degree=1,
+            is_tip=False,
+            outgoing_neighbors=("distal_cap+",),
+            has_terminal_telomere=False,
+            usco_hit_count=0,
+            tiara_class="eukarya",
+        ),
+    }
+
+    junction = JunctionRecord(
+        feature_id="pde_terminal:chr_ii:3p",
+        chrom="chr_ii",
+        side="3p",
+        junction_class=JunctionClass.PDE_TERMINAL,
+        stem_port="chr_ii+",
+        germline_continuation_port="chr_germ-",
+    )
+
+    scaffolds, agp_recs = build_scaffolds(
+        graph=graph,
+        ledger_map=ledger_map,
+        end_states=[],
+        quirks=[],
+        gap_resolutions=[],
+        dropout_resolutions=[],
+        rdna_resolutions=[],
+        junctions=[junction],
+    )
+
+    assert "chr_ii" in scaffolds
+    # Expected length: 50000 + (10000 - 100) + (5000 - 80) = 50000 + 9900 + 4920 = 64820 bp
+    assert len(scaffolds["chr_ii"]) == 64820
+
+    chr_ii_agp = [r for r in agp_recs if r.object_id == "chr_ii"]
+    assert len(chr_ii_agp) == 3
+    assert chr_ii_agp[0].component_id == "chr_ii"
+    assert chr_ii_agp[0].sequence_provenance == SequenceProvenance.HIFI_CORE
+    assert chr_ii_agp[1].component_id == "chr_germ"
+    assert chr_ii_agp[1].sequence_provenance == SequenceProvenance.HIFI_GERMLINE
+    assert chr_ii_agp[2].component_id == "distal_cap"
+    assert chr_ii_agp[2].sequence_provenance == SequenceProvenance.HIFI_GERMLINE
+    assert chr_ii_agp[-1].object_end == 64820
+
+
+def test_build_scaffolds_stitches_intercalary_grs_bridges():
+    """Verify build_scaffolds chains stems connected by intercalary GRS bridges and adds terminal caps."""
+    from gfapdefinisher.cli import build_scaffolds
+    from gfapdefinisher.emitter import SequenceProvenance
+    from gfapdefinisher.graph import BidirectedGraph, SegmentPort, Strand
+    from gfapdefinisher.ledger import EndEvidence
+    from gfapdefinisher.quirks import JunctionClass, JunctionRecord
+
+    graph = BidirectedGraph()
+    # stem_a (40 kb), bridge_1 (10 kb), stem_b (30 kb), bridge_2 (12 kb), stem_c (20 kb)
+    # cap_5p (5 kb)
+    graph.add_segment("stem_a", 40000, sequence="A" * 40000)
+    graph.add_segment("bridge_1", 10000, sequence="C" * 10000)
+    graph.add_segment("stem_b", 30000, sequence="G" * 30000)
+    graph.add_segment("bridge_2", 12000, sequence="T" * 12000)
+    graph.add_segment("stem_c", 20000, sequence="A" * 20000)
+    graph.add_segment("cap_5p", 5000, sequence="C" * 5000)
+
+    # 5p cap: stem_a- -> cap_5p- (50M overlap), dual is cap_5p+ -> stem_a+ (50M)
+    graph.add_edge("stem_a-", "cap_5p-", cigar="50M", l1=40000, l2=5000)
+    # stem_a+ -> bridge_1- (100M overlap)
+    graph.add_edge("stem_a+", "bridge_1-", cigar="100M", l1=40000, l2=10000)
+    # bridge_1- -> stem_b+ (120M overlap)
+    graph.add_edge("bridge_1-", "stem_b+", cigar="120M", l1=10000, l2=30000)
+    # stem_b+ -> bridge_2+ (80M overlap)
+    graph.add_edge("stem_b+", "bridge_2+", cigar="80M", l1=30000, l2=12000)
+    # bridge_2+ -> stem_c+ (60M overlap)
+    graph.add_edge("bridge_2+", "stem_c+", cigar="60M", l1=12000, l2=20000)
+
+    ledger_map = {
+        "cap_5p-": EndEvidence(
+            segment_name="cap_5p",
+            end="5p",
+            port=SegmentPort("cap_5p", Strand.REVERSE),
+            length=5000,
+            depth=7.0,
+            degree=0,
+            is_tip=True,
+            outgoing_neighbors=(),
+            has_terminal_telomere=True,
+            usco_hit_count=0,
+            tiara_class="eukarya",
+        ),
+    }
+
+    junctions = [
+        JunctionRecord(
+            feature_id="pde_terminal:stem_a:5p",
+            chrom="stem_a",
+            side="5p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="stem_a-",
+            germline_continuation_port="cap_5p-",
+        ),
+        JunctionRecord(
+            feature_id="pde_terminal:stem_a:3p",
+            chrom="stem_a",
+            side="3p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="stem_a+",
+            germline_continuation_port="bridge_1-",
+        ),
+        JunctionRecord(
+            feature_id="pde_terminal:stem_b:5p",
+            chrom="stem_b",
+            side="5p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="stem_b-",
+            germline_continuation_port="bridge_1+",
+        ),
+        JunctionRecord(
+            feature_id="pde_terminal:stem_b:3p",
+            chrom="stem_b",
+            side="3p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="stem_b+",
+            germline_continuation_port="bridge_2+",
+        ),
+        JunctionRecord(
+            feature_id="pde_terminal:stem_c:5p",
+            chrom="stem_c",
+            side="5p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="stem_c-",
+            germline_continuation_port="bridge_2-",
+        ),
+    ]
+
+    scaffolds, agp_recs = build_scaffolds(
+        graph=graph,
+        ledger_map=ledger_map,
+        end_states=[],
+        quirks=[],
+        gap_resolutions=[],
+        dropout_resolutions=[],
+        rdna_resolutions=[],
+        junctions=junctions,
+    )
+
+    # All segments chained into a single chromosome scaffold under stem_a (the largest stem)
+    assert "stem_a" in scaffolds
+    assert "stem_b" not in scaffolds
+    assert "stem_c" not in scaffolds
+
+    # Total length:
+    # cap_5p (5000) + stem_a (40000 - 50) + bridge_1 (10000 - 100) + stem_b (30000 - 120) + bridge_2 (12000 - 80) + stem_c (20000 - 60)
+    # = 5000 + 39950 + 9900 + 29880 + 11920 + 19940 = 116590 bp
+    assert len(scaffolds["stem_a"]) == 116590
+
+    agp_list = [r for r in agp_recs if r.object_id == "stem_a"]
+    assert len(agp_list) == 6
+    assert [r.component_id for r in agp_list] == ["cap_5p", "stem_a", "bridge_1", "stem_b", "bridge_2", "stem_c"]
+    assert [r.sequence_provenance for r in agp_list] == [
+        SequenceProvenance.HIFI_GERMLINE,
+        SequenceProvenance.HIFI_CORE,
+        SequenceProvenance.HIFI_GERMLINE,
+        SequenceProvenance.HIFI_CORE,
+        SequenceProvenance.HIFI_GERMLINE,
+        SequenceProvenance.HIFI_CORE,
+    ]
+    assert agp_list[-1].object_end == 116590
