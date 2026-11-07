@@ -21,6 +21,7 @@ from gfapdefinisher.quirks import (
 from gfapdefinisher.resolver import (
     OntBridgingEngine,
     PafHit,
+    load_reads_sequences,
     parse_paf_hits,
     reverse_complement,
 )
@@ -770,3 +771,81 @@ def test_resolve_somatic_dropout_distal_germline_cap_rescue(tmp_path: Path):
     assert "unpolished" in quirk_rec.notes
     assert "ONT-derived" in quirk_rec.notes
     assert rep_seq == "G" * 1200
+
+
+def test_load_reads_sequences_selective_streaming(tmp_path: Path):
+    """Verify load_reads_sequences extracts only specified target_qnames without buffering all reads."""
+    # Test FASTA
+    fa_path = tmp_path / "test_reads.fa"
+    fa_content = (
+        "\n".join(
+            [
+                ">read_A first read",
+                "AAAAA",
+                ">read_B second read",
+                "CCCCC",
+                ">read_C third read",
+                "GGGGG",
+                ">read_D fourth read",
+                "TTTTT",
+            ]
+        )
+        + "\n"
+    )
+    fa_path.write_text(fa_content, encoding="utf-8")
+
+    # Selective extraction
+    sub_fa = load_reads_sequences(fa_path, target_qnames={"read_B", "read_D"})
+    assert sub_fa == {"read_B": "CCCCC", "read_D": "TTTTT"}
+
+    # Target not present
+    empty_fa = load_reads_sequences(fa_path, target_qnames={"nonexistent"})
+    assert empty_fa == {}
+
+    # Empty target set
+    zero_fa = load_reads_sequences(fa_path, target_qnames=set())
+    assert zero_fa == {}
+
+    # None target extracts all
+    all_fa = load_reads_sequences(fa_path)
+    assert len(all_fa) == 4
+
+    # Test FASTQ
+    fq_path = tmp_path / "test_reads.fq"
+    fq_content = (
+        "\n".join(
+            [
+                "@fq_1 read one",
+                "ACGTACGT",
+                "+",
+                "IIIIIIII",
+                "@fq_2 read two",
+                "TGCATGCA",
+                "+",
+                "JJJJJJJJ",
+                "@fq_3 read three",
+                "GGGGGGGG",
+                "+",
+                "KKKKKKKK",
+            ]
+        )
+        + "\n"
+    )
+    fq_path.write_text(fq_content, encoding="utf-8")
+
+    sub_fq = load_reads_sequences(fq_path, target_qnames=["fq_2"])
+    assert sub_fq == {"fq_2": "TGCATGCA"}
+
+
+def test_collect_spanning_read_ids(tmp_path: Path):
+    """Verify collect_spanning_read_ids returns unique read IDs bridging candidate ports."""
+    paf_lines = [
+        _make_paf_line("span_1", 20000, 1000, 2500, "+", "utg_left", 30000, 28500, 30000),
+        _make_paf_line("span_1", 20000, 4000, 5500, "+", "utg_right", 10000, 0, 1500),
+        _make_paf_line("span_2", 20000, 1000, 2500, "+", "utg_left", 30000, 28500, 30000),
+        _make_paf_line("span_2", 20000, 4000, 5500, "+", "utg_right", 10000, 0, 1500),
+        _make_paf_line("unrelated_1", 20000, 1000, 2500, "+", "utg_left", 30000, 0, 1500),
+    ]
+    engine = OntBridgingEngine()
+    target_ids = engine.collect_spanning_read_ids(paf_lines)
+    assert target_ids == {"span_1", "span_2"}
