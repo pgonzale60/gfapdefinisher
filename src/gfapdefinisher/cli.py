@@ -286,6 +286,10 @@ def build_scaffolds(
         (rec.left_anchor_port.rstrip("+-"), rec.side)
         for rec in (active_resolutions or [])
         if rec.resolution_type == ResolutionType.PDE_TERMINAL_CAP and rec.left_anchor_port
+    } | {
+        (rec.chrom, rec.side)
+        for rec in (active_resolutions or [])
+        if rec.resolution_type == ResolutionType.PDE_TERMINAL_CAP
     }
 
     seen_bridges: set[str] = set()
@@ -299,6 +303,10 @@ def build_scaffolds(
                 next_stem_p = _parse_port(j2.stem_port).invert()
                 bridge_forward[stem_p] = (gp, next_stem_p)
                 has_incoming_bridge.add(next_stem_p)
+                for j_elem in (j, j2):
+                    seen_pde_stems.add((j_elem.chrom, j_elem.side))
+                    seen_pde_stems.add((j_elem.stem_port.rstrip("+-"), j_elem.side))
+
                 if active_resolutions is not None and gp.name not in seen_bridges:
                     seen_bridges.add(gp.name)
                     bridge_count = len(
@@ -314,83 +322,65 @@ def build_scaffolds(
                         "mid",
                         index=bridge_count + 1,
                     )
+                    som_j = j.somatic_terminus_port.rstrip("+-") if j.somatic_terminus_port else None
+                    som_j2 = j2.somatic_terminus_port.rstrip("+-") if j2.somatic_terminus_port else None
+                    excl_stubs = tuple(s for s in (som_j, som_j2) if s)
                     bridge_rec = ResolutionRecord(
                         feature_id=bridge_fid,
                         chrom=stem_p.name,
                         side="mid",
                         resolution_type=ResolutionType.INTERCALARY_GRS_BRIDGE,
-                        left_anchor_port=stem_p.to_symbol(),
-                        right_anchor_port=next_stem_p.to_symbol(),
+                        left_anchor_port=j.stem_port,
+                        right_anchor_port=j2.stem_port,
                         unitig_ids=(gp.name,),
+                        excluded_unitig_ids=excl_stubs,
                         core_coverage_bp_median=(graph.segments[gp.name].depth if gp.name in graph.segments else None),
                         notes=(
                             f"Intercalary GRS bridge {gp.to_symbol()} connecting core stems "
-                            f"{stem_p.to_symbol()} and {next_stem_p.to_symbol()}"
+                            f"{j.stem_port} and {j2.stem_port}"
                         ),
                     )
                     active_resolutions.append(bridge_rec)
 
-                if active_resolutions is not None:
-                    for j_elem in (j, j2):
-                        j_key = (j_elem.chrom, j_elem.side)
-                        if j_key not in seen_pde_stems:
-                            seen_pde_stems.add(j_key)
-                            som_excl = (
-                                (j_elem.somatic_terminus_port.rstrip("+-"),) if j_elem.somatic_terminus_port else ()
-                            )
-                            j_fid = build_feature_id(
-                                ResolutionType.PDE_TERMINAL_CAP, j_elem.chrom, j_elem.side, index=1
-                            )
-                            j_rec = ResolutionRecord(
-                                feature_id=j_fid,
-                                chrom=j_elem.chrom,
-                                side=j_elem.side,
-                                resolution_type=ResolutionType.PDE_TERMINAL_CAP,
-                                left_anchor_port=j_elem.stem_port,
-                                right_anchor_port=j_elem.germline_continuation_port,
-                                unitig_ids=(_parse_port(j_elem.germline_continuation_port).name,)
-                                if j_elem.germline_continuation_port
-                                else (),
-                                excluded_unitig_ids=som_excl,
-                                core_coverage_bp_median=(
-                                    graph.segments[j_elem.chrom].depth if j_elem.chrom in graph.segments else None
-                                ),
-                                notes=(
-                                    f"Resolved PDE junction via germline continuation "
-                                    f"{j_elem.germline_continuation_port}; dismissed somatic sister stub "
-                                    f"{j_elem.somatic_terminus_port or ''}"
-                                ),
-                            )
-                            active_resolutions.append(j_rec)
-
     if active_resolutions is not None:
         for j in junctions:
             j_key = (j.chrom, j.side)
-            if j_key not in seen_pde_stems and j.germline_continuation_port:
+            stem_key = (j.stem_port.rstrip("+-"), j.side)
+            if j_key not in seen_pde_stems and stem_key not in seen_pde_stems and j.germline_continuation_port:
                 gp = _parse_port(j.germline_continuation_port)
+                if gp.invert().to_symbol() in junctions_by_germ:
+                    continue
                 cap_path = _trace_germline_chain(graph, ledger_map, gp, max_hops)
-                if cap_path and _has_telomere(cap_path[-1]):
-                    seen_pde_stems.add(j_key)
-                    som_excl = (j.somatic_terminus_port.rstrip("+-"),) if j.somatic_terminus_port else ()
-                    j_fid = build_feature_id(ResolutionType.PDE_TERMINAL_CAP, j.chrom, j.side, index=1)
-                    j_rec = ResolutionRecord(
-                        feature_id=j_fid,
-                        chrom=j.chrom,
-                        side=j.side,
-                        resolution_type=ResolutionType.PDE_TERMINAL_CAP,
-                        left_anchor_port=j.stem_port,
-                        right_anchor_port=cap_path[-1].to_symbol(),
-                        unitig_ids=tuple(p.name for p in cap_path),
-                        excluded_unitig_ids=som_excl,
-                        core_coverage_bp_median=(graph.segments[j.chrom].depth if j.chrom in graph.segments else None),
-                        notes=(
-                            f"Resolved terminal PDE junction via germline continuation chain "
-                            f"{' -> '.join(p.to_symbol() for p in cap_path)} to telomeric cap "
-                            f"{cap_path[-1].to_symbol()}; dismissed somatic sister stub "
-                            f"{j.somatic_terminus_port or ''}"
-                        ),
-                    )
-                    active_resolutions.append(j_rec)
+                has_telo = bool(cap_path and _has_telomere(cap_path[-1]))
+                is_gap_resolved = bool(gp.name in gap_by_left_seg or (gp.name, gp.strand.value) in gap_by_left)
+                if not (has_telo or is_gap_resolved):
+                    continue
+                seen_pde_stems.add(j_key)
+                seen_pde_stems.add(stem_key)
+                target_ports = cap_path if has_telo else [gp]
+                som_excl = (j.somatic_terminus_port.rstrip("+-"),) if j.somatic_terminus_port else ()
+                j_fid = build_feature_id(ResolutionType.PDE_TERMINAL_CAP, j.chrom, j.side, index=1)
+                j_rec = ResolutionRecord(
+                    feature_id=j_fid,
+                    chrom=j.chrom,
+                    side=j.side,
+                    resolution_type=ResolutionType.PDE_TERMINAL_CAP,
+                    left_anchor_port=j.stem_port,
+                    right_anchor_port=target_ports[-1].to_symbol(),
+                    unitig_ids=tuple(p.name for p in target_ports),
+                    excluded_unitig_ids=som_excl,
+                    core_coverage_bp_median=(graph.segments[j.chrom].depth if j.chrom in graph.segments else None),
+                    notes=(
+                        f"Resolved terminal PDE junction via germline continuation chain "
+                        f"{' -> '.join(p.to_symbol() for p in target_ports)} to telomeric cap "
+                        f"{target_ports[-1].to_symbol()}; dismissed somatic sister stub "
+                        f"{j.somatic_terminus_port or ''}"
+                        if has_telo and target_ports[-1] != gp
+                        else f"Resolved terminal PDE junction via germline continuation {gp.to_symbol()}; "
+                        f"dismissed somatic sister stub {j.somatic_terminus_port or ''}"
+                    ),
+                )
+                active_resolutions.append(j_rec)
 
     consumed: set[str] = set()
     if active_resolutions is not None:
@@ -763,6 +753,18 @@ def build_scaffolds(
                     if (qrec and qrec.right_anchor_port)
                     else (gres.right_flank_port.name if gres.right_flank_port else None)
                 )
+                if qrec is not None:
+                    placed_u: list[str] = []
+                    if r_name and r_name in graph.segments:
+                        placed_u.append(r_name)
+                    if gres.intermediate_ports:
+                        for ip in reversed(gres.intermediate_ports):
+                            if ip.name in graph.segments:
+                                placed_u.append(ip.name)
+                    elif gres.representative_sequence and gres.representative_read:
+                        placed_u.append(gres.representative_read.qname)
+                    if placed_u:
+                        qrec.unitig_ids = tuple(placed_u)
                 r_strand = (
                     Strand.FORWARD
                     if (qrec and qrec.right_anchor_port and "+" in qrec.right_anchor_port)
@@ -1104,6 +1106,18 @@ def build_scaffolds(
                 if (qrec and qrec.right_anchor_port)
                 else (gres.right_flank_port.name if gres.right_flank_port else None)
             )
+            if qrec is not None:
+                placed_u: list[str] = []
+                if gres.intermediate_ports:
+                    for ip in gres.intermediate_ports:
+                        if ip.name in graph.segments:
+                            placed_u.append(ip.name)
+                elif gres.representative_sequence and gres.representative_read:
+                    placed_u.append(gres.representative_read.qname)
+                if r_name and r_name in graph.segments:
+                    placed_u.append(r_name)
+                if placed_u:
+                    qrec.unitig_ids = tuple(placed_u)
             r_strand = (
                 Strand.FORWARD
                 if (qrec and qrec.right_anchor_port and "+" in qrec.right_anchor_port)
@@ -1257,6 +1271,22 @@ def build_scaffolds(
                 rec.chrom = target_scaf
                 rec.agp_start = min(s[0] for s in spans)
                 rec.agp_end = max(s[1] for s in spans)
+                if rec.resolution_type == ResolutionType.INTERCALARY_GRS_BRIDGE:
+                    if rec.left_anchor_port and rec.right_anchor_port:
+                        l_u = rec.left_anchor_port.rstrip("+-")
+                        r_u = rec.right_anchor_port.rstrip("+-")
+                        l_spans = component_spans.get((target_scaf, l_u))
+                        r_spans = component_spans.get((target_scaf, r_u))
+                        if l_spans and r_spans:
+                            if min(s[0] for s in l_spans) > min(s[0] for s in r_spans):
+                                rec.left_anchor_port, rec.right_anchor_port = (
+                                    rec.right_anchor_port,
+                                    rec.left_anchor_port,
+                                )
+                                rec.excluded_unitig_ids = tuple(reversed(rec.excluded_unitig_ids))
+                                rec.feature_id = build_feature_id(
+                                    rec.resolution_type, rec.left_anchor_port.rstrip("+-"), rec.side, index=1
+                                )
                 retained.append(rec)
             elif target_scaf is not None and not spans:
                 anchor_spans: list[tuple[int, int]] = []
