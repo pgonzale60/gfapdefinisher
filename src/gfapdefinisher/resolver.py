@@ -395,17 +395,37 @@ class OntBridgingEngine:
             ledger_map = {ev.port.to_symbol(): ev for ev in ledger_map if hasattr(ev, "port")}
 
         for seg_name in self.graph.segments:
+            deg_plus = self.graph.degree(SegmentPort(seg_name, Strand.FORWARD))
+            deg_minus = self.graph.degree(SegmentPort(seg_name, Strand.MINUS))
+            if deg_plus != 0 or deg_minus != 0:
+                continue
+
             ev_plus = ledger_map.get(f"{seg_name}+")
             ev_minus = ledger_map.get(f"{seg_name}-")
 
-            if ev_minus is not None and getattr(ev_minus, "has_terminal_telomere", False):
-                deg_plus = self.graph.degree(SegmentPort(seg_name, Strand.FORWARD))
-                if deg_plus == 0:
-                    orphan_caps[seg_name] = (f"{seg_name}-", f"{seg_name}+")
-            elif ev_plus is not None and getattr(ev_plus, "has_terminal_telomere", False):
-                deg_minus = self.graph.degree(SegmentPort(seg_name, Strand.MINUS))
-                if deg_minus == 0:
-                    orphan_caps[seg_name] = (f"{seg_name}+", f"{seg_name}-")
+            if getattr(ev_plus, "usco_count", 0) != 0 or getattr(ev_minus, "usco_count", 0) != 0:
+                continue
+            if getattr(ev_plus, "usco_hit_count", 0) != 0 or getattr(ev_minus, "usco_hit_count", 0) != 0:
+                continue
+
+            is_contam_plus = getattr(ev_plus, "is_contaminant", False)
+            if callable(is_contam_plus):
+                is_contam_plus = is_contam_plus()
+            is_contam_minus = getattr(ev_minus, "is_contaminant", False)
+            if callable(is_contam_minus):
+                is_contam_minus = is_contam_minus()
+            if is_contam_plus or is_contam_minus:
+                continue
+
+            has_plus = ev_plus is not None and getattr(ev_plus, "has_terminal_telomere", False)
+            has_minus = ev_minus is not None and getattr(ev_minus, "has_terminal_telomere", False)
+            if has_minus == has_plus:
+                continue
+
+            if has_minus:
+                orphan_caps[seg_name] = (f"{seg_name}-", f"{seg_name}+")
+            elif has_plus:
+                orphan_caps[seg_name] = (f"{seg_name}+", f"{seg_name}-")
 
         return orphan_caps
 
@@ -417,6 +437,9 @@ class OntBridgingEngine:
         reads_sequences: Mapping[str, str] | Path | str | None = None,
     ) -> tuple[list[EndStateRecord], list[QuirkRecord]]:
         """Identify candidate variable satellite gap pairs and resolve them via ONT bridging."""
+        orphan_caps = self.identify_orphan_caps()
+        resolved_ends: set[tuple[str, str]] = set()
+
         hits_by_read: dict[str, list[PafHit]] = defaultdict(list)
         source_iterable: Iterable[str | PafHit]
         if isinstance(paf_source, str | Path | TextIO):
@@ -455,48 +478,86 @@ class OntBridgingEngine:
             if (t1, t2) in resolved_pairs or (t2, t1) in resolved_pairs:
                 continue
 
+            matched_end: EndStateRecord | None = None
+            cand_left: str = t1
+            cand_right: str = t2
+
+            for er in end_states:
+                if (er.chrom, er.side) in resolved_ends or er.resolved:
+                    continue
+
+                anchor = er.germline_port if er.germline_port is not None else er.chrom
+                if not anchor:
+                    continue
+
+                anchor_clean = anchor.rstrip("+-")
+                t1_clean = t1.rstrip("+-")
+                t2_clean = t2.rstrip("+-")
+
+                t1_matches = t1 == anchor or t1_clean == anchor_clean
+                t2_matches = t2 == anchor or t2_clean == anchor_clean
+
+                if not t1_matches and not t2_matches:
+                    continue
+
+                if t1_matches and not t2_matches:
+                    anchor_target, partner_target = t1, t2
+                elif t2_matches and not t1_matches:
+                    anchor_target, partner_target = t2, t1
+                else:
+                    anchor_target, partner_target = t1, t2
+
+                partner_seg = partner_target.rstrip("+-")
+                if orphan_caps:
+                    if partner_seg not in orphan_caps:
+                        continue
+                    germline_anchor_port = er.germline_port if er.germline_port is not None else anchor_target
+                    telomere_port = orphan_caps[partner_seg][0]
+                    cand_left = germline_anchor_port
+                    cand_right = telomere_port
+                else:
+                    cand_left = anchor_target
+                    cand_right = partner_target
+
+                matched_end = er
+                break
+
+            if matched_end is None:
+                if end_states and self.graph is not None:
+                    t1_seg = t1.rstrip("+-")
+                    t2_seg = t2.rstrip("+-")
+                    if t1_seg not in self.graph.segments and t2_seg not in self.graph.segments:
+                        continue
+                cand_left = t1
+                cand_right = t2
+
             spanning = self.collect_spanning_reads(
                 paf_source=all_hits,
-                left_port=t1,
-                right_port=t2,
+                left_port=cand_left,
+                right_port=cand_right,
                 reads_sequences=active_reads,
             )
-            left_port, right_port = t1, t2
+            left_port, right_port = cand_left, cand_right
             if not spanning:
                 spanning = self.collect_spanning_reads(
                     paf_source=all_hits,
-                    left_port=t2,
-                    right_port=t1,
+                    left_port=cand_right,
+                    right_port=cand_left,
                     reads_sequences=active_reads,
                 )
-                if spanning:
-                    left_port, right_port = t2, t1
+                if spanning and (matched_end is None or not orphan_caps):
+                    left_port, right_port = cand_right, cand_left
 
             if len(spanning) >= self.policy.ont.min_spanning_reads.value:
-                resolved_pairs.add((left_port, right_port))
+                resolved_pairs.add((t1, t2))
+                resolved_pairs.add((t2, t1))
+                resolved_pairs.add((str(left_port), str(right_port)))
+                resolved_pairs.add((str(right_port), str(left_port)))
 
-                matched_end: EndStateRecord | None = None
-                for er in end_states:
-                    targets_match = {
-                        left_port,
-                        right_port,
-                        f"{left_port}+",
-                        f"{left_port}-",
-                        f"{right_port}+",
-                        f"{right_port}-",
-                        left_port.rstrip("+-"),
-                        right_port.rstrip("+-"),
-                    }
-                    if (
-                        (er.germline_port and er.germline_port in targets_match)
-                        or (er.somatic_port and er.somatic_port in targets_match)
-                        or er.chrom in targets_match
-                    ):
-                        matched_end = er
-                        break
+                chrom = matched_end.chrom if matched_end else str(left_port).rstrip("+-")
+                side = matched_end.side if matched_end else ("3p" if "+" in str(left_port) else "5p")
 
-                chrom = matched_end.chrom if matched_end else left_port.rstrip("+-")
-                side = matched_end.side if matched_end else ("3p" if "+" in left_port else "5p")
+                resolved_ends.add((chrom, side))
 
                 res = self.resolve_satellite_gap(
                     chrom=chrom,
@@ -508,6 +569,9 @@ class OntBridgingEngine:
                     reads_sequences=active_reads,
                     core_coverage_bp_median=matched_end.core_coverage_bp_median if matched_end else None,
                     core_depth_ratio=matched_end.germline_depth_ratio if matched_end else None,
+                    somatic_depth_ratio=matched_end.somatic_depth_ratio if matched_end else None,
+                    somatic_port=matched_end.somatic_port if matched_end else None,
+                    matched_end=matched_end,
                 )
 
                 new_ends: list[EndStateRecord] = []
@@ -760,6 +824,8 @@ class OntBridgingEngine:
         core_coverage_bp_median: float | None = None,
         core_depth_ratio: float | None = None,
         somatic_depth_ratio: float | None = None,
+        somatic_port: str | None = None,
+        matched_end: EndStateRecord | None = None,
         min_spanning_reads: int | None = None,
         notes: str = "",
     ) -> SatelliteGapResolution:
@@ -810,6 +876,12 @@ class OntBridgingEngine:
         right_str = right_port.to_symbol() if hasattr(right_port, "to_symbol") else str(right_port)
         left_name = getattr(left_port, "name", str(left_port))
         right_name = getattr(right_port, "name", str(right_port))
+
+        actual_somatic_port = left_str
+        if matched_end is not None and matched_end.somatic_port is not None:
+            actual_somatic_port = matched_end.somatic_port
+        elif somatic_port is not None:
+            actual_somatic_port = somatic_port
 
         feature_id_quirk = build_feature_id(IntervalQuirk.SAT_GAP_VARIABLE, chrom, side, index=gap_index)
 
@@ -892,7 +964,7 @@ class OntBridgingEngine:
                 chrom=chrom,
                 side=side,
                 state=state,
-                somatic_port=left_str,
+                somatic_port=actual_somatic_port,
                 germline_port=right_str,
                 shared_port=None,
                 core_coverage_bp_median=core_coverage_bp_median,
@@ -958,7 +1030,7 @@ class OntBridgingEngine:
             chrom=chrom,
             side=side,
             state=state,
-            somatic_port=left_str,
+            somatic_port=actual_somatic_port,
             germline_port=None,
             shared_port=None,
             core_coverage_bp_median=core_coverage_bp_median,
