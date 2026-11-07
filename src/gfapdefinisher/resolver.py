@@ -982,7 +982,7 @@ class OntBridgingEngine:
                     left_anchor_port=anchor_port.to_symbol(),
                     right_anchor_port=cap_port.to_symbol(),
                     agp_component_type="U",
-                    agp_linkage_evidence="paired-ends",
+                    agp_linkage_evidence="hifi-spanning",
                     unitig_ids=(anchor_name, cap_id),
                     read_count=0,
                     core_coverage_bp_median=er.core_coverage_bp_median,

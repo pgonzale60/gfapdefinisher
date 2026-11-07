@@ -82,7 +82,7 @@ class PathComponent:
         gap_length: Length of gap in bp.
         gap_type: AGP gap type (e.g. 'repeat', 'scaffold').
         linkage: AGP linkage flag ('yes' or 'no').
-        linkage_evidence: AGP linkage evidence (e.g. 'rna_tangle', 'paired-ends').
+        linkage_evidence: AGP linkage evidence (e.g. 'rna_tangle', 'hifi-spanning').
         gap_component_type: AGP component designation ('N' or 'U').
     """
 
@@ -96,7 +96,7 @@ class PathComponent:
     gap_length: int = 0
     gap_type: str = "scaffold"
     linkage: str = "yes"
-    linkage_evidence: str = "paired-ends"
+    linkage_evidence: str = "hifi-spanning"
     gap_component_type: str = "N"
 
     def __init__(
@@ -115,7 +115,7 @@ class PathComponent:
         gap_length: int = 0,
         gap_type: str = "scaffold",
         linkage: str = "yes",
-        linkage_evidence: str = "paired-ends",
+        linkage_evidence: str = "hifi-spanning",
         gap_component_type: str = "N",
     ) -> None:
         seg_id = segment_id if segment_id is not None else (component_id or "")
@@ -280,7 +280,7 @@ def assemble_scaffold_sequence(
             if (
                 comp_type == "N"
                 and gap_len == DEFAULT_AGP_POLICY.unknown_gap_bp.value
-                and comp.linkage_evidence in ("rna_tangle", "paired-ends")
+                and comp.linkage_evidence in ("rna_tangle", "hifi-spanning")
             ):
                 comp_type = "U"
             row = AgpGapRow(
