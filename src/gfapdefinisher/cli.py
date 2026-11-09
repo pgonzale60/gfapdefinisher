@@ -14,13 +14,20 @@ from gfapdefinisher.cigar import parse_dovetail_overlap_len
 from gfapdefinisher.classifier import _lookup_evidence, compute_core_coverage
 from gfapdefinisher.emitter import (
     DEFAULT_AGP_POLICY,
+    DEFAULT_MIN_SUPER_LENGTH,
     AgpRecord,
     PathComponent,
     SequenceProvenance,
     assemble_scaffold_sequence,
+    compute_break_site_summary,
     emit_agp,
     emit_excluded_fasta,
     emit_fasta,
+    emit_grs_bed,
+    emit_summary_tsv,
+    emit_telomere_bed,
+    format_summary_table,
+    nominate_super_scaffolds,
 )
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import build_end_evidence_ledger, emit_tsv_ledger
@@ -143,6 +150,45 @@ def create_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional prefix for scaffold identifiers",
     )
+    finish_parser.add_argument(
+        "--nominate-super",
+        action="store_true",
+        default=False,
+        dest="nominate_super",
+        help="Nominate large sequences with break site evidence as SUPER chromosomes",
+    )
+    finish_parser.add_argument(
+        "--min-super-length",
+        "--min-super-len",
+        type=int,
+        default=DEFAULT_MIN_SUPER_LENGTH,
+        dest="min_super_length",
+        help="Minimum length in bp for a sequence with break site evidence to be nominated as a SUPER chromosome (default: 100000)",
+    )
+    finish_parser.add_argument(
+        "--emit-grs-bed",
+        nargs="?",
+        const=True,
+        default=None,
+        dest="emit_grs_bed",
+        help="Optional path to emit GRS regions BED (default: <out_dir>/GRS.bed)",
+    )
+    finish_parser.add_argument(
+        "--emit-telomere-bed",
+        nargs="?",
+        const=True,
+        default=None,
+        dest="emit_telomere_bed",
+        help="Optional path to emit telomere caps BED (default: <out_dir>/telomeres.bed)",
+    )
+    finish_parser.add_argument(
+        "--summary",
+        nargs="?",
+        const=True,
+        default=None,
+        dest="summary",
+        help="Optional path to emit break-site summary TSV (default: <out_dir>/summary.tsv)",
+    )
 
     return parser
 
@@ -237,6 +283,8 @@ def build_scaffolds(
     *,
     quirks: Sequence[ResolutionRecord] | None = None,
     resolution_records: list[ResolutionRecord] | None = None,
+    nominate_super: bool = False,
+    min_super_length: int = DEFAULT_MIN_SUPER_LENGTH,
 ) -> tuple[dict[str, str], list[AgpRecord]]:
     """Assemble scaffold sequences and AGP v2.1 records with empirical provenance."""
     active_resolutions: list[ResolutionRecord] | None = None
@@ -1419,6 +1467,16 @@ def build_scaffolds(
         active_resolutions.clear()
         active_resolutions.extend(retained)
 
+    if nominate_super:
+        scaffolds, all_agp, _ = nominate_super_scaffolds(
+            scaffolds=scaffolds,
+            agp_records=all_agp,
+            junctions=junctions,
+            min_super_length=min_super_length,
+            resolutions=active_resolutions,
+            end_states=list(end_states) if isinstance(end_states, list) else None,
+        )
+
     return scaffolds, all_agp
 
 
@@ -1583,6 +1641,8 @@ def run_finish(args: argparse.Namespace) -> None:
 
     # Assemble scaffolds and AGP records
     prefix = getattr(args, "prefix", "") or ""
+    nominate_super = getattr(args, "nominate_super", False)
+    min_super_length = getattr(args, "min_super_length", DEFAULT_MIN_SUPER_LENGTH)
     scaffolds, agp_records = build_scaffolds(
         graph=graph,
         ledger_map=ledger_map,
@@ -1593,6 +1653,8 @@ def run_finish(args: argparse.Namespace) -> None:
         rdna_resolutions=rdna_resolutions,
         prefix=prefix,
         junctions=junction_records,
+        nominate_super=nominate_super,
+        min_super_length=min_super_length,
     )
 
     fasta_target: Path
@@ -1609,6 +1671,37 @@ def run_finish(args: argparse.Namespace) -> None:
 
     emit_fasta(scaffolds, fasta_target)
     emit_agp(agp_records, agp_target)
+
+    # Emit eliminated GRS regions BED
+    grs_target: Path
+    if getattr(args, "emit_grs_bed", None) is not None and not isinstance(args.emit_grs_bed, bool):
+        grs_target = Path(args.emit_grs_bed)
+    else:
+        grs_target = args.out_dir / "GRS.bed"
+    emit_grs_bed(agp_records, grs_target)
+
+    # Emit germline terminal telomeres BED
+    telomere_target: Path
+    if getattr(args, "emit_telomere_bed", None) is not None and not isinstance(args.emit_telomere_bed, bool):
+        telomere_target = Path(args.emit_telomere_bed)
+    else:
+        telomere_target = args.out_dir / "telomeres.bed"
+    emit_telomere_bed(scaffolds, telomere_target, policy=DEFAULT_POLICY)
+
+    # Compute and emit summary metrics on break-site verified sequences
+    summary_target: Path
+    if getattr(args, "summary", None) is not None and not isinstance(args.summary, bool):
+        summary_target = Path(args.summary)
+    else:
+        summary_target = args.out_dir / "summary.tsv"
+    summary_data = compute_break_site_summary(
+        graph=graph,
+        scaffolds=scaffolds,
+        agp_records=agp_records,
+        junctions=junction_records,
+    )
+    emit_summary_tsv(summary_data, summary_target)
+    print(format_summary_table(summary_data))
 
     excluded_target: Path
     if args.excluded_fasta is not None and not isinstance(args.excluded_fasta, bool):

@@ -8,7 +8,7 @@ import pytest
 from pyfaidx import Fasta
 
 from gfapdefinisher.cli import main
-from gfapdefinisher.emitter import SequenceProvenance, parse_agp
+from gfapdefinisher.emitter import SequenceProvenance, parse_agp, parse_summary_tsv
 from gfapdefinisher.graph import load_gfa
 from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.resolutions import (
@@ -1128,3 +1128,143 @@ def test_excluded_fasta_emission_and_conservation_law(tmp_path: Path):
             # Verify sat_gap_variable is only emitted when bridged (0 without ONT PAF)
             sat_vars = [r for r in resolutions if r.resolution_type == ResolutionType.SAT_GAP_VARIABLE]
             assert len(sat_vars) == 0
+
+
+def test_finish_subcommand_emits_grs_telomere_and_summary_by_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """Verify finish subcommand emits GRS.bed, telomeres.bed, and summary.tsv by default and logs table to stdout."""
+    gfa_path = tmp_path / "test.gfa"
+    _build_synthetic_gfa(gfa_path)
+    out_dir = tmp_path / "finish_default_beds_and_summary"
+
+    exit_code = main(["finish", "--gfa", str(gfa_path), "--out-dir", str(out_dir)])
+    assert exit_code == 0
+
+    grs_file = out_dir / "GRS.bed"
+    telomeres_file = out_dir / "telomeres.bed"
+    summary_file = out_dir / "summary.tsv"
+
+    assert grs_file.is_file()
+    assert telomeres_file.is_file()
+    assert summary_file.is_file()
+
+    # Verify GRS.bed contents (0-based coordinates, HiFi-germline only, no repeat gaps)
+    grs_lines = [line.strip().split("\t") for line in grs_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(grs_lines) == 1
+    # chr_stem scaffold has chr_grs attached: chr_stem length is 50000, overlap is 100, so chr_grs spans 50000..79900
+    assert grs_lines[0] == ["chr_stem", "50000", "79900", "chr_grs", "0", "+"]
+
+    # Verify summary.tsv contents
+    seq_rows, total_row = parse_summary_tsv(summary_file)
+    assert len(seq_rows) == 1
+    s = seq_rows[0]
+    assert s["sequence_id"] == "chr_stem"
+    assert s["core_length_bp"] == 50000
+    assert s["core_depth"] == 60.0
+    assert s["grs_length_bp"] == 29900
+    assert s["grs_depth"] == 6.0
+    assert s["stoichiometry_ratio"] == pytest.approx(0.10, abs=1e-3)
+    assert s["grs_percentage"] == pytest.approx(29900 / 79900 * 100.0, rel=1e-3)
+    assert s["break_site_count"] == 1
+
+    assert total_row["sequence_id"] == "TOTAL"
+    assert total_row["core_length_bp"] == 50000
+    assert total_row["grs_length_bp"] == 29900
+
+    # Verify console output contains the human-readable summary table
+    captured = capsys.readouterr()
+    assert "gfapdefinisher Finish Summary (Break-Site Verified Sequences)" in captured.out
+    assert "chr_stem" in captured.out
+    assert "TOTAL" in captured.out
+
+
+def test_finish_subcommand_with_nominate_super(tmp_path: Path):
+    """Verify --nominate-super renames candidate chromosomes to SUPER_1 and updates all downstream artifacts."""
+    gfa_path = tmp_path / "test.gfa"
+    _build_synthetic_gfa(gfa_path)
+    out_dir = tmp_path / "finish_super_nomination"
+
+    exit_code = main(
+        [
+            "finish",
+            "--gfa",
+            str(gfa_path),
+            "--out-dir",
+            str(out_dir),
+            "--nominate-super",
+            "--min-super-len",
+            "50000",
+        ]
+    )
+    assert exit_code == 0
+
+    # FASTA header should be >SUPER_1
+    fasta_text = (out_dir / "scaffolds.fasta").read_text(encoding="utf-8")
+    assert ">SUPER_1" in fasta_text
+    assert ">chr_stem" not in fasta_text
+
+    # AGP records: candidate chromosome has object_id = SUPER_1, non-candidate retains unitig ID
+    agp_recs = parse_agp(out_dir / "scaffolds.agp")
+    super_recs = [r for r in agp_recs if r.object_id == "SUPER_1"]
+    assert len(super_recs) == 2
+    assert [r.component_id for r in super_recs] == ["chr_stem", "chr_grs"]
+    assert any(r.object_id == "orphan_cap" for r in agp_recs)
+
+    # GRS.bed should have chrom = SUPER_1
+    grs_lines = [
+        line.strip().split("\t")
+        for line in (out_dir / "GRS.bed").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(grs_lines) == 1
+    assert grs_lines[0][0] == "SUPER_1"
+    assert grs_lines[0][3] == "chr_grs"
+
+    # summary.tsv should have sequence_id = SUPER_1
+    seq_rows, total_row = parse_summary_tsv(out_dir / "summary.tsv")
+    assert len(seq_rows) == 1
+    assert seq_rows[0]["sequence_id"] == "SUPER_1"
+    assert total_row["sequence_id"] == "TOTAL"
+
+    # resolutions.tsv should have chrom = SUPER_1
+    res_recs = parse_resolutions_tsv(out_dir / "resolutions.tsv")
+    pde_caps = [r for r in res_recs if r.resolution_type == ResolutionType.PDE_TERMINAL_CAP]
+    assert len(pde_caps) >= 1
+    assert pde_caps[0].chrom == "SUPER_1"
+
+
+def test_finish_subcommand_custom_bed_and_summary_paths(tmp_path: Path):
+    """Verify custom output destinations for --emit-grs-bed, --emit-telomere-bed, and --summary."""
+    gfa_path = tmp_path / "test.gfa"
+    _build_synthetic_gfa(gfa_path)
+    out_dir = tmp_path / "finish_custom_paths"
+    custom_grs = tmp_path / "custom_grs.bed"
+    custom_telo = tmp_path / "custom_telomeres.bed"
+    custom_summary = tmp_path / "custom_summary.tsv"
+
+    exit_code = main(
+        [
+            "finish",
+            "--gfa",
+            str(gfa_path),
+            "--out-dir",
+            str(out_dir),
+            "--emit-grs-bed",
+            str(custom_grs),
+            "--emit-telomere-bed",
+            str(custom_telo),
+            "--summary",
+            str(custom_summary),
+        ]
+    )
+    assert exit_code == 0
+
+    assert custom_grs.is_file()
+    assert custom_telo.is_file()
+    assert custom_summary.is_file()
+
+    # Default paths in out_dir should not be created when custom explicit paths are given
+    assert not (out_dir / "GRS.bed").exists()
+    assert not (out_dir / "telomeres.bed").exists()
+    assert not (out_dir / "summary.tsv").exists()

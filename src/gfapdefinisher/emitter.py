@@ -17,24 +17,35 @@ from typing import Any, TextIO
 from gfapdefinisher.models import Strand
 from gfapdefinisher.policy import DEFAULT_POLICY, Policy
 from gfapdefinisher.policy.models import PolicyValue
+from gfapdefinisher.telomere import scan_terminal_tract
 
 __all__ = [
     "AgpGapRow",
     "AgpPolicy",
     "AgpRecord",
+    "BreakSiteGenomeSummary",
     "DEFAULT_AGP_POLICY",
     "FastaAgpEmitter",
     "PathComponent",
     "ScaffoldPlan",
     "ScaffoldStep",
     "SequenceProvenance",
+    "SequenceSummaryMetrics",
     "assemble_path_sequence",
     "assemble_scaffold_sequence",
+    "compute_break_site_summary",
     "emit_agp",
     "emit_excluded_fasta",
     "emit_fasta",
+    "emit_grs_bed",
     "emit_scaffold",
+    "emit_summary_tsv",
+    "emit_telomere_bed",
+    "find_break_site_scaffolds",
+    "format_summary_table",
+    "nominate_super_scaffolds",
     "parse_agp",
+    "parse_summary_tsv",
 ]
 
 
@@ -862,3 +873,531 @@ def parse_agp(file: Path | TextIO | str) -> list[AgpRecord]:
                     return _parse(f)
         return _parse(file.splitlines())
     return _parse(file)
+
+
+DEFAULT_MIN_SUPER_LENGTH = int("100000")
+PERCENT_MULTIPLIER = float("100.0")
+TABLE_SEPARATOR_WIDTH = int("105")
+
+
+def emit_grs_bed(
+    agp_records: Sequence[AgpRecord | AgpGapRow],
+    out_path: Path | str,
+) -> Path:
+    """Emit 0-based half-open BED records for eliminated germline-retained sequences (GRS).
+
+    Strictly excludes variable repeats and satellite gaps (e.g. gap components 'N', 'U',
+    gap_type == 'repeat', ONT-derived sequences, or SAT_GAP_VARIABLE).
+
+    Args:
+        agp_records: Assembled scaffold AGP v2.1 records.
+        out_path: Destination BED file path.
+
+    Returns:
+        Path to the written BED file.
+    """
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    grs_provs = {
+        SequenceProvenance.HIFI_GERMLINE,
+        SequenceProvenance.hifi_germline,
+        "HiFi-germline",
+    }
+    excluded_provs = {
+        SequenceProvenance.ONT_DERIVED,
+        SequenceProvenance.ont_derived,
+        "ONT-derived",
+    }
+
+    bed_rows: list[tuple[str, int, int, str, int, str]] = []
+
+    for rec in agp_records:
+        comp_type = getattr(rec, "component_type", "")
+        # Strictly exclude variable repeat gaps and non-sequence gap rows
+        if comp_type in ("N", "U") or getattr(rec, "is_gap", False):
+            continue
+        if getattr(rec, "gap_type", None) == "repeat":
+            continue
+
+        prov = getattr(rec, "sequence_provenance", None)
+        if prov in excluded_provs:
+            continue
+        if prov not in grs_provs:
+            continue
+
+        comment = getattr(rec, "comment", "") or ""
+        if "SAT_GAP_VARIABLE" in comment or "repeat" in comment:
+            continue
+
+        chrom = rec.object_id
+        chrom_start = rec.object_beg - 1
+        chrom_end = rec.object_end
+        name = str(rec.component_id)
+        score = 0
+        strand = rec.orientation if rec.orientation in ("+", "-") else "+"
+
+        bed_rows.append((chrom, chrom_start, chrom_end, name, score, strand))
+
+    bed_rows.sort(key=lambda r: (r[0], r[1], r[2]))
+
+    with open(target, "w", encoding="utf-8") as f:
+        for chrom, chrom_start, chrom_end, name, score, strand in bed_rows:
+            f.write(f"{chrom}\t{chrom_start}\t{chrom_end}\t{name}\t{score}\t{strand}\n")
+
+    return target
+
+
+def emit_telomere_bed(
+    scaffolds: Mapping[str, str],
+    out_path: Path | str,
+    policy: Policy = DEFAULT_POLICY,
+) -> Path:
+    """Emit authentic germline terminal telomere cap coordinates for assembled scaffolds in BED format.
+
+    Uses scan_terminal_tract to inspect the 5' prefix (testing motif_reverse, fallback motif_forward)
+    and 3' suffix (testing motif_forward, fallback motif_reverse) while tolerating biological noise.
+
+    Args:
+        scaffolds: Mapping from scaffold/chromosome identifier to assembled nucleotide sequence.
+        out_path: Destination BED file path.
+        policy: Finish policy supplying canonical motifs and tolerance thresholds.
+
+    Returns:
+        Path to the emitted BED file.
+    """
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    tel_policy = policy.telomere
+    motif_fwd = tel_policy.motif_forward.value
+    motif_rev = tel_policy.motif_reverse.value
+    terminal_scan_bp = tel_policy.terminal_scan_bp.value
+    max_offset = tel_policy.max_terminal_offset_bp.value
+    max_internal_gap = tel_policy.max_internal_gap_bp.value
+    min_repeats = tel_policy.min_terminal_repeat_count.value
+
+    bed_rows: list[tuple[str, int, int, str, int, str]] = []
+
+    for scaf_id, seq in scaffolds.items():
+        if not seq:
+            continue
+        seq_len = len(seq)
+
+        # 5' prefix: scan motif_reverse first, fallback to motif_forward
+        call_5p = scan_terminal_tract(
+            seq,
+            motif=motif_rev,
+            terminal_scan_bp=terminal_scan_bp,
+            max_terminal_offset_bp=max_offset,
+            max_internal_gap_bp=max_internal_gap,
+            min_repeat_count=min_repeats,
+            is_suffix=False,
+        )
+        matched_5p_motif = motif_rev
+        if not call_5p.is_terminal_cap:
+            call_5p_fwd = scan_terminal_tract(
+                seq,
+                motif=motif_fwd,
+                terminal_scan_bp=terminal_scan_bp,
+                max_terminal_offset_bp=max_offset,
+                max_internal_gap_bp=max_internal_gap,
+                min_repeat_count=min_repeats,
+                is_suffix=False,
+            )
+            if call_5p_fwd.is_terminal_cap:
+                call_5p = call_5p_fwd
+                matched_5p_motif = motif_fwd
+
+        if call_5p.is_terminal_cap:
+            chrom_start = call_5p.offset_bp
+            chrom_end = call_5p.offset_bp + call_5p.tract_length_bp
+            strand = "-" if matched_5p_motif == motif_rev else "+"
+            bed_rows.append((scaf_id, chrom_start, chrom_end, "telomere_5p", call_5p.repeat_count, strand))
+
+        # 3' suffix: scan motif_forward first, fallback to motif_reverse
+        call_3p = scan_terminal_tract(
+            seq,
+            motif=motif_fwd,
+            terminal_scan_bp=terminal_scan_bp,
+            max_terminal_offset_bp=max_offset,
+            max_internal_gap_bp=max_internal_gap,
+            min_repeat_count=min_repeats,
+            is_suffix=True,
+        )
+        matched_3p_motif = motif_fwd
+        if not call_3p.is_terminal_cap:
+            call_3p_rev = scan_terminal_tract(
+                seq,
+                motif=motif_rev,
+                terminal_scan_bp=terminal_scan_bp,
+                max_terminal_offset_bp=max_offset,
+                max_internal_gap_bp=max_internal_gap,
+                min_repeat_count=min_repeats,
+                is_suffix=True,
+            )
+            if call_3p_rev.is_terminal_cap:
+                call_3p = call_3p_rev
+                matched_3p_motif = motif_rev
+
+        if call_3p.is_terminal_cap:
+            chrom_end = seq_len - call_3p.offset_bp
+            chrom_start = chrom_end - call_3p.tract_length_bp
+            strand = "+" if matched_3p_motif == motif_fwd else "-"
+            bed_rows.append((scaf_id, chrom_start, chrom_end, "telomere_3p", call_3p.repeat_count, strand))
+
+    bed_rows.sort(key=lambda r: (r[0], r[1], r[2]))
+
+    with open(target, "w", encoding="utf-8") as f:
+        for chrom, chrom_start, chrom_end, name, score, strand in bed_rows:
+            f.write(f"{chrom}\t{chrom_start}\t{chrom_end}\t{name}\t{score}\t{strand}\n")
+
+    return target
+
+
+def find_break_site_scaffolds(
+    scaffolds: Mapping[str, str],
+    agp_records: Sequence[AgpRecord | AgpGapRow],
+    junctions: Sequence[Any],
+) -> dict[str, list[Any]]:
+    """Map each scaffold ID to its matching break site junction records.
+
+    Matches either j.stem_port, j.germline_continuation_port, or j.chrom
+    against the scaffold's constituent segment IDs.
+    """
+    scaf_segments: dict[str, set[str]] = defaultdict(set)
+    for r in agp_records:
+        if getattr(r, "component_type", "") == "W":
+            scaf_segments[r.object_id].add(str(r.component_id))
+
+    matches_by_scaf: dict[str, list[Any]] = defaultdict(list)
+    for scaf_id in scaffolds:
+        segs = scaf_segments.get(scaf_id, set()) | {scaf_id}
+        for j in junctions:
+            j_stem = getattr(j, "stem_port", "") or ""
+            j_stem_clean = j_stem.rstrip("+-")
+            j_germ = getattr(j, "germline_continuation_port", "") or ""
+            j_germ_clean = j_germ.rstrip("+-") if j_germ else ""
+            j_chrom = getattr(j, "chrom", "") or ""
+
+            if (
+                j_chrom in segs
+                or j_stem_clean in segs
+                or j_stem in segs
+                or (j_germ_clean and j_germ_clean in segs)
+                or (j_germ and j_germ in segs)
+            ):
+                matches_by_scaf[scaf_id].append(j)
+
+    return matches_by_scaf
+
+
+def nominate_super_scaffolds(
+    scaffolds: Mapping[str, str],
+    agp_records: Sequence[AgpRecord | AgpGapRow],
+    junctions: Sequence[Any],
+    min_super_length: int = DEFAULT_MIN_SUPER_LENGTH,
+    resolutions: list[Any] | None = None,
+    end_states: list[Any] | None = None,
+) -> tuple[dict[str, str], list[AgpRecord | AgpGapRow], dict[str, str]]:
+    """Nominate large scaffolds carrying break site evidence as candidate chromosomes (SUPER_N).
+
+    Candidates are ranked in descending order of sequence length: SUPER_1 for largest,
+    SUPER_2 for second largest, etc. Non-candidate sequences retain their original IDs.
+
+    Args:
+        scaffolds: Mapping of scaffold IDs to nucleotide sequences.
+        agp_records: Assembled AGP records.
+        junctions: Sequence of JunctionRecord objects representing break sites.
+        min_super_length: Minimum sequence length in bp to qualify as candidate chromosome.
+        resolutions: Optional list of ResolutionRecord objects to update in-place.
+        end_states: Optional list of EndStateRecord objects to update in-place.
+
+    Returns:
+        Tuple of (renamed_scaffolds, updated_agp_records, rename_map).
+    """
+    matches = find_break_site_scaffolds(scaffolds, agp_records, junctions)
+    qualifying = [
+        sid for sid, seq in scaffolds.items() if len(matches.get(sid, [])) >= 1 and len(seq) >= min_super_length
+    ]
+    sorted_candidates = sorted(qualifying, key=lambda sid: (-len(scaffolds[sid]), sid))
+
+    rename_map: dict[str, str] = {}
+    for idx, sid in enumerate(sorted_candidates, start=1):
+        rename_map[sid] = f"SUPER_{idx}"
+
+    new_scaffolds: dict[str, str] = {}
+    # Candidate chromosomes first, sorted
+    for sid in sorted_candidates:
+        new_scaffolds[rename_map[sid]] = scaffolds[sid]
+    # Remaining non-candidate scaffolds
+    for sid, seq in scaffolds.items():
+        if sid not in rename_map:
+            new_scaffolds[sid] = seq
+
+    new_agp: list[AgpRecord | AgpGapRow] = []
+    for rec in agp_records:
+        if rec.object_id in rename_map:
+            rec.object_id = rename_map[rec.object_id]
+        new_agp.append(rec)
+
+    if resolutions is not None:
+        for rec in resolutions:
+            if getattr(rec, "chrom", None) in rename_map:
+                rec.chrom = rename_map[rec.chrom]
+
+    if end_states is not None:
+        for rec in end_states:
+            if getattr(rec, "chrom", None) in rename_map:
+                rec.chrom = rename_map[rec.chrom]
+
+    return new_scaffolds, new_agp, rename_map
+
+
+@dataclass(slots=True)
+class SequenceSummaryMetrics:
+    """Stoichiometric and sequence metrics for a break-site qualified chromosome/scaffold."""
+
+    sequence_id: str
+    core_length_bp: int
+    core_depth: float
+    grs_length_bp: int
+    grs_depth: float
+    stoichiometry_ratio: float
+    grs_percentage: float
+    break_site_count: int
+
+
+@dataclass(slots=True)
+class BreakSiteGenomeSummary:
+    """Summary metrics across all break-site verified candidate chromosomes."""
+
+    qualifying_sequences: list[SequenceSummaryMetrics]
+    total_core_length_bp: int
+    mean_core_depth: float
+    total_grs_length_bp: int
+    mean_grs_depth: float
+    overall_stoichiometry_ratio: float
+    overall_grs_percentage: float
+    total_break_sites: int
+
+
+def compute_break_site_summary(
+    graph: Any,
+    scaffolds: Mapping[str, str],
+    agp_records: Sequence[AgpRecord | AgpGapRow],
+    junctions: Sequence[Any],
+) -> BreakSiteGenomeSummary:
+    """Compute core genome vs GRS coverage strictly across sequences with break site evidence.
+
+    Args:
+        graph: Bidirected assembly graph containing segment depths.
+        scaffolds: Mapping of scaffold ID to nucleotide sequence.
+        agp_records: Assembled AGP records.
+        junctions: Junction records representing break sites.
+
+    Returns:
+        BreakSiteGenomeSummary with per-sequence breakdown and genome-wide totals.
+    """
+    matches = find_break_site_scaffolds(scaffolds, agp_records, junctions)
+    qualifying_ids = [sid for sid in scaffolds if len(matches.get(sid, [])) >= 1]
+    sorted_qualifying = sorted(qualifying_ids, key=lambda sid: (-len(scaffolds[sid]), sid))
+
+    agp_by_scaf: dict[str, list[AgpRecord | AgpGapRow]] = defaultdict(list)
+    for rec in agp_records:
+        agp_by_scaf[rec.object_id].append(rec)
+
+    core_provs = {
+        SequenceProvenance.HIFI_CORE,
+        SequenceProvenance.hifi_core,
+        "HiFi-core",
+    }
+    grs_provs = {
+        SequenceProvenance.HIFI_GERMLINE,
+        SequenceProvenance.hifi_germline,
+        "HiFi-germline",
+    }
+
+    qualifying_metrics: list[SequenceSummaryMetrics] = []
+    total_core_len_all = 0
+    total_core_weighted_depth_all = 0.0
+    total_grs_len_all = 0
+    total_grs_weighted_depth_all = 0.0
+    total_breaks_all = 0
+
+    for sid in sorted_qualifying:
+        scaf_recs = agp_by_scaf.get(sid, [])
+        core_len = 0
+        core_weighted_depth = 0.0
+        grs_len = 0
+        grs_weighted_depth = 0.0
+
+        for r in scaf_recs:
+            if getattr(r, "component_type", "") != "W":
+                continue
+            comp_len = r.object_end - r.object_beg + 1
+            seg_id = str(r.component_id)
+            seg_depth = 0.0
+            if hasattr(graph, "segments") and seg_id in graph.segments:
+                d = graph.segments[seg_id].depth
+                seg_depth = float(d) if d is not None else 0.0
+
+            prov = getattr(r, "sequence_provenance", None)
+            if prov in core_provs:
+                core_len += comp_len
+                core_weighted_depth += comp_len * seg_depth
+            elif prov in grs_provs:
+                grs_len += comp_len
+                grs_weighted_depth += comp_len * seg_depth
+
+        core_depth = (core_weighted_depth / core_len) if core_len > 0 else 0.0
+        grs_depth = (grs_weighted_depth / grs_len) if grs_len > 0 else 0.0
+        stoich_ratio = (grs_depth / core_depth) if core_depth > 0.0 else 0.0
+        denom = core_len + grs_len
+        grs_pct = (grs_len / denom * PERCENT_MULTIPLIER) if denom > 0 else 0.0
+        n_breaks = len(matches.get(sid, []))
+
+        qualifying_metrics.append(
+            SequenceSummaryMetrics(
+                sequence_id=sid,
+                core_length_bp=core_len,
+                core_depth=core_depth,
+                grs_length_bp=grs_len,
+                grs_depth=grs_depth,
+                stoichiometry_ratio=stoich_ratio,
+                grs_percentage=grs_pct,
+                break_site_count=n_breaks,
+            )
+        )
+
+        total_core_len_all += core_len
+        total_core_weighted_depth_all += core_weighted_depth
+        total_grs_len_all += grs_len
+        total_grs_weighted_depth_all += grs_weighted_depth
+        total_breaks_all += n_breaks
+
+    overall_core_depth = (total_core_weighted_depth_all / total_core_len_all) if total_core_len_all > 0 else 0.0
+    overall_grs_depth = (total_grs_weighted_depth_all / total_grs_len_all) if total_grs_len_all > 0 else 0.0
+    overall_stoich_ratio = (overall_grs_depth / overall_core_depth) if overall_core_depth > 0.0 else 0.0
+    overall_denom = total_core_len_all + total_grs_len_all
+    overall_grs_pct = (total_grs_len_all / overall_denom * PERCENT_MULTIPLIER) if overall_denom > 0 else 0.0
+
+    return BreakSiteGenomeSummary(
+        qualifying_sequences=qualifying_metrics,
+        total_core_length_bp=total_core_len_all,
+        mean_core_depth=overall_core_depth,
+        total_grs_length_bp=total_grs_len_all,
+        mean_grs_depth=overall_grs_depth,
+        overall_stoichiometry_ratio=overall_stoich_ratio,
+        overall_grs_percentage=overall_grs_pct,
+        total_break_sites=total_breaks_all,
+    )
+
+
+def emit_summary_tsv(
+    summary: BreakSiteGenomeSummary,
+    out_path: Path | str,
+) -> Path:
+    """Emit core vs GRS summary metrics table to TSV format.
+
+    Args:
+        summary: Computed BreakSiteGenomeSummary.
+        out_path: Destination TSV file path.
+
+    Returns:
+        Path to the emitted TSV file.
+    """
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    header = [
+        "sequence_id",
+        "core_length_bp",
+        "core_depth",
+        "grs_length_bp",
+        "grs_depth",
+        "stoichiometry_ratio",
+        "grs_percentage",
+        "break_site_count",
+    ]
+
+    lines = ["\t".join(header)]
+    for seq in summary.qualifying_sequences:
+        lines.append(
+            f"{seq.sequence_id}\t{seq.core_length_bp}\t{seq.core_depth:.2f}\t"
+            f"{seq.grs_length_bp}\t{seq.grs_depth:.2f}\t{seq.stoichiometry_ratio:.4f}\t"
+            f"{seq.grs_percentage:.2f}\t{seq.break_site_count}"
+        )
+
+    # Summary TOTAL row
+    lines.append(
+        f"TOTAL\t{summary.total_core_length_bp}\t{summary.mean_core_depth:.2f}\t"
+        f"{summary.total_grs_length_bp}\t{summary.mean_grs_depth:.2f}\t"
+        f"{summary.overall_stoichiometry_ratio:.4f}\t{summary.overall_grs_percentage:.2f}\t"
+        f"{summary.total_break_sites}"
+    )
+
+    with open(target, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    return target
+
+
+def format_summary_table(summary: BreakSiteGenomeSummary) -> str:
+    """Format human-readable summary table for console output."""
+    sep = "=" * TABLE_SEPARATOR_WIDTH
+    sub_sep = "-" * TABLE_SEPARATOR_WIDTH
+    header_title = "gfapdefinisher Finish Summary (Break-Site Verified Sequences)"
+    table_lines = [
+        sep,
+        header_title,
+        sep,
+        f"{'Sequence ID':<18}{'Core (bp)':>14}{'Core Depth':>14}{'GRS (bp)':>14}{'GRS Depth':>14}{'Stoich Ratio':>16}{'GRS %':>10}{'Breaks':>8}",
+        sub_sep,
+    ]
+
+    for s in summary.qualifying_sequences:
+        table_lines.append(
+            f"{s.sequence_id:<18}{s.core_length_bp:>14,}{s.core_depth:>13.2f}x{s.grs_length_bp:>14,}{s.grs_depth:>13.2f}x{s.stoichiometry_ratio:>16.4f}{s.grs_percentage:>9.2f}%{s.break_site_count:>8}"
+        )
+
+    table_lines.append(sub_sep)
+    table_lines.append(
+        f"{'TOTAL':<18}{summary.total_core_length_bp:>14,}{summary.mean_core_depth:>13.2f}x{summary.total_grs_length_bp:>14,}{summary.mean_grs_depth:>13.2f}x{summary.overall_stoichiometry_ratio:>16.4f}{summary.overall_grs_percentage:>9.2f}%{summary.total_break_sites:>8}"
+    )
+    table_lines.append(sep)
+
+    return "\n".join(table_lines)
+
+
+def parse_summary_tsv(file: Path | str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Parse a summary.tsv file into per-sequence records and the overall total record."""
+    p = Path(file)
+    content = p.read_text(encoding="utf-8")
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not lines:
+        return [], {}
+
+    header = lines[0].split("\t")
+    seq_rows: list[dict[str, Any]] = []
+    total_row: dict[str, Any] = {}
+
+    for line in lines[1:]:
+        parts = line.split("\t")
+        row = dict(zip(header, parts, strict=False))
+        typed_row: dict[str, Any] = {
+            "sequence_id": row["sequence_id"],
+            "core_length_bp": int(row["core_length_bp"]),
+            "core_depth": float(row["core_depth"]),
+            "grs_length_bp": int(row["grs_length_bp"]),
+            "grs_depth": float(row["grs_depth"]),
+            "stoichiometry_ratio": float(row["stoichiometry_ratio"]),
+            "grs_percentage": float(row["grs_percentage"]),
+            "break_site_count": int(row["break_site_count"]),
+        }
+        if typed_row["sequence_id"] == "TOTAL":
+            total_row = typed_row
+        else:
+            seq_rows.append(typed_row)
+
+    return seq_rows, total_row

@@ -24,15 +24,28 @@ from gfapdefinisher.emitter import (
     SequenceProvenance,
     assemble_path_sequence,
     assemble_scaffold_sequence,
+    compute_break_site_summary,
     emit_agp,
     emit_fasta,
+    emit_grs_bed,
     emit_scaffold,
+    emit_summary_tsv,
+    emit_telomere_bed,
+    format_summary_table,
+    nominate_super_scaffolds,
     parse_agp,
+    parse_summary_tsv,
 )
+from gfapdefinisher.graph import BidirectedGraph
 from gfapdefinisher.models import SegmentPort, Strand
+from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.resolutions import (
     IntervalQuirk,
+    JunctionClass,
+    JunctionRecord,
     QuirkRecord,
+    ResolutionRecord,
+    ResolutionType,
     emit_quirks_tsv,
     parse_quirks_tsv,
 )
@@ -678,3 +691,415 @@ def test_path_component_default_hifi_spanning_and_gap_emission():
     assert rows[1].component_type == "U"
     assert rows[1].linkage_evidence == "hifi-spanning"
     assert rows[1].to_line() == "chrX\t201\t300\t2\tU\t100\trepeat\tyes\thifi-spanning"
+
+
+def test_emit_grs_bed_coordinates_and_strict_exclusions(tmp_path: Path):
+    """Verify emit_grs_bed emits 0-based half-open coordinates and strictly excludes repeat gaps and ONT."""
+    recs = [
+        # HiFi-core segment (should be excluded)
+        AgpRecord(
+            object_id="chrI",
+            object_beg=1,
+            object_end=1000,
+            part_number=1,
+            component_type="W",
+            component_id="utg_core",
+            component_beg=1,
+            component_end=1000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_CORE,
+        ),
+        # HiFi-germline GRS segment (should be included)
+        AgpRecord(
+            object_id="chrI",
+            object_beg=1001,
+            object_end=2500,
+            part_number=2,
+            component_type="W",
+            component_id="utg_grs",
+            component_beg=1,
+            component_end=1500,
+            orientation="-",
+            sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+        ),
+        # Gap type repeat / variable satellite gap (strictly excluded)
+        AgpGapRow(
+            object_id="chrI",
+            object_beg=2501,
+            object_end=2600,
+            part_number=3,
+            component_type="U",
+            gap_length=100,
+            gap_type="repeat",
+            linkage="yes",
+            linkage_evidence="satellite-kmer",
+        ),
+        # ONT-derived unpolished bridge (strictly excluded)
+        AgpRecord(
+            object_id="chrI",
+            object_beg=2601,
+            object_end=3600,
+            part_number=4,
+            component_type="W",
+            component_id="ont_read_01",
+            component_beg=1,
+            component_end=1000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.ONT_DERIVED,
+            unpolished=True,
+        ),
+        # Second HiFi-germline segment on chrII
+        AgpRecord(
+            object_id="chrII",
+            object_beg=5001,
+            object_end=7000,
+            part_number=1,
+            component_type="W",
+            component_id="utg_grs2",
+            component_beg=1,
+            component_end=2000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+        ),
+    ]
+
+    out_bed = tmp_path / "GRS.bed"
+    ret = emit_grs_bed(recs, out_bed)
+    assert ret == out_bed
+    assert out_bed.exists()
+
+    lines = [line.strip().split("\t") for line in out_bed.read_text(encoding="utf-8").splitlines() if line.strip()]
+    # Only the two HiFi-germline segments should be present
+    assert len(lines) == 2
+
+    # Verify 0-based half-open coordinates:
+    # chrI: 1001..2500 in AGP -> 1000..2500 in BED
+    assert lines[0] == ["chrI", "1000", "2500", "utg_grs", "0", "-"]
+    # chrII: 5001..7000 in AGP -> 5000..7000 in BED
+    assert lines[1] == ["chrII", "5000", "7000", "utg_grs2", "0", "+"]
+
+
+def test_emit_telomere_bed_5p_3p_caps(tmp_path: Path):
+    """Verify emit_telomere_bed accurately detects and annotates 5' and 3' terminal telomere caps in BED format."""
+    motif_fwd = DEFAULT_POLICY.telomere.motif_forward.value  # TTAGGC
+    motif_rev = DEFAULT_POLICY.telomere.motif_reverse.value  # GCCTAA
+
+    # chr1: 5' cap (GCCTAA*35 at offset 15) and 3' cap (TTAGGC*35 at suffix offset 0)
+    seq_chr1 = ("A" * 15) + (motif_rev * 35) + ("C" * 2000) + (motif_fwd * 35)
+    # chr2: 5' cap with fallback forward motif (TTAGGC*35 at offset 0)
+    seq_chr2 = (motif_fwd * 35) + ("G" * 3000)
+    # chr3: naked sequence without terminal telomeres
+    seq_chr3 = "A" * 4000
+
+    scaffolds = {
+        "chr1": seq_chr1,
+        "chr2": seq_chr2,
+        "chr3": seq_chr3,
+    }
+
+    out_bed = tmp_path / "telomeres.bed"
+    ret = emit_telomere_bed(scaffolds, out_bed)
+    assert ret == out_bed
+    assert out_bed.exists()
+
+    lines = [line.strip().split("\t") for line in out_bed.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 3
+
+    # chr1 5p cap: offset 15, length 35*6 = 210 -> chromStart=15, chromEnd=225, strand="-"
+    assert lines[0] == ["chr1", "15", "225", "telomere_5p", "35", "-"]
+    # chr1 3p cap: ends at len(seq_chr1), length 210 -> chromStart=len-210, chromEnd=len, strand="+"
+    chr1_len = len(seq_chr1)
+    assert lines[1] == ["chr1", str(chr1_len - 210), str(chr1_len), "telomere_3p", "35", "+"]
+    # chr2 5p cap: offset 0, fallback motif TTAGGC -> strand="+"
+    assert lines[2] == ["chr2", "0", "210", "telomere_5p", "35", "+"]
+
+
+def test_find_break_site_scaffolds_and_nominate_super():
+    """Verify nomination of SUPER candidate chromosomes sorted descending by length."""
+    scaffolds = {
+        "chr_big": "A" * 500000,
+        "chr_mid": "C" * 300000,
+        "chr_small": "G" * 50000,  # Below 100 kb threshold
+        "chr_bacterial": "T" * 600000,  # No break site
+    }
+
+    agp_records = [
+        AgpRecord(
+            object_id="chr_big",
+            object_beg=1,
+            object_end=500000,
+            part_number=1,
+            component_type="W",
+            component_id="utg_big",
+            component_beg=1,
+            component_end=500000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_CORE,
+        ),
+        AgpRecord(
+            object_id="chr_mid",
+            object_beg=1,
+            object_end=300000,
+            part_number=1,
+            component_type="W",
+            component_id="utg_mid",
+            component_beg=1,
+            component_end=300000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_CORE,
+        ),
+        AgpRecord(
+            object_id="chr_small",
+            object_beg=1,
+            object_end=50000,
+            part_number=1,
+            component_type="W",
+            component_id="utg_small",
+            component_beg=1,
+            component_end=50000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_CORE,
+        ),
+        AgpRecord(
+            object_id="chr_bacterial",
+            object_beg=1,
+            object_end=600000,
+            part_number=1,
+            component_type="W",
+            component_id="utg_bact",
+            component_beg=1,
+            component_end=600000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_CORE,
+        ),
+    ]
+
+    junctions = [
+        JunctionRecord(
+            feature_id="junc_big",
+            chrom="chr_big",
+            side="3p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="utg_big+",
+            germline_continuation_port="utg_big_grs+",
+        ),
+        JunctionRecord(
+            feature_id="junc_mid",
+            chrom="chr_mid",
+            side="5p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="utg_mid-",
+        ),
+        JunctionRecord(
+            feature_id="junc_small",
+            chrom="chr_small",
+            side="3p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="utg_small+",
+        ),
+    ]
+
+    resolutions = [
+        ResolutionRecord(
+            feature_id="res_big",
+            chrom="chr_big",
+            side="3p",
+            resolution_type=ResolutionType.PDE_TERMINAL_CAP,
+        ),
+        ResolutionRecord(
+            feature_id="res_bact",
+            chrom="chr_bacterial",
+            side="3p",
+            resolution_type=ResolutionType.PDE_TERMINAL_CAP,
+        ),
+    ]
+
+    new_scaffs, new_agp, rename_map = nominate_super_scaffolds(
+        scaffolds=scaffolds,
+        agp_records=agp_records,
+        junctions=junctions,
+        min_super_length=100000,
+        resolutions=resolutions,
+    )
+
+    # chr_big (500 kb) qualifies and is largest -> SUPER_1
+    # chr_mid (300 kb) qualifies and is second largest -> SUPER_2
+    # chr_small (50 kb) < 100 kb -> retains chr_small
+    # chr_bacterial (600 kb) has NO break site -> retains chr_bacterial
+    assert rename_map == {
+        "chr_big": "SUPER_1",
+        "chr_mid": "SUPER_2",
+    }
+
+    assert "SUPER_1" in new_scaffs and len(new_scaffs["SUPER_1"]) == 500000
+    assert "SUPER_2" in new_scaffs and len(new_scaffs["SUPER_2"]) == 300000
+    assert "chr_small" in new_scaffs
+    assert "chr_bacterial" in new_scaffs
+
+    # AGP records updated
+    obj_ids = [r.object_id for r in new_agp]
+    assert obj_ids == ["SUPER_1", "SUPER_2", "chr_small", "chr_bacterial"]
+
+    # Resolution records updated
+    assert resolutions[0].chrom == "SUPER_1"
+    assert resolutions[1].chrom == "chr_bacterial"
+
+
+def test_compute_break_site_summary_and_emit_summary_tsv(tmp_path: Path):
+    """Verify compute_break_site_summary and emit_summary_tsv compute accurate core vs GRS stoichiometry."""
+    graph = BidirectedGraph()
+    # chr1 components: 100 kb core (60x), 30 kb GRS (6x)
+    graph.add_segment("chr1_stem", length=100000, depth=60.0)
+    graph.add_segment("chr1_grs", length=30000, depth=6.0)
+    # chr2 components: 200 kb core (50x), 20 kb GRS (10x)
+    graph.add_segment("chr2_stem", length=200000, depth=50.0)
+    graph.add_segment("chr2_grs", length=20000, depth=10.0)
+    # Bacterial contaminant (no break site): 500 kb core (15x)
+    graph.add_segment("bact_utg", length=500000, depth=15.0)
+
+    scaffolds = {
+        "SUPER_1": "A" * 220000,
+        "SUPER_2": "C" * 130000,
+        "bacterial_contig": "G" * 500000,
+    }
+
+    agp_records = [
+        # SUPER_1: chr2
+        AgpRecord(
+            object_id="SUPER_1",
+            object_beg=1,
+            object_end=200000,
+            part_number=1,
+            component_type="W",
+            component_id="chr2_stem",
+            component_beg=1,
+            component_end=200000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_CORE,
+        ),
+        AgpRecord(
+            object_id="SUPER_1",
+            object_beg=200001,
+            object_end=220000,
+            part_number=2,
+            component_type="W",
+            component_id="chr2_grs",
+            component_beg=1,
+            component_end=20000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+        ),
+        # SUPER_2: chr1
+        AgpRecord(
+            object_id="SUPER_2",
+            object_beg=1,
+            object_end=100000,
+            part_number=1,
+            component_type="W",
+            component_id="chr1_stem",
+            component_beg=1,
+            component_end=100000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_CORE,
+        ),
+        AgpRecord(
+            object_id="SUPER_2",
+            object_beg=100001,
+            object_end=130000,
+            part_number=2,
+            component_type="W",
+            component_id="chr1_grs",
+            component_beg=1,
+            component_end=30000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
+        ),
+        # Bacterial contig
+        AgpRecord(
+            object_id="bacterial_contig",
+            object_beg=1,
+            object_end=500000,
+            part_number=1,
+            component_type="W",
+            component_id="bact_utg",
+            component_beg=1,
+            component_end=500000,
+            orientation="+",
+            sequence_provenance=SequenceProvenance.HIFI_CORE,
+        ),
+    ]
+
+    junctions = [
+        JunctionRecord(
+            feature_id="j1",
+            chrom="SUPER_2",
+            side="3p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="chr1_stem+",
+            germline_continuation_port="chr1_grs+",
+        ),
+        JunctionRecord(
+            feature_id="j2",
+            chrom="SUPER_1",
+            side="3p",
+            junction_class=JunctionClass.PDE_TERMINAL,
+            stem_port="chr2_stem+",
+            germline_continuation_port="chr2_grs+",
+        ),
+    ]
+
+    summary = compute_break_site_summary(graph, scaffolds, agp_records, junctions)
+
+    # Bacterial contig must be strictly excluded!
+    assert len(summary.qualifying_sequences) == 2
+    s1, s2 = summary.qualifying_sequences
+    assert s1.sequence_id == "SUPER_1"
+    assert s1.core_length_bp == 200000
+    assert s1.core_depth == 50.0
+    assert s1.grs_length_bp == 20000
+    assert s1.grs_depth == 10.0
+    assert s1.stoichiometry_ratio == pytest.approx(10.0 / 50.0)
+    assert s1.grs_percentage == pytest.approx(20000 / 220000 * 100.0)
+    assert s1.break_site_count == 1
+
+    assert s2.sequence_id == "SUPER_2"
+    assert s2.core_length_bp == 100000
+    assert s2.core_depth == 60.0
+    assert s2.grs_length_bp == 30000
+    assert s2.grs_depth == 6.0
+    assert s2.stoichiometry_ratio == pytest.approx(6.0 / 60.0)
+    assert s2.grs_percentage == pytest.approx(30000 / 130000 * 100.0)
+    assert s2.break_site_count == 1
+
+    # Genome-wide totals across qualifying sequences:
+    # Total Core = 300,000 bp; mean depth = (200000*50 + 100000*60) / 300000 = 16000000 / 300000 = 53.333x
+    assert summary.total_core_length_bp == 300000
+    assert summary.mean_core_depth == pytest.approx(53.3333, rel=1e-3)
+    # Total GRS = 50,000 bp; mean depth = (20000*10 + 30000*6) / 50000 = 380000 / 50000 = 7.60x
+    assert summary.total_grs_length_bp == 50000
+    assert summary.mean_grs_depth == pytest.approx(7.60, rel=1e-3)
+    # Stoichiometry ratio = 7.60 / 53.3333 = 0.1425
+    assert summary.overall_stoichiometry_ratio == pytest.approx(7.60 / (160 / 3), rel=1e-3)
+    # GRS percentage = 50000 / 350000 * 100 = 14.2857%
+    assert summary.overall_grs_percentage == pytest.approx(50000 / 350000 * 100.0, rel=1e-3)
+    assert summary.total_break_sites == 2
+
+    # Emission and parsing round-trip
+    out_tsv = tmp_path / "summary.tsv"
+    emit_summary_tsv(summary, out_tsv)
+    assert out_tsv.exists()
+
+    seq_rows, total_row = parse_summary_tsv(out_tsv)
+    assert len(seq_rows) == 2
+    assert seq_rows[0]["sequence_id"] == "SUPER_1"
+    assert seq_rows[1]["sequence_id"] == "SUPER_2"
+    assert total_row["sequence_id"] == "TOTAL"
+    assert total_row["core_length_bp"] == 300000
+    assert total_row["grs_length_bp"] == 50000
+
+    # Human-readable table rendering
+    table_str = format_summary_table(summary)
+    assert "gfapdefinisher Finish Summary" in table_str
+    assert "SUPER_1" in table_str
+    assert "SUPER_2" in table_str
+    assert "TOTAL" in table_str
