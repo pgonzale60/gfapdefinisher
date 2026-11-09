@@ -639,12 +639,69 @@ def classify_pde_junction(
     # Low-support somatic dropout qualification:
     # If no standard somatic arm was qualified, check if an alternate somatic stub
     # terminating directly (0 hops) in an authentic telomeric cap is paired with a
-    # stoichiometric germline candidate arm (Issue #31).
+    # stoichiometric germline candidate arm (Issue #31, Issue #57).
     if dropout_candidates:
+        # A. Dual-Capped Disambiguation:
+        # If two outgoing branches terminate directly in authentic telomeric caps,
+        # one is the somatic telomere (added de novo at breakpoint) and the other is the
+        # distal germline telomere (continuing the arm through the eliminated domain).
+        # Biologically, the germline arm spans the eliminated domain to the distal cap,
+        # so its unshared distal extension (length - stem_overlap) is strictly longer
+        # than the somatic breakpoint stub.
+        capped_branches = [p for p, _ in dropout_candidates if _is_telomere_capped(p, graph, ledger_by_port)]
+        if len(capped_branches) >= 2:
+            from gfapdefinisher.cigar import cigar_overlap_length
+
+            branch_extensions: list[tuple[SegmentPort, int, int]] = []
+            for bp in capped_branches:
+                b_seg = graph.segments.get(bp.name)
+                b_len = b_seg.length if b_seg else 0
+                edge = next((e for e in outgoing_edges if e.to_port == bp), None)
+                ovlp = cigar_overlap_length(edge.cigar) if (edge and edge.cigar) else 0
+                delta_l = max(0, b_len - ovlp)
+                branch_extensions.append((bp, delta_l, b_len))
+
+            # Longest extension is the germline continuation arm spanning the eliminated domain;
+            # shortest extension is the truncated somatic stub.
+            branch_extensions.sort(key=lambda item: -item[1])
+            grs_port = branch_extensions[0][0]
+            som_port = branch_extensions[-1][0]
+
+            grs_seg = graph.segments.get(grs_port.name)
+            grs_depth = grs_seg.depth if grs_seg else 0.0
+            grs_ratio = grs_depth / core_coverage
+
+            if min_germline_ratio <= grs_ratio <= max_germline_ratio:
+                return PdeJunctionCall(
+                    port=resolved_stem,
+                    is_pde_junction=True,
+                    somatic_port=som_port,
+                    germline_port=grs_port,
+                    depth_ratio=grs_ratio,
+                    stem_depth_ratio=grs_depth / stem_depth,
+                    core_depth_ratio=grs_ratio,
+                    is_repeat_entry=False,
+                    is_somatic_dropout=True,
+                )
+
+        # B. Single-Capped Dropout with Non-Capped GRS Continuation:
         dropout_candidates.sort(key=lambda item: (-item[1], item[0].name, item[0].strand.value))
 
         for best_dropout_port, _ in dropout_candidates:
-            eligible_germline = [cand for cand in germline_candidates if cand.port.name != best_dropout_port.name]
+            eligible_germline = [
+                cand
+                for cand in germline_candidates
+                if cand.port.name != best_dropout_port.name
+                and (
+                    cand.core_depth_ratio > min_germline_ratio
+                    or graph.degree(cand.port) > 0
+                    or (
+                        _lookup_evidence(ledger_by_port, cand.port) is not None
+                        and _lookup_evidence(ledger_by_port, cand.port).usco_hit_count > 0
+                    )
+                    or _is_telomere_capped(cand.port, graph, ledger_by_port)
+                )
+            ]
             if eligible_germline:
                 eligible_germline.sort(
                     key=lambda cand: (

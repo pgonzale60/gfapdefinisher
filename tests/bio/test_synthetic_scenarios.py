@@ -28,6 +28,7 @@ from gfapdefinisher.classifier import (
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
+from gfapdefinisher.policy import DEFAULT_POLICY
 
 
 def _make_evidence(
@@ -253,10 +254,12 @@ def test_bio_003_graph_topology_discovers_diminution_without_coordinates():
     graph.add_segment("bubble_arm_b", length=30_000, depth=30.0)
     graph.add_segment("bubble_reconverg", length=50_000, depth=60.0)
 
-    # Spurious low-depth noise branch (negative control 3: depth ratio < 0.04)
-    graph.add_segment("noise_stem", length=100_000, depth=60.0)
+    # Spurious low-depth noise branch (negative control 3: depth ratio < min_germline_depth_ratio)
+    noise_stem_depth = 60.0
+    noise_branch_depth = noise_stem_depth * DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value * 0.5
+    graph.add_segment("noise_stem", length=100_000, depth=noise_stem_depth)
     graph.add_segment("noise_som_cap", length=20_000, depth=50.0)
-    graph.add_segment("noise_branch", length=40_000, depth=1.0)  # 1.0 / 60.0 = 0.0167 < 0.04
+    graph.add_segment("noise_branch", length=40_000, depth=noise_branch_depth)
 
     # Wire edges
     p_stem = SegmentPort("somatic_stem", Strand.FORWARD)
@@ -296,9 +299,9 @@ def test_bio_003_graph_topology_discovers_diminution_without_coordinates():
     ev_bub_b = _make_evidence("bubble_arm_b", "3p", depth=30.0, degree=1, is_tip=False)
     ev_bub_reconv = _make_evidence("bubble_reconverg", "3p", depth=60.0, degree=1, is_tip=False)
 
-    ev_noise_stem = _make_evidence("noise_stem", "3p", depth=60.0, degree=2, is_tip=False)
+    ev_noise_stem = _make_evidence("noise_stem", "3p", depth=noise_stem_depth, degree=2, is_tip=False)
     ev_noise_som = _make_evidence("noise_som_cap", "3p", depth=50.0, degree=0, is_tip=True, has_terminal_telomere=True)
-    ev_noise_br = _make_evidence("noise_branch", "3p", depth=1.0, degree=0, is_tip=True)
+    ev_noise_br = _make_evidence("noise_branch", "3p", depth=noise_branch_depth, degree=0, is_tip=True)
 
     ledger = {
         p_stem.to_symbol(): ev_stem,
@@ -329,7 +332,7 @@ def test_bio_003_graph_topology_discovers_diminution_without_coordinates():
     call_bub = classify_pde_junction(p_bub_stem, graph, ledger)
     assert call_bub.is_pde_junction is False
 
-    # Negative control 3: Spurious low-depth noise (<0.04) is rejected
+    # Negative control 3: Spurious low-depth noise (< min_germline_depth_ratio) is rejected
     call_noise = classify_pde_junction(p_noise_stem, graph, ledger)
     assert call_noise.is_pde_junction is False
 

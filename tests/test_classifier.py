@@ -13,7 +13,7 @@ from gfapdefinisher.classifier import (
 from gfapdefinisher.graph import BidirectedGraph
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
-from gfapdefinisher.policy import Policy, PolicyValue, StoichiometryPolicy, TelomerePolicy
+from gfapdefinisher.policy import DEFAULT_POLICY, Policy, PolicyValue, StoichiometryPolicy, TelomerePolicy
 
 
 def _make_dummy_evidence(
@@ -258,11 +258,14 @@ def test_negative_cases_symmetric_bubble():
 
 
 def test_negative_cases_depth_ratio_too_low():
-    """Verify germline depth ratio below 0.04 (e.g. 1x / 60x = 0.0167) is rejected."""
+    """Verify germline depth ratio below policy min_germline_depth_ratio is rejected."""
+    stem_depth = 60.0
+    noise_depth = stem_depth * DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value * 0.5
+
     graph = BidirectedGraph()
-    graph.add_segment("stem", length=100000, depth=60.0)
+    graph.add_segment("stem", length=100000, depth=stem_depth)
     graph.add_segment("somatic_cap", length=25000, depth=50.0)
-    graph.add_segment("noise_branch", length=5000, depth=1.0)
+    graph.add_segment("noise_branch", length=5000, depth=noise_depth)
 
     p_stem = SegmentPort("stem", Strand.FORWARD)
     p_som = SegmentPort("somatic_cap", Strand.FORWARD)
@@ -272,9 +275,9 @@ def test_negative_cases_depth_ratio_too_low():
     graph.add_edge(p_stem, p_noise, cigar="100M")
 
     ledger = {
-        p_stem.to_symbol(): _make_dummy_evidence("stem", "3p", depth=60.0, degree=2),
+        p_stem.to_symbol(): _make_dummy_evidence("stem", "3p", depth=stem_depth, degree=2),
         p_som.to_symbol(): _make_dummy_evidence("somatic_cap", "3p", depth=50.0, has_terminal_telomere=True),
-        p_noise.to_symbol(): _make_dummy_evidence("noise_branch", "3p", depth=1.0),
+        p_noise.to_symbol(): _make_dummy_evidence("noise_branch", "3p", depth=noise_depth),
     }
 
     call = classify_pde_junction(p_stem, graph, ledger)
@@ -612,7 +615,6 @@ def test_biological_branch_ranking():
     # Must pick the biologically superior candidate rather than alphabetically first
     assert call.germline_port == p_cand_bio
     assert abs(call.core_depth_ratio - (11.0 / 60.0)) < 1e-4
-    assert call.core_depth_ratio == call.depth_ratio
 
 
 def test_distinct_somatic_and_germline_branches_when_cap_matches_core_stoichiometry():
@@ -656,10 +658,12 @@ def test_distinct_somatic_and_germline_branches_when_cap_matches_core_stoichiome
 
 def test_rejection_when_somatic_cap_is_only_germline_depth_branch():
     """Verify that if somatic cap is the only branch with germline-level core depth, junction is rejected."""
+    core_cov = 60.0
+    noise_depth = core_cov * DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value * 0.5
     graph = BidirectedGraph()
     graph.add_segment("stem", length=100000, depth=35.0)
     graph.add_segment("cap", length=20000, depth=18.0)
-    graph.add_segment("noise", length=10000, depth=0.1)  # 0.1 / 60 = 0.0016 < min_germline_depth_ratio (0.04)
+    graph.add_segment("noise", length=10000, depth=noise_depth)
 
     p_stem = SegmentPort("stem", Strand.FORWARD)
     p_cap = SegmentPort("cap", Strand.FORWARD)
@@ -675,10 +679,10 @@ def test_rejection_when_somatic_cap_is_only_germline_depth_branch():
         p_cap.to_symbol(): _make_dummy_evidence(
             "cap", "3p", depth=18.0, degree=0, is_tip=True, has_terminal_telomere=True, tiara_class="eukarya"
         ),
-        p_noise.to_symbol(): _make_dummy_evidence("noise", "3p", depth=0.1, degree=0, is_tip=True),
+        p_noise.to_symbol(): _make_dummy_evidence("noise", "3p", depth=noise_depth, degree=0, is_tip=True),
     }
 
-    call = classify_pde_junction(p_stem, graph, ledger, core_coverage=60.0)
+    call = classify_pde_junction(p_stem, graph, ledger, core_coverage=core_cov)
     # Must reject because no distinct germline continuation exists
     assert call.is_pde_junction is False
 

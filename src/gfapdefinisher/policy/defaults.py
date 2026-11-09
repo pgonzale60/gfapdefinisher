@@ -48,20 +48,20 @@ class StoichiometryPolicy:
     min_stem_core_ratio: PolicyValue[float] = PolicyValue(
         value=0.50,
         justification="Minimum stem read depth relative to core coverage to qualify as a substantial somatic stem; BIO-002",
-        provenance="@pgonzale60 biological calibration from somatic chromosome depth vs GRS; BIO-002",
-        provisional=True,
+        provenance="@pgonzale60 biological ratification on Issue #57; BIO-002",
+        provisional=False,
     )
     min_germline_depth_ratio: PolicyValue[float] = PolicyValue(
-        value=0.04,
-        justification="Lower bound for germline-retained depth relative to somatic stem depth in mixed worm tissue; ~5% of cells are germline in unstaged culture, avoiding filtering out true GRS.",
-        provenance="@pgonzale60 biological calibration from unstaged nematode cell proportions and GRS sensitivity (BIO-002)",
-        provisional=True,
+        value=0.01,
+        justification="Lower bound for germline-retained depth relative to somatic stem depth in mixed worm tissue; permits inclusion of lowest-coverage GRS (down to 1% of core coverage); BIO-002",
+        provenance="@pgonzale60 biological ratification on Issue #57 (accepts down to 1% core coverage to include lowest-coverage GRS); BIO-002",
+        provisional=False,
     )
     max_germline_depth_ratio: PolicyValue[float] = PolicyValue(
         value=0.33,
         justification="Upper bound for germline-retained depth relative to somatic stem depth in mixed worm tissue (0.33x core somatic coverage C_core); ratified on Issue #26.",
         provenance="Empirical reference benchmark data calibration ratified on Issue #26; BIO-002",
-        provisional=True,
+        provisional=False,
     )
 
 
@@ -70,8 +70,8 @@ class PdePolicy:
     max_somatic_cap_hops: PolicyValue[int] = PolicyValue(
         value=2,
         justification="Maximum traversal hops from a somatic bifurcation port to identify an authentic terminal telomeric cap, accommodating short linker or bubble segments before the telomere tract; BIO-003",
-        provenance="Empirical benchmark observation across curated nematode PDE junctions; BIO-003",
-        provisional=True,
+        provenance="@pgonzale60 biological ratification on Issue #57; BIO-003",
+        provisional=False,
     )
 
 
@@ -80,26 +80,26 @@ class OntBridgingPolicy:
     min_anchor_bp: PolicyValue[int] = PolicyValue(
         value=1000,
         justification="Minimum alignment anchor length on flanking unitigs to ensure unambiguous physical anchoring across the satellite gap.",
-        provenance="Empirical benchmark observation from consensus bridging; BIO-004",
-        provisional=True,
+        provenance="@pgonzale60 biological ratification on Issue #57; BIO-004",
+        provisional=False,
     )
     max_boundary_slack_bp: PolicyValue[int] = PolicyValue(
         value=1500,
         justification="Maximum unaligned bases allowed between alignment terminus and the designated gap port boundary, accommodating repeat boundary fuzziness.",
-        provenance="Empirical boundary slack calibration on reference benchmark satellite arrays; BIO-004",
-        provisional=True,
+        provenance="@pgonzale60 biological ratification on Issue #57; BIO-004",
+        provisional=False,
     )
     min_mapq: PolicyValue[int] = PolicyValue(
         value=0,
         justification="Minimum mapping quality for repeat-flanking alignments; 0 permits repetitive satellite alignments when anchored by unique dovetail.",
-        provenance="Empirical mapping quality calibration for tandem satellite arrays",
-        provisional=True,
+        provenance="@pgonzale60 biological ratification on Issue #57",
+        provisional=False,
     )
     min_spanning_reads: PolicyValue[int] = PolicyValue(
         value=2,
         justification="Minimum distinct spanning reads required to confirm physical bridging across the satellite array and declare END_COMPLETE.",
-        provenance="Biological support floor for structural variant and bridge confirmation; BIO-004",
-        provisional=True,
+        provenance="@pgonzale60 biological ratification on Issue #57; BIO-004",
+        provisional=False,
     )
     quantile_num: PolicyValue[int] = PolicyValue(
         value=4,
