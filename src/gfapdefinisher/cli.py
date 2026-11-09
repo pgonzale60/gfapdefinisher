@@ -30,7 +30,7 @@ from gfapdefinisher.emitter import (
     nominate_super_scaffolds,
 )
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
-from gfapdefinisher.ledger import build_end_evidence_ledger, emit_tsv_ledger
+from gfapdefinisher.ledger import EndEvidence, build_end_evidence_ledger, emit_tsv_ledger
 from gfapdefinisher.models import SegmentPort, Strand
 from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.rdna import RdnaCassetteResolver, RdnaResolution
@@ -65,9 +65,7 @@ def create_parser() -> argparse.ArgumentParser:
     report_parser = subparsers.add_parser("report", help="Generate unitig end-evidence ledger TSV report")
     report_parser.add_argument("--gfa", required=True, type=Path, help="Path to input GFA1 file (.gfa or .gfa.gz)")
     report_parser.add_argument("--tiara", type=Path, default=None, help="Path to Tiara classification tabular output")
-    report_parser.add_argument("--tidk", type=Path, default=None, help="Path to TIDK telomeric repeat windows TSV")
     report_parser.add_argument("--barrnap", type=Path, default=None, help="Path to Barrnap rDNA annotations GFF3")
-    report_parser.add_argument("--compleasm", type=Path, default=None, help="Path to Compleasm full table TSV")
     report_parser.add_argument("--out", type=Path, default=None, help="Output TSV path (default: stdout)")
     report_parser.add_argument(
         "--terminal-window",
@@ -82,9 +80,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     finish_parser.add_argument("--gfa", required=True, type=Path, help="Path to input GFA1 file (.gfa or .gfa.gz)")
     finish_parser.add_argument("--tiara", type=Path, default=None, help="Path to Tiara classification tabular output")
-    finish_parser.add_argument("--tidk", type=Path, default=None, help="Path to TIDK telomeric repeat windows TSV")
     finish_parser.add_argument("--barrnap", type=Path, default=None, help="Path to Barrnap rDNA annotations GFF3")
-    finish_parser.add_argument("--compleasm", type=Path, default=None, help="Path to Compleasm full table TSV")
     finish_parser.add_argument(
         "--ont-paf",
         type=Path,
@@ -233,6 +229,7 @@ def _trace_germline_chain(
     ledger_map: Mapping[str, Any],
     germ_port: SegmentPort,
     max_hops: int,
+    core_coverage: float = 0.0,
 ) -> list[SegmentPort]:
     """Trace outward germline continuation unitigs to an authentic terminal telomeric cap."""
     ev = _lookup_evidence(ledger_map, germ_port)
@@ -246,6 +243,8 @@ def _trace_germline_chain(
     queue: list[tuple[SegmentPort, list[SegmentPort]]] = [(germ_port, [germ_port])]
     visited: set[SegmentPort] = {germ_port}
 
+    min_core_ratio = DEFAULT_POLICY.stoichiometry.min_stem_core_ratio.value
+
     while queue:
         curr, path = queue.pop(0)
         if len(path) - 1 >= max_hops:
@@ -256,7 +255,13 @@ def _trace_germline_chain(
             nxt = e.to_port
             if nxt in visited:
                 continue
-            if _get_usco_count(ledger_map, nxt.name) != 0 or _is_contam_unitig(ledger_map, nxt.name):
+            nxt_seg = graph.segments.get(nxt.name)
+            is_core_depth = (
+                (nxt_seg.depth or 0.0) >= min_core_ratio * core_coverage
+                if nxt_seg is not None and core_coverage > 0
+                else False
+            )
+            if is_core_depth or _get_usco_count(ledger_map, nxt.name) != 0 or _is_contam_unitig(ledger_map, nxt.name):
                 continue
 
             nxt_ev = _lookup_evidence(ledger_map, nxt)
@@ -285,8 +290,14 @@ def build_scaffolds(
     resolution_records: list[ResolutionRecord] | None = None,
     nominate_super: bool = False,
     min_super_length: int = DEFAULT_MIN_SUPER_LENGTH,
+    core_coverage: float = 0.0,
 ) -> tuple[dict[str, str], list[AgpRecord]]:
     """Assemble scaffold sequences and AGP v2.1 records with empirical provenance."""
+    if core_coverage <= 0.0 and ledger_map:
+        ev_items = [v for v in ledger_map.values() if isinstance(v, EndEvidence)]
+        if ev_items:
+            core_coverage = compute_core_coverage(graph, ev_items)
+
     active_resolutions: list[ResolutionRecord] | None = None
     if resolution_records is not None:
         active_resolutions = resolution_records
@@ -332,12 +343,20 @@ def build_scaffolds(
 
     stem_names = {j.stem_port.rstrip("+-") for j in junctions}
 
+    min_core_ratio = DEFAULT_POLICY.stoichiometry.min_stem_core_ratio.value
+
     def _has_telomere(port: SegmentPort) -> bool:
         ev = ledger_map.get(port.to_symbol())
         return bool(ev and getattr(ev, "has_terminal_telomere", False))
 
     def _is_core(name: str) -> bool:
-        return (name in stem_names or _get_usco_count(ledger_map, name) > 0) and not _is_contam_unitig(ledger_map, name)
+        seg = graph.segments.get(name)
+        is_core_depth = (
+            (seg.depth or 0.0) >= min_core_ratio * core_coverage if seg is not None and core_coverage > 0 else False
+        )
+        return (name in stem_names or is_core_depth or _get_usco_count(ledger_map, name) > 0) and not _is_contam_unitig(
+            ledger_map, name
+        )
 
     seen_pde_stems = {
         (rec.left_anchor_port.rstrip("+-"), rec.side)
@@ -413,7 +432,7 @@ def build_scaffolds(
             gp = _parse_port(j.germline_continuation_port)
             if gp.invert().to_symbol() in junctions_by_germ:
                 continue
-            cap_path = _trace_germline_chain(graph, ledger_map, gp, max_hops)
+            cap_path = _trace_germline_chain(graph, ledger_map, gp, max_hops, core_coverage=core_coverage)
             has_telo = bool(cap_path and _has_telomere(cap_path[-1]))
             target_ports = cap_path if has_telo else [gp]
             som_excl = (j.somatic_terminus_port.rstrip("+-"),) if j.somatic_terminus_port else ()
@@ -479,7 +498,7 @@ def build_scaffolds(
     for j in junctions:
         if j.germline_continuation_port:
             gp = _parse_port(j.germline_continuation_port)
-            g_chain = _trace_germline_chain(graph, ledger_map, gp, max_hops)
+            g_chain = _trace_germline_chain(graph, ledger_map, gp, max_hops, core_coverage=core_coverage)
             for p in g_chain:
                 continuation_targets.add(p.name)
 
@@ -548,8 +567,7 @@ def build_scaffolds(
                 if len(reconv_ports) == 1:
                     reconv_port = next(iter(reconv_ports))
                     if (
-                        not _is_core(reconv_port.name)
-                        and not _has_telomere(reconv_port)
+                        not _has_telomere(reconv_port)
                         and not _is_contam_unitig(ledger_map, reconv_port.name)
                         and reconv_port.name not in visited_stems
                         and reconv_port.name not in consumed
@@ -793,7 +811,7 @@ def build_scaffolds(
                 j_5p = junctions_by_stem[first_inv.to_symbol()]
                 if j_5p.germline_continuation_port:
                     gp_5p = _parse_port(j_5p.germline_continuation_port)
-                    g_chain_5p = _trace_germline_chain(graph, ledger_map, gp_5p, max_hops)
+                    g_chain_5p = _trace_germline_chain(graph, ledger_map, gp_5p, max_hops, core_coverage=core_coverage)
 
             # 5p ONT gap resolution (multi-hop and unpatched satellite gaps)
             curr_out = g_chain_5p[-1] if g_chain_5p else first_port.invert()
@@ -1108,7 +1126,7 @@ def build_scaffolds(
                 j_3p = junctions_by_stem[last_port.to_symbol()]
                 if j_3p.germline_continuation_port:
                     gp_3p = _parse_port(j_3p.germline_continuation_port)
-                    g_chain_3p = _trace_germline_chain(graph, ledger_map, gp_3p, max_hops)
+                    g_chain_3p = _trace_germline_chain(graph, ledger_map, gp_3p, max_hops, core_coverage=core_coverage)
 
             if g_chain_3p:
                 if comps:
@@ -1485,9 +1503,7 @@ def run_report(args: argparse.Namespace) -> None:
     graph = load_gfa(args.gfa)
     annotations = aggregate_node_annotations(
         tiara=args.tiara,
-        tidk=args.tidk,
         barrnap=args.barrnap,
-        compleasm=args.compleasm,
         sequence_ids=graph.segments.keys(),
     )
     ledger = build_end_evidence_ledger(
@@ -1507,9 +1523,7 @@ def run_finish(args: argparse.Namespace) -> None:
     graph = load_gfa(args.gfa, load_sequences=True)
     annotations = aggregate_node_annotations(
         tiara=args.tiara,
-        tidk=args.tidk,
         barrnap=args.barrnap,
-        compleasm=args.compleasm,
         sequence_ids=graph.segments.keys(),
     )
     ledger = build_end_evidence_ledger(
@@ -1655,6 +1669,7 @@ def run_finish(args: argparse.Namespace) -> None:
         junctions=junction_records,
         nominate_super=nominate_super,
         min_super_length=min_super_length,
+        core_coverage=core_coverage,
     )
 
     fasta_target: Path
@@ -1699,6 +1714,7 @@ def run_finish(args: argparse.Namespace) -> None:
         scaffolds=scaffolds,
         agp_records=agp_records,
         junctions=junction_records,
+        resolutions=resolution_records,
     )
     emit_summary_tsv(summary_data, summary_target)
     print(format_summary_table(summary_data))
@@ -1709,7 +1725,8 @@ def run_finish(args: argparse.Namespace) -> None:
     else:
         excluded_target = args.out_dir / "excluded.fasta"
 
-    emit_excluded_fasta(graph, resolution_records, excluded_target)
+    placed_uids = {str(r.component_id) for r in agp_records if getattr(r, "component_type", "") == "W"}
+    emit_excluded_fasta(graph, resolution_records, excluded_target, placed_unitigs=placed_uids)
 
     emit_tsv_ledger(ledger, args.out_dir / "ledger.tsv")
     emit_junctions_tsv(junction_records, args.out_dir / "junctions.tsv")

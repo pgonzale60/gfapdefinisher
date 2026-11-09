@@ -270,8 +270,6 @@ def test_finish_subcommand_with_annotations_and_window(tmp_path: Path):
             str(gfa_path),
             "--out-dir",
             str(out_dir),
-            "--tidk",
-            str(tidk_path),
             "--barrnap",
             str(barrnap_path),
             "--terminal-window",
@@ -455,8 +453,6 @@ def test_finish_subcommand_rdna_cassette_wiring(tmp_path: Path):
             str(out_dir),
             "--barrnap",
             str(barrnap_path),
-            "--tidk",
-            str(tidk_path),
         ]
     )
     assert exit_code == 0
@@ -844,12 +840,8 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
             str(gfa_path),
             "--tiara",
             str(tiara_path),
-            "--tidk",
-            str(tidk_path),
             "--barrnap",
             str(barrnap_path),
-            "--compleasm",
-            str(compleasm_path),
             "--out-dir",
             str(out_dir_no_ont),
         ]
@@ -882,12 +874,8 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
         str(gfa_path),
         "--tiara",
         str(tiara_path),
-        "--tidk",
-        str(tidk_path),
         "--barrnap",
         str(barrnap_path),
-        "--compleasm",
-        str(compleasm_path),
         "--ont-paf",
         str(ont_paf_path),
         "--out-dir",
@@ -1025,12 +1013,8 @@ def test_excluded_fasta_emission_and_conservation_law(tmp_path: Path):
                 "finish",
                 "--gfa",
                 str(p["gfa"]),
-                "--tidk",
-                str(p["tidk"]),
                 "--barrnap",
                 str(p["barrnap"]),
-                "--compleasm",
-                str(p["compleasm"]),
                 "--tiara",
                 str(p["tiara"]),
                 "--out-dir",
@@ -1100,7 +1084,7 @@ def test_excluded_fasta_emission_and_conservation_law(tmp_path: Path):
             assert pde_32[0].excluded_unitig_ids == ("utg000186l",)
 
             # Verify utg000052l terminal cap places utg000049l
-            pde_52 = [r for r in resolutions if r.chrom == "utg000052l" and r.side == "5p"]
+            pde_52 = [r for r in resolutions if r.chrom == "utg000052l" and r.side == "3p"]
             assert len(pde_52) == 1
             assert pde_52[0].unitig_ids == ("utg000049l",)
             assert pde_52[0].right_anchor_port == "utg000049l-"

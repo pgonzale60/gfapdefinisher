@@ -5,6 +5,7 @@ from gfapdefinisher.policy.defaults import (
     OntBridgingPolicy,
     PdePolicy,
     Policy,
+    RdnaPolicy,
     StoichiometryPolicy,
     TelomerePolicy,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "PdePolicy",
     "Policy",
     "PolicyValue",
+    "RdnaPolicy",
     "StoichiometryPolicy",
     "TelomerePolicy",
 ]

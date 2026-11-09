@@ -110,11 +110,22 @@ class OntBridgingPolicy:
 
 
 @dataclass(frozen=True)
+class RdnaPolicy:
+    max_rdna_unitig_length_bp: PolicyValue[int] = PolicyValue(
+        value=200000,
+        justification="Maximum length for an individual 45S rDNA repeat unitig or distal satellite cap; segments exceeding 200 kb represent macro-chromosomal stems or arms, not standalone cassette unitigs.",
+        provenance="Biological calibration on reference benchmark (BIO-005); nematode 45S repeat units are ~7-10 kb and cassette unitigs do not exceed 200 kb without core sequence",
+        provisional=False,
+    )
+
+
+@dataclass(frozen=True)
 class Policy:
     telomere: TelomerePolicy = TelomerePolicy()
     stoichiometry: StoichiometryPolicy = StoichiometryPolicy()
     pde: PdePolicy = PdePolicy()
     ont: OntBridgingPolicy = OntBridgingPolicy()
+    rdna: RdnaPolicy = RdnaPolicy()
 
 
 DEFAULT_POLICY = Policy()

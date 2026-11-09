@@ -369,8 +369,6 @@ def test_cli_report_subcommand(tmp_path: Path, capsys: pytest.CaptureFixture[str
         str(gfa_path),
         "--tiara",
         str(tiara_path),
-        "--tidk",
-        str(tidk_path),
         "--out",
         str(out_tsv),
     ]
@@ -404,9 +402,7 @@ def test_benchmark_df5120_staged_integration(tmp_path: Path):
         pytest.skip("No GFA file found in benchmark directory.")
 
     tiara_path = BENCHMARK_DIR / "tiara_unitigs.txt"
-    tidk_path = BENCHMARK_DIR / "tidk_telomeres_telomeric_repeat_windows.tsv"
     barrnap_path = BENCHMARK_DIR / "barrnap_rdna.gff"
-    compleasm_path = BENCHMARK_DIR / "compleasm_unitigs_full_table.tsv"
 
     out_tsv = tmp_path / "benchmark_ledger.tsv"
     cmd = [
@@ -418,12 +414,8 @@ def test_benchmark_df5120_staged_integration(tmp_path: Path):
     ]
     if tiara_path.exists():
         cmd.extend(["--tiara", str(tiara_path)])
-    if tidk_path.exists():
-        cmd.extend(["--tidk", str(tidk_path)])
     if barrnap_path.exists():
         cmd.extend(["--barrnap", str(barrnap_path)])
-    if compleasm_path.exists():
-        cmd.extend(["--compleasm", str(compleasm_path)])
 
     main(cmd)
 

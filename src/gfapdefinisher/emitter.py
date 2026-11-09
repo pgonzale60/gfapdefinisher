@@ -706,6 +706,7 @@ def emit_excluded_fasta(
     resolutions: Sequence[Any],
     output: Path | TextIO | str,
     line_width: int | None = None,
+    placed_unitigs: Iterable[str] | None = None,
 ) -> int:
     """Emit all unitigs excluded from scaffolds via excluded_unitig_ids to FASTA format.
 
@@ -717,15 +718,19 @@ def emit_excluded_fasta(
         resolutions: Sequence of ResolutionRecord objects.
         output: Destination file path or open text stream.
         line_width: Optional line wrap width (None for unwrapped).
+        placed_unitigs: Optional iterable of unitig IDs that were placed in scaffolds.
+            Any unitig placed in scaffolds is strictly excluded from excluded.fasta.
 
     Returns:
         Number of distinct excluded unitigs written.
     """
+    placed_set = set(placed_unitigs) if placed_unitigs is not None else set()
     excluded_by: dict[str, list[str]] = defaultdict(list)
     for rec in resolutions:
         rec_fid = getattr(rec, "feature_id", str(rec))
         for uid in getattr(rec, "excluded_unitig_ids", ()):
-            excluded_by[uid].append(rec_fid)
+            if uid not in placed_set:
+                excluded_by[uid].append(rec_fid)
 
     sorted_uids = sorted(excluded_by.keys())
 
@@ -1155,6 +1160,20 @@ def nominate_super_scaffolds(
 
 
 @dataclass(slots=True)
+class ResolutionSummaryMetrics:
+    """Tally of resolved complexities / quirks across the assembly."""
+
+    somatic_allelic_bubbles: int = 0
+    variable_satellite_gaps: int = 0
+    fixed_satellite_gaps: int = 0
+    intercalary_grs_bridges: int = 0
+    pde_terminal_caps: int = 0
+    subtelomeric_satellite_caps: int = 0
+    rdna_cassettes_traversed: int = 0
+    heuristic_caps_closed: int = 0
+
+
+@dataclass(slots=True)
 class SequenceSummaryMetrics:
     """Stoichiometric and sequence metrics for a break-site qualified chromosome/scaffold."""
 
@@ -1166,6 +1185,14 @@ class SequenceSummaryMetrics:
     stoichiometry_ratio: float
     grs_percentage: float
     break_site_count: int
+    somatic_allelic_bubbles: int = 0
+    variable_satellite_gaps: int = 0
+    fixed_satellite_gaps: int = 0
+    intercalary_grs_bridges: int = 0
+    pde_terminal_caps: int = 0
+    subtelomeric_satellite_caps: int = 0
+    rdna_cassettes_traversed: int = 0
+    heuristic_caps_closed: int = 0
 
 
 @dataclass(slots=True)
@@ -1180,6 +1207,7 @@ class BreakSiteGenomeSummary:
     overall_stoichiometry_ratio: float
     overall_grs_percentage: float
     total_break_sites: int
+    resolution_summary: ResolutionSummaryMetrics = field(default_factory=ResolutionSummaryMetrics)
 
 
 def compute_break_site_summary(
@@ -1187,6 +1215,7 @@ def compute_break_site_summary(
     scaffolds: Mapping[str, str],
     agp_records: Sequence[AgpRecord | AgpGapRow],
     junctions: Sequence[Any],
+    resolutions: Sequence[Any] = (),
 ) -> BreakSiteGenomeSummary:
     """Compute core genome vs GRS coverage strictly across sequences with break site evidence.
 
@@ -1195,6 +1224,7 @@ def compute_break_site_summary(
         scaffolds: Mapping of scaffold ID to nucleotide sequence.
         agp_records: Assembled AGP records.
         junctions: Junction records representing break sites.
+        resolutions: Optional sequence of ResolutionRecord objects to tally resolved quirks.
 
     Returns:
         BreakSiteGenomeSummary with per-sequence breakdown and genome-wide totals.
@@ -1204,8 +1234,11 @@ def compute_break_site_summary(
     sorted_qualifying = sorted(qualifying_ids, key=lambda sid: (-len(scaffolds[sid]), sid))
 
     agp_by_scaf: dict[str, list[AgpRecord | AgpGapRow]] = defaultdict(list)
+    scaf_segs: dict[str, set[str]] = defaultdict(set)
     for rec in agp_records:
         agp_by_scaf[rec.object_id].append(rec)
+        if getattr(rec, "component_type", "") == "W":
+            scaf_segs[rec.object_id].add(str(rec.component_id))
 
     core_provs = {
         SequenceProvenance.HIFI_CORE,
@@ -1217,6 +1250,42 @@ def compute_break_site_summary(
         SequenceProvenance.hifi_germline,
         "HiFi-germline",
     }
+
+    # Map resolutions to scaffolds
+    res_by_scaf: dict[str, list[Any]] = defaultdict(list)
+    for r in resolutions:
+        r_chrom = getattr(r, "chrom", None) or ""
+        matched = False
+        for sid in scaffolds:
+            if r_chrom == sid or r_chrom in scaf_segs.get(sid, set()):
+                res_by_scaf[sid].append(r)
+                matched = True
+                break
+        if not matched and r_chrom:
+            res_by_scaf[r_chrom].append(r)
+
+    def _tally_resolutions(res_list: Sequence[Any]) -> ResolutionSummaryMetrics:
+        tally = ResolutionSummaryMetrics()
+        for rec in res_list:
+            rtype = str(getattr(rec, "resolution_type", "") or "")
+            if rtype in ("somatic_allelic_bubble", "ResolutionType.SOMATIC_ALLELIC_BUBBLE"):
+                tally.somatic_allelic_bubbles += 1
+            elif rtype in ("sat_gap_variable", "ResolutionType.SAT_GAP_VARIABLE"):
+                tally.variable_satellite_gaps += 1
+            elif rtype in ("sat_gap_fixed", "ResolutionType.SAT_GAP_FIXED"):
+                tally.fixed_satellite_gaps += 1
+            elif rtype in ("intercalary_grs_bridge", "ResolutionType.INTERCALARY_GRS_BRIDGE"):
+                tally.intercalary_grs_bridges += 1
+            elif rtype in ("pde_terminal_cap", "ResolutionType.PDE_TERMINAL_CAP"):
+                tally.pde_terminal_caps += 1
+            elif rtype in ("subtelomeric_satellite_cap", "ResolutionType.SUBTELOMERIC_SATELLITE_CAP"):
+                tally.subtelomeric_satellite_caps += 1
+            elif rtype in ("rdna_cassette", "ResolutionType.RDNA_CASSETTE"):
+                tally.rdna_cassettes_traversed += 1
+
+            if getattr(rec, "capped_via_heuristic", False) or "heuristic" in str(getattr(rec, "notes", "")).lower():
+                tally.heuristic_caps_closed += 1
+        return tally
 
     qualifying_metrics: list[SequenceSummaryMetrics] = []
     total_core_len_all = 0
@@ -1256,6 +1325,7 @@ def compute_break_site_summary(
         denom = core_len + grs_len
         grs_pct = (grs_len / denom * PERCENT_MULTIPLIER) if denom > 0 else 0.0
         n_breaks = len(matches.get(sid, []))
+        scaf_tally = _tally_resolutions(res_by_scaf.get(sid, []))
 
         qualifying_metrics.append(
             SequenceSummaryMetrics(
@@ -1267,6 +1337,14 @@ def compute_break_site_summary(
                 stoichiometry_ratio=stoich_ratio,
                 grs_percentage=grs_pct,
                 break_site_count=n_breaks,
+                somatic_allelic_bubbles=scaf_tally.somatic_allelic_bubbles,
+                variable_satellite_gaps=scaf_tally.variable_satellite_gaps,
+                fixed_satellite_gaps=scaf_tally.fixed_satellite_gaps,
+                intercalary_grs_bridges=scaf_tally.intercalary_grs_bridges,
+                pde_terminal_caps=scaf_tally.pde_terminal_caps,
+                subtelomeric_satellite_caps=scaf_tally.subtelomeric_satellite_caps,
+                rdna_cassettes_traversed=scaf_tally.rdna_cassettes_traversed,
+                heuristic_caps_closed=scaf_tally.heuristic_caps_closed,
             )
         )
 
@@ -1281,6 +1359,7 @@ def compute_break_site_summary(
     overall_stoich_ratio = (overall_grs_depth / overall_core_depth) if overall_core_depth > 0.0 else 0.0
     overall_denom = total_core_len_all + total_grs_len_all
     overall_grs_pct = (total_grs_len_all / overall_denom * PERCENT_MULTIPLIER) if overall_denom > 0 else 0.0
+    overall_tally = _tally_resolutions(resolutions)
 
     return BreakSiteGenomeSummary(
         qualifying_sequences=qualifying_metrics,
@@ -1291,6 +1370,7 @@ def compute_break_site_summary(
         overall_stoichiometry_ratio=overall_stoich_ratio,
         overall_grs_percentage=overall_grs_pct,
         total_break_sites=total_breaks_all,
+        resolution_summary=overall_tally,
     )
 
 
@@ -1298,7 +1378,7 @@ def emit_summary_tsv(
     summary: BreakSiteGenomeSummary,
     out_path: Path | str,
 ) -> Path:
-    """Emit core vs GRS summary metrics table to TSV format.
+    """Emit core vs GRS summary metrics table to TSV format with resolution event tallies.
 
     Args:
         summary: Computed BreakSiteGenomeSummary.
@@ -1319,6 +1399,14 @@ def emit_summary_tsv(
         "stoichiometry_ratio",
         "grs_percentage",
         "break_site_count",
+        "somatic_allelic_bubbles",
+        "variable_satellite_gaps",
+        "fixed_satellite_gaps",
+        "intercalary_grs_bridges",
+        "pde_terminal_caps",
+        "subtelomeric_satellite_caps",
+        "rdna_cassettes_traversed",
+        "heuristic_caps_closed",
     ]
 
     lines = ["\t".join(header)]
@@ -1326,15 +1414,24 @@ def emit_summary_tsv(
         lines.append(
             f"{seq.sequence_id}\t{seq.core_length_bp}\t{seq.core_depth:.2f}\t"
             f"{seq.grs_length_bp}\t{seq.grs_depth:.2f}\t{seq.stoichiometry_ratio:.4f}\t"
-            f"{seq.grs_percentage:.2f}\t{seq.break_site_count}"
+            f"{seq.grs_percentage:.2f}\t{seq.break_site_count}\t"
+            f"{seq.somatic_allelic_bubbles}\t{seq.variable_satellite_gaps}\t"
+            f"{seq.fixed_satellite_gaps}\t{seq.intercalary_grs_bridges}\t"
+            f"{seq.pde_terminal_caps}\t{seq.subtelomeric_satellite_caps}\t"
+            f"{seq.rdna_cassettes_traversed}\t{seq.heuristic_caps_closed}"
         )
 
     # Summary TOTAL row
+    res = summary.resolution_summary
     lines.append(
         f"TOTAL\t{summary.total_core_length_bp}\t{summary.mean_core_depth:.2f}\t"
         f"{summary.total_grs_length_bp}\t{summary.mean_grs_depth:.2f}\t"
         f"{summary.overall_stoichiometry_ratio:.4f}\t{summary.overall_grs_percentage:.2f}\t"
-        f"{summary.total_break_sites}"
+        f"{summary.total_break_sites}\t"
+        f"{res.somatic_allelic_bubbles}\t{res.variable_satellite_gaps}\t"
+        f"{res.fixed_satellite_gaps}\t{res.intercalary_grs_bridges}\t"
+        f"{res.pde_terminal_caps}\t{res.subtelomeric_satellite_caps}\t"
+        f"{res.rdna_cassettes_traversed}\t{res.heuristic_caps_closed}"
     )
 
     with open(target, "w", encoding="utf-8") as f:
@@ -1367,6 +1464,18 @@ def format_summary_table(summary: BreakSiteGenomeSummary) -> str:
     )
     table_lines.append(sep)
 
+    res = summary.resolution_summary
+    table_lines.append("Resolved Complexities (Quirks):")
+    table_lines.append(f"  - Somatic allelic bubbles popped:        {res.somatic_allelic_bubbles:>5}")
+    table_lines.append(f"  - Variable-size satellite gaps:          {res.variable_satellite_gaps:>5}")
+    table_lines.append(f"  - Fixed-size satellite gaps:             {res.fixed_satellite_gaps:>5}")
+    table_lines.append(f"  - Intercalary GRS bridges:               {res.intercalary_grs_bridges:>5}")
+    table_lines.append(f"  - PDE terminal caps stitched:            {res.pde_terminal_caps:>5}")
+    table_lines.append(f"  - Subtelomeric satellite caps:           {res.subtelomeric_satellite_caps:>5}")
+    table_lines.append(f"  - rDNA cassettes traversed:              {res.rdna_cassettes_traversed:>5}")
+    table_lines.append(f"  - Heuristic repeat port closures:        {res.heuristic_caps_closed:>5}")
+    table_lines.append(sep)
+
     return "\n".join(table_lines)
 
 
@@ -1394,6 +1503,14 @@ def parse_summary_tsv(file: Path | str) -> tuple[list[dict[str, Any]], dict[str,
             "stoichiometry_ratio": float(row["stoichiometry_ratio"]),
             "grs_percentage": float(row["grs_percentage"]),
             "break_site_count": int(row["break_site_count"]),
+            "somatic_allelic_bubbles": int(row.get("somatic_allelic_bubbles", 0)),
+            "variable_satellite_gaps": int(row.get("variable_satellite_gaps", 0)),
+            "fixed_satellite_gaps": int(row.get("fixed_satellite_gaps", 0)),
+            "intercalary_grs_bridges": int(row.get("intercalary_grs_bridges", 0)),
+            "pde_terminal_caps": int(row.get("pde_terminal_caps", 0)),
+            "subtelomeric_satellite_caps": int(row.get("subtelomeric_satellite_caps", 0)),
+            "rdna_cassettes_traversed": int(row.get("rdna_cassettes_traversed", 0)),
+            "heuristic_caps_closed": int(row.get("heuristic_caps_closed", 0)),
         }
         if typed_row["sequence_id"] == "TOTAL":
             total_row = typed_row
