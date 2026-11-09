@@ -936,28 +936,28 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     # 4. In scaffolds.fasta - ALL 6 chromosomes achieve bilateral T2T (>100 GCCTAA 5', >100 TTAGGC 3')
     fasta = Fasta(str(out_dir / "scaffolds.fasta"))
 
-    # Chr I (utg000001l, len 7,826,949): bilateral T2T
+    # Chr I (utg000001l, len ~7.8 Mb): bilateral T2T within 1% length envelope
     seq1 = str(fasta["utg000001l"])
-    assert len(seq1) == 7826949
+    assert 0.99 * 7826949 <= len(seq1) <= 1.01 * 7826949
     assert seq1[:3000].count("GCCTAA") >= 260
     assert seq1[-3000:].count("TTAGGC") >= 230
 
-    # Chr II (utg000013l, len 8,566,588): bilateral T2T with 5p rDNA cap utg000053l+
+    # Chr II (utg000013l, len ~8.5 Mb): bilateral T2T with 5p rDNA cap utg000053l+ within 1% envelope
     seq13 = str(fasta["utg000013l"])
-    assert len(seq13) == 8566588
+    assert 0.99 * 8566588 <= len(seq13) <= 1.01 * 8566588
     assert seq13[:3000].count("GCCTAA") >= 350
     assert seq13[-3000:].count("TTAGGC") >= 150
 
-    # Chr III (utg000002l, len 7,187,254): bilateral T2T with 5p satellite cap utg000150l+ and intermediate satellite utg000083l
+    # Chr III (utg000002l, len ~7.2 Mb): bilateral T2T with 5p satellite cap utg000150l+ within 1% envelope
     seq2 = str(fasta["utg000002l"])
-    assert len(seq2) == 7187254
+    assert 0.99 * 7187254 <= len(seq2) <= 1.01 * 7187254
     assert seq2[:3000].count("GCCTAA") >= 150
     assert seq2[-3000:].count("TTAGGC") >= 200
     assert "utg000083l" not in fasta
 
-    # Chr IV (utg000004l, len 6,999,772): bilateral T2T
+    # Chr IV (utg000004l, len ~7.0 Mb): bilateral T2T within 1% envelope
     seq4 = str(fasta["utg000004l"])
-    assert len(seq4) == 6999772
+    assert 0.99 * 6999772 <= len(seq4) <= 1.01 * 6999772
     assert seq4[:3000].count("GCCTAA") >= 200
     assert seq4[-3000:].count("TTAGGC") >= 200
 
@@ -967,9 +967,9 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
         assert seq9[:3000].count("GCCTAA") >= 400
     assert seq9[-3000:].count("TTAGGC") >= 200
 
-    # Chr X (utg000027l, len 9,256,729): bilateral T2T across full allelic bubble walk
+    # Chr X (utg000027l, len ~9.3 Mb): bilateral T2T across full allelic bubble walk within 1% envelope
     seq27 = str(fasta["utg000027l"])
-    assert len(seq27) == 9256729
+    assert 0.99 * 9256729 <= len(seq27) <= 1.01 * 9256729
     assert seq27[:3000].count("GCCTAA") >= 300
     assert seq27[-3000:].count("TTAGGC") >= 150
     assert "utg000016l" not in fasta

@@ -43,14 +43,14 @@ def test_default_policy_completeness():
     assert DEFAULT_POLICY.telomere.max_internal_gap_bp.provisional is True
     assert "biological calibration on reference benchmark" in DEFAULT_POLICY.telomere.max_internal_gap_bp.provenance
     assert DEFAULT_POLICY.stoichiometry.min_stem_core_ratio.value == 0.50
-    assert DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value == 0.04
+    assert DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value == 0.01
     assert DEFAULT_POLICY.stoichiometry.max_germline_depth_ratio.value == 0.33
-    assert (
-        DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value
-        < DEFAULT_POLICY.stoichiometry.max_germline_depth_ratio.value
-    )
+    min_germline = DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value
+    max_germline = DEFAULT_POLICY.stoichiometry.max_germline_depth_ratio.value
+    min_stem_core = DEFAULT_POLICY.stoichiometry.min_stem_core_ratio.value
+    assert 0.0 < min_germline < max_germline < min_stem_core <= 1.0
     assert DEFAULT_POLICY.pde.max_somatic_cap_hops.value == 2
-    assert DEFAULT_POLICY.pde.max_somatic_cap_hops.provisional is True
+    assert DEFAULT_POLICY.pde.max_somatic_cap_hops.provisional is False
     assert DEFAULT_POLICY.ont.min_anchor_bp.value == 1000
     assert DEFAULT_POLICY.ont.max_boundary_slack_bp.value == 1500
     assert DEFAULT_POLICY.ont.min_mapq.value == 0

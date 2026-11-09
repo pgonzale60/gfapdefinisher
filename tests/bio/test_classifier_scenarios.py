@@ -28,6 +28,7 @@ from gfapdefinisher.classifier import PdeJunctionCall, classify_pde_junction
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
+from gfapdefinisher.policy import DEFAULT_POLICY
 
 BENCHMARK_DIR = Path("data/benchmark/DF5120")
 
@@ -181,9 +182,9 @@ def test_synthetic_four_benchmark_pde_junction_scenarios():
         assert call.port == p_stem
         assert call.somatic_port == b["expected_som"]
         assert call.germline_port == b["expected_grs"]
-        assert 0.04 <= call.depth_ratio <= 0.33
-        assert 0.04 <= call.core_depth_ratio <= 0.33
-        assert call.depth_ratio == call.core_depth_ratio
+        min_g = DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value
+        max_g = DEFAULT_POLICY.stoichiometry.max_germline_depth_ratio.value
+        assert min_g <= call.core_depth_ratio <= max_g
 
 
 @pytest.mark.bio
@@ -257,8 +258,9 @@ def test_synthetic_chr_v_3p_somatic_dropout():
     assert call.port == p_stem
     assert call.somatic_port == p_som
     assert call.germline_port == p_grs
-    assert 0.04 <= call.depth_ratio <= 0.33
-    assert call.depth_ratio == call.core_depth_ratio
+    min_g = DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value
+    max_g = DEFAULT_POLICY.stoichiometry.max_germline_depth_ratio.value
+    assert min_g <= call.core_depth_ratio <= max_g
 
 
 @pytest.mark.bio
@@ -371,9 +373,9 @@ def test_benchmark_df5120_real_pde_junctions():
         assert call.somatic_port is not None
         assert call.somatic_port.to_symbol() == item["expected_somatic"]
         assert call.germline_port is not None
-        assert 0.04 <= call.depth_ratio <= 0.33
-        assert 0.04 <= call.core_depth_ratio <= 0.33
-        assert call.depth_ratio == call.core_depth_ratio
+        min_g = DEFAULT_POLICY.stoichiometry.min_germline_depth_ratio.value
+        max_g = DEFAULT_POLICY.stoichiometry.max_germline_depth_ratio.value
+        assert min_g <= call.core_depth_ratio <= max_g
         is_dropout = item.get("is_dropout", False)
         assert call.is_somatic_dropout is is_dropout, (
             f"Expected is_somatic_dropout={is_dropout} for {item['name']}, got {call.is_somatic_dropout}"

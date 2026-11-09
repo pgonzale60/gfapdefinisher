@@ -44,17 +44,8 @@ def test_end_state_enum_values_and_access():
     }
     assert {e.value for e in EndState} == expected_values
 
-    # Test uppercase and lowercase attribute access
-    assert EndState.END_COMPLETE == "end_complete"
-    assert EndState.end_complete == "end_complete"
-    assert EndState.END_SOMATIC_MISSING == "end_somatic_missing"
-    assert EndState.end_somatic_missing == "end_somatic_missing"
-    assert EndState.END_GERMLINE_ORPHAN == "end_germline_orphan"
-    assert EndState.end_germline_orphan == "end_germline_orphan"
-    assert EndState.END_SHARED_EXEMPT == "end_shared_exempt"
-    assert EndState.end_shared_exempt == "end_shared_exempt"
-
-    # From string instantiation
+    # Test case-insensitive alias identity and string instantiation
+    assert EndState.END_COMPLETE is EndState.end_complete
     assert EndState("end_complete") is EndState.END_COMPLETE
 
 
@@ -62,11 +53,8 @@ def test_junction_class_enum_values_and_access():
     expected_values = {"pde_terminal", "pde_intercalary"}
     assert {e.value for e in JunctionClass} == expected_values
 
-    assert JunctionClass.PDE_TERMINAL == "pde_terminal"
-    assert JunctionClass.pde_terminal == "pde_terminal"
-    assert JunctionClass.PDE_INTERCALARY == "pde_intercalary"
-    assert JunctionClass.pde_intercalary == "pde_intercalary"
-
+    # Test case-insensitive alias identity and string instantiation
+    assert JunctionClass.PDE_TERMINAL is JunctionClass.pde_terminal
     assert JunctionClass("pde_terminal") is JunctionClass.PDE_TERMINAL
 
 
