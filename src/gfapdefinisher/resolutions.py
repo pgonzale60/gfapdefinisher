@@ -908,6 +908,8 @@ def _reaches_germline_telomere_cap(
     ledger_by_port: Mapping[Any, EndEvidence],
     start_port: SegmentPort,
     max_hops: int,
+    core_coverage: float = 0.0,
+    min_core_ratio: float = DEFAULT_POLICY.stoichiometry.min_stem_core_ratio.value,
 ) -> list[SegmentPort] | None:
     """Bounded walk from a germline entry port to identify an authentic terminal telomeric cap."""
 
@@ -954,7 +956,13 @@ def _reaches_germline_telomere_cap(
         for nxt in neighbors:
             if nxt in visited:
                 continue
-            if _get_usco(nxt.name) != 0 or _is_contaminant(nxt.name):
+            nxt_seg = graph.segments.get(nxt.name)
+            is_core = (
+                (nxt_seg.depth or 0.0) >= min_core_ratio * core_coverage
+                if nxt_seg is not None and core_coverage > 0
+                else False
+            )
+            if is_core or _get_usco(nxt.name) != 0 or _is_contaminant(nxt.name):
                 continue
 
             nxt_ev = _lookup_evidence(ledger_by_port, nxt)
@@ -1026,6 +1034,19 @@ def collect_features(
                 return ev_item.usco_hit_count
         return 0
 
+    min_core_ratio = (
+        policy.stoichiometry.min_stem_core_ratio.value
+        if hasattr(policy, "stoichiometry")
+        else DEFAULT_POLICY.stoichiometry.min_stem_core_ratio.value
+    )
+
+    def _is_core_seg(s_name: str) -> bool:
+        if s_name in graph.segments:
+            dp = graph.segments[s_name].depth or 0.0
+            if core_coverage > 0 and dp >= min_core_ratio * core_coverage:
+                return True
+        return _get_seg_usco(s_name) > 0
+
     for ev, pde_call in pde_calls_with_ev:
         j_class = JunctionClass.PDE_TERMINAL if pde_call.somatic_port is not None else JunctionClass.PDE_INTERCALARY
         j_rec = create_junction_record(
@@ -1056,6 +1077,8 @@ def collect_features(
                 ledger_by_port=ledger_by_port,
                 start_port=pde_call.germline_port,
                 max_hops=max_bubble_hops,
+                core_coverage=core_coverage,
+                min_core_ratio=min_core_ratio,
             )
         germ_capped = germ_cap_path is not None
         if germ_cap_path:
@@ -1080,7 +1103,7 @@ def collect_features(
                     germ_intercalary = True
                     break
                 nb_name = nb.name if hasattr(nb, "name") else str(nb).rstrip("+-")
-                if nb_name != ev.segment_name and _get_seg_usco(nb_name) > 0:
+                if nb_name != ev.segment_name and _is_core_seg(nb_name):
                     germ_intercalary = True
                     break
 

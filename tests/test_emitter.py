@@ -1048,7 +1048,24 @@ def test_compute_break_site_summary_and_emit_summary_tsv(tmp_path: Path):
         ),
     ]
 
-    summary = compute_break_site_summary(graph, scaffolds, agp_records, junctions)
+    resolutions = [
+        ResolutionRecord(
+            feature_id="res_bubble_1",
+            chrom="SUPER_1",
+            side="mid",
+            resolution_type=ResolutionType.SOMATIC_ALLELIC_BUBBLE,
+            left_anchor_port="chr2_stem+",
+        ),
+        ResolutionRecord(
+            feature_id="res_sat_1",
+            chrom="SUPER_2",
+            side="3p",
+            resolution_type=ResolutionType.SAT_GAP_VARIABLE,
+            left_anchor_port="chr1_stem+",
+        ),
+    ]
+
+    summary = compute_break_site_summary(graph, scaffolds, agp_records, junctions, resolutions=resolutions)
 
     # Bacterial contig must be strictly excluded!
     assert len(summary.qualifying_sequences) == 2
@@ -1061,6 +1078,8 @@ def test_compute_break_site_summary_and_emit_summary_tsv(tmp_path: Path):
     assert s1.stoichiometry_ratio == pytest.approx(10.0 / 50.0)
     assert s1.grs_percentage == pytest.approx(20000 / 220000 * 100.0)
     assert s1.break_site_count == 1
+    assert s1.somatic_allelic_bubbles == 1
+    assert s1.variable_satellite_gaps == 0
 
     assert s2.sequence_id == "SUPER_2"
     assert s2.core_length_bp == 100000
@@ -1070,6 +1089,8 @@ def test_compute_break_site_summary_and_emit_summary_tsv(tmp_path: Path):
     assert s2.stoichiometry_ratio == pytest.approx(6.0 / 60.0)
     assert s2.grs_percentage == pytest.approx(30000 / 130000 * 100.0)
     assert s2.break_site_count == 1
+    assert s2.somatic_allelic_bubbles == 0
+    assert s2.variable_satellite_gaps == 1
 
     # Genome-wide totals across qualifying sequences:
     # Total Core = 300,000 bp; mean depth = (200000*50 + 100000*60) / 300000 = 16000000 / 300000 = 53.333x
@@ -1096,6 +1117,10 @@ def test_compute_break_site_summary_and_emit_summary_tsv(tmp_path: Path):
     assert total_row["sequence_id"] == "TOTAL"
     assert total_row["core_length_bp"] == 300000
     assert total_row["grs_length_bp"] == 50000
+    assert total_row["somatic_allelic_bubbles"] == 1
+    assert total_row["variable_satellite_gaps"] == 1
+    assert seq_rows[0]["somatic_allelic_bubbles"] == 1
+    assert seq_rows[1]["variable_satellite_gaps"] == 1
 
     # Human-readable table rendering
     table_str = format_summary_table(summary)
@@ -1103,3 +1128,5 @@ def test_compute_break_site_summary_and_emit_summary_tsv(tmp_path: Path):
     assert "SUPER_1" in table_str
     assert "SUPER_2" in table_str
     assert "TOTAL" in table_str
+    assert "Somatic allelic bubbles popped" in table_str
+    assert "Variable-size satellite gaps" in table_str

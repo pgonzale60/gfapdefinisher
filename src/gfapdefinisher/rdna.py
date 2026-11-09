@@ -352,6 +352,12 @@ class RdnaCassetteResolver:
             if ev.usco_hit_count > 0:
                 return False
 
+        # Macro-chromosomal arms (> max_rdna_unitig_length_bp) are chromosome stems, not repeat cassette unitigs
+        max_rdna_len = getattr(self, "policy", DEFAULT_POLICY).rdna.max_rdna_unitig_length_bp.value
+        if hasattr(self, "graph") and name in self.graph.segments:
+            if self.graph.segments[name].length > max_rdna_len:
+                return False
+
         if self.annotations is not None and name in self.annotations:
             ann = self.annotations[name]
             return any(_is_45s_hit(h) for h in ann.barrnap_hits)
@@ -375,6 +381,10 @@ class RdnaCassetteResolver:
             return False
         if self._get_usco_count(name) > 0:
             return False
+        if hasattr(self, "graph") and name in self.graph.segments:
+            max_rdna_len = getattr(self, "policy", DEFAULT_POLICY).rdna.max_rdna_unitig_length_bp.value
+            if self.graph.segments[name].length > max_rdna_len:
+                return False
 
         if isinstance(seg_or_port, SegmentPort):
             port = seg_or_port

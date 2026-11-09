@@ -56,6 +56,8 @@ def test_default_policy_completeness():
     assert DEFAULT_POLICY.ont.min_mapq.value == 0
     assert DEFAULT_POLICY.ont.min_spanning_reads.value == 2
     assert DEFAULT_POLICY.ont.quantile_num.value == 4
+    assert DEFAULT_POLICY.rdna.max_rdna_unitig_length_bp.value == 200000
+    assert DEFAULT_POLICY.rdna.max_rdna_unitig_length_bp.provisional is False
 
 
 def test_no_species_hardcoding_in_src():
