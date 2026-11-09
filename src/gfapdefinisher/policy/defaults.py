@@ -111,10 +111,10 @@ class OntBridgingPolicy:
 
 @dataclass(frozen=True)
 class RdnaPolicy:
-    max_rdna_unitig_length_bp: PolicyValue[int] = PolicyValue(
-        value=200000,
-        justification="Maximum length for an individual 45S rDNA repeat unitig or distal satellite cap; segments exceeding 200 kb represent macro-chromosomal stems or arms, not standalone cassette unitigs.",
-        provenance="Biological calibration on reference benchmark (BIO-005); nematode 45S repeat units are ~7-10 kb and cassette unitigs do not exceed 200 kb without core sequence",
+    min_45s_coverage_fraction: PolicyValue[float] = PolicyValue(
+        value=0.15,
+        justification="Minimum fraction of segment length covered by Barrnap 45S rRNA genes (18S, 5.8S, 28S) to classify as an authentic rDNA repeat cassette; in benchmark assemblies, non-rDNA chromosome arms have <12.5% coverage (boundary hits <5%), whereas genuine rDNA unitigs and cassettes carry >=15% (typically 70-85%) 45S coding sequences.",
+        provenance="Biological calibration on reference benchmark Barrnap annotations (BIO-005)",
         provisional=False,
     )
 
