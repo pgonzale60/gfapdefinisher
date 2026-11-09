@@ -352,15 +352,28 @@ class RdnaCassetteResolver:
             if ev.usco_hit_count > 0:
                 return False
 
-        # Macro-chromosomal arms (> max_rdna_unitig_length_bp) are chromosome stems, not repeat cassette unitigs
-        max_rdna_len = getattr(self, "policy", DEFAULT_POLICY).rdna.max_rdna_unitig_length_bp.value
-        if hasattr(self, "graph") and name in self.graph.segments:
-            if self.graph.segments[name].length > max_rdna_len:
-                return False
-
+        # Authentic rDNA repeat unitigs are composed predominantly of 45S rRNA genes
         if self.annotations is not None and name in self.annotations:
             ann = self.annotations[name]
-            return any(_is_45s_hit(h) for h in ann.barrnap_hits)
+            hits_45s = [h for h in ann.barrnap_hits if _is_45s_hit(h)]
+            if not hits_45s:
+                return False
+            seg = self.graph.segments.get(name) if hasattr(self, "graph") else None
+            if seg is not None and seg.length > 0:
+                sorted_intervals = sorted((h.start, h.end) for h in hits_45s)
+                merged_bp = 0
+                cur_s, cur_e = sorted_intervals[0]
+                for s, e in sorted_intervals[1:]:
+                    if s <= cur_e:
+                        cur_e = max(cur_e, e)
+                    else:
+                        merged_bp += cur_e - cur_s + 1
+                        cur_s, cur_e = s, e
+                merged_bp += cur_e - cur_s + 1
+                cov_frac = merged_bp / seg.length
+                min_cov = getattr(self, "policy", DEFAULT_POLICY).rdna.min_45s_coverage_fraction.value
+                return cov_frac >= min_cov
+            return True
 
         for ev in self._ledger_by_name.get(name, []):
             if ev.rdna_features:
@@ -381,10 +394,6 @@ class RdnaCassetteResolver:
             return False
         if self._get_usco_count(name) > 0:
             return False
-        if hasattr(self, "graph") and name in self.graph.segments:
-            max_rdna_len = getattr(self, "policy", DEFAULT_POLICY).rdna.max_rdna_unitig_length_bp.value
-            if self.graph.segments[name].length > max_rdna_len:
-                return False
 
         if isinstance(seg_or_port, SegmentPort):
             port = seg_or_port
@@ -587,16 +596,23 @@ class RdnaCassetteResolver:
                 continue
             if seg_name in rdna_segments:
                 continue
-            if self.is_distal_telomere_cap(seg_name):
-                continue
             if has_usco and self._get_usco_count(seg_name) == 0:
                 continue
 
             for strand in (Strand.FORWARD, Strand.REVERSE):
                 port = SegmentPort(seg_name, strand)
+                if self.is_distal_telomere_cap(port):
+                    continue
+
                 outgoing = self.graph.get_outgoing(port)
-                if any(e.to_port.name in rdna_segments for e in outgoing):
-                    entry_ports.append(port)
+                for e in outgoing:
+                    if e.to_port.name in rdna_segments:
+                        # If intrinsic orientation of rDNA is known, entry stem must enter rDNA forward
+                        eff = self._effective_rdna_dir(e.to_port)
+                        if eff is not None and eff != Strand.FORWARD:
+                            continue
+                        entry_ports.append(port)
+                        break
 
         def rank_entry(p: SegmentPort) -> tuple[int, int, str, str]:
             usco_cnt = self._get_usco_count(p.name)
