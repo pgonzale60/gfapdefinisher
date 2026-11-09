@@ -24,6 +24,7 @@ from gfapdefinisher.emitter import (
     emit_excluded_fasta,
     emit_fasta,
     emit_grs_bed,
+    emit_rdna_bed,
     emit_summary_tsv,
     emit_telomere_bed,
     format_summary_table,
@@ -176,6 +177,14 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         dest="emit_telomere_bed",
         help="Optional path to emit telomere caps BED (default: <out_dir>/telomeres.bed)",
+    )
+    finish_parser.add_argument(
+        "--emit-rdna-bed",
+        nargs="?",
+        const=True,
+        default=None,
+        dest="emit_rdna_bed",
+        help="Optional path to emit 45S rRNA regions BED (default: <out_dir>/45S_rRNA.bed)",
     )
     finish_parser.add_argument(
         "--summary",
@@ -1702,6 +1711,14 @@ def run_finish(args: argparse.Namespace) -> None:
     else:
         telomere_target = args.out_dir / "telomeres.bed"
     emit_telomere_bed(scaffolds, telomere_target, policy=DEFAULT_POLICY)
+
+    # Emit defined 45S rRNA regions BED
+    rdna_target: Path
+    if getattr(args, "emit_rdna_bed", None) is not None and not isinstance(args.emit_rdna_bed, bool):
+        rdna_target = Path(args.emit_rdna_bed)
+    else:
+        rdna_target = args.out_dir / "45S_rRNA.bed"
+    emit_rdna_bed(rdna_resolver.rdna_regions, rdna_target)
 
     # Compute and emit summary metrics on break-site verified sequences
     summary_target: Path

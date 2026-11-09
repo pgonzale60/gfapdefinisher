@@ -34,6 +34,17 @@ from gfapdefinisher.resolutions import (
 )
 from gfapdefinisher.resolver import reverse_complement
 
+__all__ = [
+    "ItsSizeDistribution",
+    "RdnaCassetteResolver",
+    "RdnaPath",
+    "RdnaRegion",
+    "RdnaResolution",
+    "define_45s_regions",
+    "infer_its_size_distribution",
+    "is_rdna_unitig",
+]
+
 
 def _is_prokaryotic_rRNA(hit: Any) -> bool:
     """Return True if hit is prokaryotic ribosomal RNA (16S or 23S)."""
@@ -42,9 +53,242 @@ def _is_prokaryotic_rRNA(hit: Any) -> bool:
 
 
 def _is_45s_hit(hit: BarrnapHit) -> bool:
-    """Return True ONLY if not prokaryotic rRNA and hit product contains 18S, 5.8S, or 28S."""
+    """Return True ONLY if not prokaryotic rRNA and hit product contains 18S, 5.8S, 5_8S, or 28S."""
     prod = getattr(hit, "product", getattr(hit, "feature_name", ""))
-    return (not _is_prokaryotic_rRNA(hit)) and any(sub in prod for sub in ("18S", "5.8S", "28S"))
+    return (not _is_prokaryotic_rRNA(hit)) and any(sub in prod for sub in ("18S", "5.8S", "5_8S", "28S"))
+
+
+@dataclass(frozen=True)
+class ItsSizeDistribution:
+    """Empirical distribution of unannotated internal/intergenic transcribed spacer (ITS) sizes."""
+
+    count: int
+    min_bp: int
+    median_bp: float
+    q75_bp: float
+    max_its_bp: int
+    threshold_separation_bp: int
+    all_spacers: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class RdnaRegion:
+    """A defined genomic region containing clustered 45S rRNA gene units."""
+
+    sequence_id: str
+    start: int  # 0-based inclusive
+    end: int  # 1-based inclusive (length = end - start)
+    strand: Strand
+    hit_count: int
+    features: tuple[str, ...]
+    span_bp: int
+
+    def to_bed_line(self, name_prefix: str = "45S_rRNA_region") -> str:
+        feats = ",".join(self.features)
+        return f"{self.sequence_id}\t{self.start}\t{self.end}\t{name_prefix};{feats}\t{self.hit_count}\t{self.strand.to_symbol()}\n"
+
+
+def _extract_all_45s_hits(
+    annotations: Mapping[str, Any] | None,
+) -> dict[str, list[BarrnapHit]]:
+    """Extract and sort 45S rRNA hits per sequence from annotations dictionary."""
+    hits_by_seq: dict[str, list[BarrnapHit]] = {}
+    if annotations is None:
+        return hits_by_seq
+
+    for seq_id, ann in annotations.items():
+        raw_hits = getattr(ann, "barrnap_hits", None)
+        if raw_hits is None:
+            raw_hits = getattr(ann, "barrnap", None)
+        if raw_hits is None and isinstance(ann, list | tuple):
+            raw_hits = ann
+        if not raw_hits:
+            continue
+
+        h45 = [h for h in raw_hits if _is_45s_hit(h)]
+        if h45:
+            hits_by_seq[seq_id] = sorted(h45, key=lambda h: (min(h.start, h.end), max(h.start, h.end)))
+
+    return hits_by_seq
+
+
+def infer_its_size_distribution(
+    annotations: Mapping[str, Any] | None,
+    policy: Policy = DEFAULT_POLICY,
+) -> ItsSizeDistribution:
+    """Infer empirical ITS size distribution from unannotated regions between 45S Barrnap hits.
+
+    In eukaryotic genomes, adjacent 45S rRNA features within a cistron (18S -> 5.8S -> 28S)
+    or tandem array are separated by internal transcribed spacers (ITS1, ITS2) and intergenic
+    spacers (IGS), typically spanning 100 bp to 3000 bp.
+
+    This function measures the unannotated separation distances between consecutive same-strand
+    45S rRNA annotations across all sequences, detects the biological ITS distribution, and
+    derives an empirical threshold distance separating within-array ITS spacers from background
+    inter-locus genomic gaps.
+    """
+    default_threshold = policy.rdna.default_max_its_separation_bp.value
+    max_candidate = policy.rdna.max_candidate_its_spacer_bp.value
+    min_floor = policy.rdna.min_its_threshold_floor_bp.value
+    jump_ratio = policy.rdna.its_separation_jump_ratio.value
+    multiplier = policy.rdna.its_threshold_multiplier.value
+
+    hits_by_seq = _extract_all_45s_hits(annotations)
+    spacers: list[int] = []
+
+    for _seq_id, hits in hits_by_seq.items():
+        for i in range(len(hits) - 1):
+            h1 = hits[i]
+            h2 = hits[i + 1]
+            if h1.strand == h2.strand:
+                e1 = max(h1.start, h1.end)
+                s2 = min(h2.start, h2.end)
+                sep = s2 - e1 - 1
+                spacers.append(sep)
+
+    if not spacers:
+        return ItsSizeDistribution(
+            count=0,
+            min_bp=0,
+            median_bp=0.0,
+            q75_bp=0.0,
+            max_its_bp=0,
+            threshold_separation_bp=default_threshold,
+            all_spacers=(),
+        )
+
+    sorted_s = sorted(spacers)
+    # Identify intra-cluster ITS spacers vs large inter-locus gaps
+    split_idx = len(sorted_s)
+    for i in range(len(sorted_s) - 1):
+        s1 = sorted_s[i]
+        s2 = sorted_s[i + 1]
+        # Jump detection between within-array ITS spacers and inter-locus chromosomal distance
+        if (
+            s1 <= max_candidate
+            and s2 > max_candidate
+            and (s2 / max(1, s1) >= jump_ratio or (s2 - s1) >= default_threshold)
+        ):
+            split_idx = i + 1
+            break
+
+    its_candidates = sorted_s[:split_idx]
+    if not its_candidates or its_candidates[0] > max_candidate:
+        mid_idx = len(sorted_s) // 2
+        q75_idx = mid_idx + (len(sorted_s) - mid_idx) // 2
+        return ItsSizeDistribution(
+            count=len(spacers),
+            min_bp=min(spacers),
+            median_bp=float(sorted_s[mid_idx]),
+            q75_bp=float(sorted_s[q75_idx]),
+            max_its_bp=max(spacers),
+            threshold_separation_bp=default_threshold,
+            all_spacers=tuple(sorted_s),
+        )
+
+    n = len(its_candidates)
+    mid_idx = n // 2
+    q75_idx = mid_idx + (n - mid_idx) // 2
+    median_val = float(its_candidates[mid_idx])
+    q75_val = float(its_candidates[q75_idx])
+    max_its = max(its_candidates)
+
+    # Derive threshold separation:
+    # Scale max intra-cluster ITS spacer by multiplier with a minimum floor
+    threshold = max(min_floor, int(max_its * multiplier))
+    if split_idx < len(sorted_s):
+        # Clamp into the gap between intra-cluster ITS and next genomic gap
+        threshold = min(threshold, (max_its + sorted_s[split_idx]) // 2)
+
+    return ItsSizeDistribution(
+        count=n,
+        min_bp=min(its_candidates),
+        median_bp=median_val,
+        q75_bp=q75_val,
+        max_its_bp=max_its,
+        threshold_separation_bp=threshold,
+        all_spacers=tuple(sorted_s),
+    )
+
+
+def define_45s_regions(
+    annotations: Mapping[str, Any] | None,
+    threshold_separation_bp: int | None = None,
+    policy: Policy = DEFAULT_POLICY,
+) -> list[RdnaRegion]:
+    """Define authentic 45S rRNA regions by clustering Barrnap hits within the ITS threshold separation.
+
+    Rather than classifying entire contigs as binary 'rDNA' or 'not rDNA', this function
+    delineates exact genomic intervals where 45S rRNA units are clustered.
+    """
+    if annotations is None:
+        return []
+
+    if threshold_separation_bp is None:
+        its_dist = infer_its_size_distribution(annotations, policy=policy)
+        threshold = its_dist.threshold_separation_bp
+    else:
+        threshold = threshold_separation_bp
+
+    hits_by_seq = _extract_all_45s_hits(annotations)
+    regions: list[RdnaRegion] = []
+
+    for seq_id, hits in sorted(hits_by_seq.items()):
+        if not hits:
+            continue
+
+        cur_hits: list[BarrnapHit] = [hits[0]]
+        cur_start = min(hits[0].start, hits[0].end)
+        cur_end = max(hits[0].start, hits[0].end)
+        cur_strand = hits[0].strand
+
+        for h in hits[1:]:
+            h_s = min(h.start, h.end)
+            h_e = max(h.start, h.end)
+            sep = h_s - cur_end - 1
+
+            if h.strand == cur_strand and sep <= threshold:
+                cur_hits.append(h)
+                cur_end = max(cur_end, h_e)
+            else:
+                s_0 = cur_start - 1
+                e_1 = cur_end
+                reg_strand = Strand.FORWARD if cur_strand == "+" else Strand.REVERSE
+                feats = tuple(x.feature_name for x in cur_hits)
+                regions.append(
+                    RdnaRegion(
+                        sequence_id=seq_id,
+                        start=s_0,
+                        end=e_1,
+                        strand=reg_strand,
+                        hit_count=len(cur_hits),
+                        features=feats,
+                        span_bp=e_1 - s_0,
+                    )
+                )
+                cur_hits = [h]
+                cur_start = h_s
+                cur_end = h_e
+                cur_strand = h.strand
+
+        # Append final region for seq_id
+        s_0 = cur_start - 1
+        e_1 = cur_end
+        reg_strand = Strand.FORWARD if cur_strand == "+" else Strand.REVERSE
+        feats = tuple(x.feature_name for x in cur_hits)
+        regions.append(
+            RdnaRegion(
+                sequence_id=seq_id,
+                start=s_0,
+                end=e_1,
+                strand=reg_strand,
+                hit_count=len(cur_hits),
+                features=feats,
+                span_bp=e_1 - s_0,
+            )
+        )
+
+    return regions
 
 
 def is_rdna_unitig(
@@ -187,6 +431,29 @@ class RdnaCassetteResolver:
         for ev in self.ledger.values():
             if isinstance(ev, EndEvidence):
                 self._ledger_by_name[ev.segment_name].append(ev)
+
+        self.its_distribution = infer_its_size_distribution(
+            self.annotations,
+            policy=self.policy,
+        )
+        self.rdna_regions = define_45s_regions(
+            self.annotations,
+            threshold_separation_bp=self.its_distribution.threshold_separation_bp,
+            policy=self.policy,
+        )
+        self.rdna_regions_by_seq: dict[str, list[RdnaRegion]] = defaultdict(list)
+        for r in self.rdna_regions:
+            self.rdna_regions_by_seq[r.sequence_id].append(r)
+
+    def get_45s_regions(self, seg_name: str) -> list[RdnaRegion]:
+        """Retrieve all defined 45S rRNA regions on a segment."""
+        clean_name = seg_name.rstrip("+-") if isinstance(seg_name, str) else seg_name.name
+        return list(self.rdna_regions_by_seq.get(clean_name, []))
+
+    def has_45s_region(self, seg_or_port: SegmentPort | str) -> bool:
+        """Check whether a segment or port contains any defined 45S rRNA regions."""
+        name = seg_or_port.name if isinstance(seg_or_port, SegmentPort) else str(seg_or_port).rstrip("+-")
+        return len(self.get_45s_regions(name)) > 0
 
     def _usco_count(self, seg_name: str) -> int:
         """Alias for _get_usco_count."""
@@ -352,33 +619,25 @@ class RdnaCassetteResolver:
             if ev.usco_hit_count > 0:
                 return False
 
-        # Authentic rDNA repeat unitigs are composed predominantly of 45S rRNA genes
-        if self.annotations is not None and name in self.annotations:
-            ann = self.annotations[name]
-            hits_45s = [h for h in ann.barrnap_hits if _is_45s_hit(h)]
-            if not hits_45s:
+        # Check if the sequence is predominantly covered by defined 45S rRNA regions
+        if self.annotations is not None:
+            regions = self.get_45s_regions(name)
+            if not regions:
                 return False
             seg = self.graph.segments.get(name) if hasattr(self, "graph") else None
             if seg is not None and seg.length > 0:
-                sorted_intervals = sorted((h.start, h.end) for h in hits_45s)
-                merged_bp = 0
-                cur_s, cur_e = sorted_intervals[0]
-                for s, e in sorted_intervals[1:]:
-                    if s <= cur_e:
-                        cur_e = max(cur_e, e)
-                    else:
-                        merged_bp += cur_e - cur_s + 1
-                        cur_s, cur_e = s, e
-                merged_bp += cur_e - cur_s + 1
-                cov_frac = merged_bp / seg.length
-                min_cov = getattr(self, "policy", DEFAULT_POLICY).rdna.min_45s_coverage_fraction.value
-                return cov_frac >= min_cov
+                total_region_span = sum(r.span_bp for r in regions)
+                min_cov = getattr(
+                    self.policy.rdna, "min_45s_coverage_fraction", DEFAULT_POLICY.rdna.min_45s_coverage_fraction
+                ).value
+                return (total_region_span / seg.length) >= min_cov
             return True
 
         for ev in self._ledger_by_name.get(name, []):
             if ev.rdna_features:
                 return any(
-                    (not any(p in f for p in ("16S", "23S"))) and any(sub in f for sub in ("18S", "5.8S", "28S"))
+                    (not any(p in f for p in ("16S", "23S")))
+                    and any(sub in f for sub in ("18S", "5.8S", "5_8S", "28S"))
                     for f in ev.rdna_features
                 )
             if ev.rdna_hit_count > 0 or ev.has_terminal_rdna:
