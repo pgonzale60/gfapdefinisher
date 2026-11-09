@@ -6,10 +6,18 @@ from pathlib import Path
 import pytest
 
 from gfapdefinisher.annotations import BarrnapHit, NodeAnnotations, load_barrnap
+from gfapdefinisher.emitter import emit_rdna_bed
 from gfapdefinisher.graph import BidirectedGraph, load_gfa
 from gfapdefinisher.ledger import EndEvidence
 from gfapdefinisher.models import SegmentPort, Strand
-from gfapdefinisher.rdna import RdnaCassetteResolver, is_rdna_unitig
+from gfapdefinisher.rdna import (
+    ItsSizeDistribution,
+    RdnaCassetteResolver,
+    RdnaRegion,
+    define_45s_regions,
+    infer_its_size_distribution,
+    is_rdna_unitig,
+)
 from gfapdefinisher.resolutions import (
     EndState,
     IntervalQuirk,
@@ -1258,3 +1266,123 @@ def test_consumed_rdna_prevents_duplicate_cassette_traversal():
     assert len(res2.path) <= 1
     assert res2.distal_cap_port is None
     assert not res2.is_resolved
+
+
+def test_infer_its_size_distribution_benchmark_df5120():
+    """Verify data-driven ITS size distribution inference and 45S region clustering on DF5120 benchmark."""
+    barrnap_path = BENCHMARK_DIR / "barrnap_rdna.gff"
+    if not barrnap_path.exists():
+        pytest.skip(f"Benchmark file {barrnap_path} not found")
+
+    raw_hits = load_barrnap(barrnap_path)
+    annotations = {seq_id: NodeAnnotations(sequence_id=seq_id, barrnap_hits=hits) for seq_id, hits in raw_hits.items()}
+
+    dist = infer_its_size_distribution(annotations)
+    assert isinstance(dist, ItsSizeDistribution)
+    assert dist.count == 287
+    assert dist.min_bp == -146
+    assert dist.median_bp == 458.0
+    assert dist.max_its_bp == 2249
+    # Inferred threshold is scaled above max intra-cluster ITS (2249 bp) clamped before the 24.2 kb inter-locus gap
+    assert dist.threshold_separation_bp == 3373
+
+    regions = define_45s_regions(annotations)
+    assert len(regions) == 50
+
+    reg_by_seq: dict[str, list[RdnaRegion]] = {}
+    for r in regions:
+        reg_by_seq.setdefault(r.sequence_id, []).append(r)
+
+    # utg000013l (Chr II) has a defined 45S rRNA region at its terminal boundary
+    assert "utg000013l" in reg_by_seq
+    assert len(reg_by_seq["utg000013l"]) == 1
+    r13 = reg_by_seq["utg000013l"][0]
+    assert r13.start == 569
+    assert r13.end == 16379
+    assert r13.span_bp == 15810
+    assert r13.hit_count == 7
+    assert r13.strand == Strand.REVERSE
+
+    # utg000020l is almost entirely covered by a 45S rRNA region
+    assert "utg000020l" in reg_by_seq
+    r20 = reg_by_seq["utg000020l"][0]
+    assert r20.start == 1178
+    assert r20.end == 35020
+    assert r20.span_bp == 33842
+    assert r20.hit_count == 15
+
+    # utg000053l (distal cap) carries a 45S rRNA region
+    assert "utg000053l" in reg_by_seq
+    r53 = reg_by_seq["utg000053l"][0]
+    assert r53.start == 2244
+    assert r53.end == 30362
+    assert r53.span_bp == 28118
+    assert r53.hit_count == 13
+
+
+def test_define_45s_regions_synthetic_clustering_and_separation():
+    """Verify 45S clustering merges within ITS threshold and separates distant hits."""
+    h1 = BarrnapHit(sequence_id="test_seq", start=100, end=1800, strand="+", feature_name="18S_rRNA", evalue=1e-50)
+    h2 = BarrnapHit(sequence_id="test_seq", start=2258, end=2400, strand="+", feature_name="5_8S_rRNA", evalue=1e-50)
+    h3 = BarrnapHit(sequence_id="test_seq", start=2450, end=5800, strand="+", feature_name="28S_rRNA", evalue=1e-50)
+    # Distant hit 40 kb away
+    h4 = BarrnapHit(sequence_id="test_seq", start=45000, end=48500, strand="+", feature_name="28S_rRNA", evalue=1e-50)
+
+    ann = {"test_seq": NodeAnnotations(sequence_id="test_seq", barrnap_hits=(h1, h2, h3, h4))}
+
+    dist = infer_its_size_distribution(ann)
+    # Consecutive separations: 457 bp, 49 bp, and 39200 bp
+    assert dist.count == 2
+    assert dist.min_bp == 49
+    assert dist.max_its_bp == 457
+
+    regions = define_45s_regions(ann)
+    assert len(regions) == 2
+
+    r_clustered = regions[0]
+    assert r_clustered.sequence_id == "test_seq"
+    assert r_clustered.start == 99  # 0-based
+    assert r_clustered.end == 5800
+    assert r_clustered.span_bp == 5701
+    assert r_clustered.hit_count == 3
+    assert r_clustered.strand == Strand.FORWARD
+    assert r_clustered.features == ("18S_rRNA", "5_8S_rRNA", "28S_rRNA")
+
+    r_distant = regions[1]
+    assert r_distant.sequence_id == "test_seq"
+    assert r_distant.start == 44999
+    assert r_distant.end == 48500
+    assert r_distant.span_bp == 3501
+    assert r_distant.hit_count == 1
+
+
+def test_emit_rdna_bed_file_emission(tmp_path: Path):
+    """Verify emit_rdna_bed writes valid 0-based half-open BED formatted records."""
+    r1 = RdnaRegion(
+        sequence_id="chr1",
+        start=1000,
+        end=5000,
+        strand=Strand.FORWARD,
+        hit_count=3,
+        features=("18S_rRNA", "5_8S_rRNA", "28S_rRNA"),
+        span_bp=4000,
+    )
+    r2 = RdnaRegion(
+        sequence_id="chr2",
+        start=500,
+        end=2000,
+        strand=Strand.REVERSE,
+        hit_count=2,
+        features=("18S_rRNA", "28S_rRNA"),
+        span_bp=1500,
+    )
+
+    out_bed = tmp_path / "45S_rRNA.bed"
+    emitted = emit_rdna_bed([r1, r2], out_bed)
+    assert emitted == out_bed
+    assert out_bed.exists()
+
+    lines = [ln.strip().split("\t") for ln in out_bed.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 2
+    assert lines[0] == ["chr1", "1000", "5000", "45S_rRNA_region;18S_rRNA,5_8S_rRNA,28S_rRNA", "3", "+"]
+    assert lines[1] == ["chr2", "500", "2000", "45S_rRNA_region;18S_rRNA,28S_rRNA", "2", "-"]

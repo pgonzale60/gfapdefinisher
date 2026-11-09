@@ -38,6 +38,7 @@ __all__ = [
     "emit_excluded_fasta",
     "emit_fasta",
     "emit_grs_bed",
+    "emit_rdna_bed",
     "emit_scaffold",
     "emit_summary_tsv",
     "emit_telomere_bed",
@@ -949,6 +950,43 @@ def emit_grs_bed(
     with open(target, "w", encoding="utf-8") as f:
         for chrom, chrom_start, chrom_end, name, score, strand in bed_rows:
             f.write(f"{chrom}\t{chrom_start}\t{chrom_end}\t{name}\t{score}\t{strand}\n")
+
+    return target
+
+
+def emit_rdna_bed(
+    rdna_regions: Sequence[Any],
+    out_path: Path | str,
+) -> Path:
+    """Emit 0-based half-open BED records for defined 45S rRNA regions.
+
+    Args:
+        rdna_regions: Sequence of RdnaRegion instances or objects with
+            sequence_id, start, end, hit_count, strand, and features/to_bed_line.
+        out_path: Destination BED file path.
+
+    Returns:
+        Path to the written BED file.
+    """
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    sorted_regions = sorted(
+        rdna_regions,
+        key=lambda r: (getattr(r, "sequence_id", ""), getattr(r, "start", 0), getattr(r, "end", 0)),
+    )
+    with open(target, "w", encoding="utf-8") as f:
+        for r in sorted_regions:
+            if hasattr(r, "to_bed_line"):
+                f.write(r.to_bed_line())
+            else:
+                seq_id = getattr(r, "sequence_id", "")
+                s = getattr(r, "start", 0)
+                e = getattr(r, "end", 0)
+                st = getattr(r, "strand", Strand.FORWARD)
+                st_sym = st.to_symbol() if hasattr(st, "to_symbol") else str(st)
+                cnt = getattr(r, "hit_count", 0)
+                f.write(f"{seq_id}\t{s}\t{e}\t45S_rRNA_region\t{cnt}\t{st_sym}\n")
 
     return target
 

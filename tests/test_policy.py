@@ -58,6 +58,16 @@ def test_default_policy_completeness():
     assert DEFAULT_POLICY.ont.quantile_num.value == 4
     assert DEFAULT_POLICY.rdna.min_45s_coverage_fraction.value == 0.15
     assert DEFAULT_POLICY.rdna.min_45s_coverage_fraction.provisional is False
+    assert DEFAULT_POLICY.rdna.default_max_its_separation_bp.value == 5000
+    assert DEFAULT_POLICY.rdna.default_max_its_separation_bp.provisional is False
+    assert DEFAULT_POLICY.rdna.min_its_threshold_floor_bp.value == 3000
+    assert DEFAULT_POLICY.rdna.min_its_threshold_floor_bp.provisional is False
+    assert DEFAULT_POLICY.rdna.max_candidate_its_spacer_bp.value == 10000
+    assert DEFAULT_POLICY.rdna.max_candidate_its_spacer_bp.provisional is False
+    assert DEFAULT_POLICY.rdna.its_separation_jump_ratio.value == 3.0
+    assert DEFAULT_POLICY.rdna.its_separation_jump_ratio.provisional is False
+    assert DEFAULT_POLICY.rdna.its_threshold_multiplier.value == 1.5
+    assert DEFAULT_POLICY.rdna.its_threshold_multiplier.provisional is False
 
 
 def test_no_species_hardcoding_in_src():

@@ -113,8 +113,38 @@ class OntBridgingPolicy:
 class RdnaPolicy:
     min_45s_coverage_fraction: PolicyValue[float] = PolicyValue(
         value=0.15,
-        justification="Minimum fraction of segment length covered by Barrnap 45S rRNA genes (18S, 5.8S, 28S) to classify as an authentic rDNA repeat cassette; in benchmark assemblies, non-rDNA chromosome arms have <12.5% coverage (boundary hits <5%), whereas genuine rDNA unitigs and cassettes carry >=15% (typically 70-85%) 45S coding sequences.",
+        justification="Minimum fraction of segment length covered by defined 45S rRNA regions (18S, 5.8S, 28S and intervening ITS) to classify as an authentic rDNA repeat cassette unitig; in benchmark assemblies, non-rDNA chromosome arms have <12.5% coverage (boundary hits <5%), whereas genuine rDNA unitigs and cassettes carry >=15% (typically 70-98%) 45S region sequence.",
         provenance="Biological calibration on reference benchmark Barrnap annotations (BIO-005)",
+        provisional=False,
+    )
+    default_max_its_separation_bp: PolicyValue[int] = PolicyValue(
+        value=5000,
+        justification="Default fallback maximum unannotated separation distance between consecutive Barrnap 45S rRNA annotations (18S, 5.8S, 28S) to cluster into a continuous 45S rRNA region when empirical ITS size distribution cannot be inferred from the data (e.g. isolated hit).",
+        provenance="Biological calibration on eukaryotic 45S rDNA ITS1/ITS2/IGS spacer architecture (BIO-005)",
+        provisional=False,
+    )
+    min_its_threshold_floor_bp: PolicyValue[int] = PolicyValue(
+        value=3000,
+        justification="Minimum floor for empirical ITS clustering threshold distance to accommodate standard eukaryotic ITS1/ITS2 and short IGS spacers.",
+        provenance="Biological calibration on eukaryotic 45S rDNA architecture (BIO-005)",
+        provisional=False,
+    )
+    max_candidate_its_spacer_bp: PolicyValue[int] = PolicyValue(
+        value=10000,
+        justification="Upper bound for candidate within-array ITS/IGS spacers when distinguishing local operon spacing from chromosomal inter-locus genomic gaps.",
+        provenance="Biological calibration on eukaryotic 45S rDNA architecture (BIO-005)",
+        provisional=False,
+    )
+    its_separation_jump_ratio: PolicyValue[float] = PolicyValue(
+        value=3.0,
+        justification="Minimum ratio jump between sorted spacer sizes to detect the boundary between intra-array ITS spacers and inter-locus genomic gaps.",
+        provenance="Empirical gap detection calibrated on benchmark assemblies (BIO-005)",
+        provisional=False,
+    )
+    its_threshold_multiplier: PolicyValue[float] = PolicyValue(
+        value=1.5,
+        justification="Safety multiplier applied to maximum observed intra-array ITS spacer to define the clustering threshold.",
+        provenance="Biological calibration on eukaryotic 45S rDNA architecture (BIO-005)",
         provisional=False,
     )
 
