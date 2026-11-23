@@ -1,6 +1,6 @@
-# gfapdefinisher: design brief (prototype)
+# gfapdefinisher design brief
 
-Status: scaffold only. No modules or tests exist yet. This document is the handover of the architecture agreed in the design session. Home of the toolkit is undecided; it lives in its own repo for development.
+The prototype has a working `finish` command with per-end evidence and FASTA and AGP outputs. DF5120 is the current validation case.
 
 ## 1. Goal
 
@@ -10,11 +10,11 @@ It unifies two formerly separate efforts:
 - chromosome-end resolution beyond somatic telomere junctions (PDE forks, rDNA, satellites);
 - uncollapsed-allele / haplotype resolution in outcrossers (USCO + depth + topology).
 
-Prototype scope: reach DF5120 (`nxOscSper1`) T2T automatically. DF5120 is a validation case, not a target. Nothing may be tuned to it.
+The current benchmark is DF5120 (`nxOscSper1`). Use it to evaluate germline end recovery without isolate-specific recipes.
 
 ## 2. Principles (non-negotiable)
 
-1. **Every chromosome end is resolved.** An end that runs into rDNA or a satellite array is traversed to its distal telomere (legacy pdefinisher: rDNA precedence, satellite-linked telomere scaffolding). Never "accept" a naked rDNA end. rDNA end for DF5120 chr II is unsolved and will be solved during development.
+1. **Germline end completion requires evidence of the distal telomere.** A telomere at a PDE cut can cap a somatic end while the germline tip remains missing. For DF5120 chromosome II, the core-side entry and telomere-side exit anchor the rDNA scaffold. The available reads are too short to resolve the array. Retain the assembler's rDNA copies in a consistent rDNA orientation and record uncertain joins as AGP gaps. The resulting scaffold represents the array between its flanks. Internal copy order, presence, copy count, and unknown gap lengths remain uncertain.
 2. **No arbitrary thresholds.** Fork classification must come from sequence composition (genuine terminal telomere vs internal telomeric repeats vs other), depth contrast and topology, not from lengths such as "stub < 10 kb". Any parameter that remains must be named, justified and read from one policy file.
 3. **PDE breakpoints are inferred from the graph.** There is no external breakpoint BED. The fork is the evidence.
 4. **No full read-set alignment is precomputed in production.** Round 1 inspects the graph, then extracts only relevant reads (hifiasm `A` lines, flank baiting) for targeted mapping. For prototype speed, fished alignments are precomputed (see section 5).
@@ -80,7 +80,7 @@ Farm22 precompute dir: `.../Oscheius_sp_DF5120/analysis/gfapdefinisher_precomput
 | `tidk_telomeres_telomeric_repeat_windows.tsv` | tidk 0.2.7 `search TTAGGC`, 1 kb windows | 0.2.7 is the version in the cache; confirm whether a newer tidk was intended |
 | `hifi_to_flanks.paf`, `ont_to_flanks.paf`, `test_flanks.fa`, `gap3_abpoa_input.fa`, `gap3_consensus.fa` | earlier hifiasm_t2t validation | fished against specific gap flanks of an earlier run; regenerate if flank definitions change |
 | `nxOscSper1.1_GRS.fasta` | curated GRS loci | recovery audit set (13 loci) |
-| `nxOscSper1.germline_T2T_validated.fa` | hifiasm_t2t checkpoint | **not ground truth**: 2 satellite gaps, uncapped rDNA end |
+| `nxOscSper1.germline_T2T_validated.fa` | hifiasm_t2t checkpoint | Three satellite gaps and an uncapped rDNA end |
 
 Raw reads (not staged): HiFi `.../tol_nematodes/Oscheius_sp_DF5120/genomic_data/nxOscSper1/pacbio/nxOscSper1_DF5120_hifi.hifi.fastq.gz`; ONT `.../genomic_data/nxOscSper1/ont/nxOscSper1.ont.combined.fastq.gz`.
 
@@ -88,12 +88,19 @@ Known gaps: no `r_utg` USCO table; tidk run was TTAGGC only; Tiara short-unitig 
 
 ## 6. Validation (not tuning targets)
 
-Reference metrics from the earlier toolkit, for comparison only: 97.15% of 828,758 bp GRS recovered, 13 loci, theoretical graph ceiling 97.64%. Success is reaching comparable or better results without hand-set recipes or thresholds, and with every end capped or traced to a distal telomere.
+On the DF5120 baseline at `796d9f1`, `finish` used the `p_utg` graph, Tiara, Barrnap, and the staged ONT PAF and spanning reads. The six chromosome sequences carry telomeric tracts at both ends. The per-end evidence still has several open points.
 
-## 7. First milestone
+- **IV 3′ and V 5′ in output coordinates.** The end ledger calls both core-unitig caps complete. Both ends have candidate germline continuations in the raw unitig graph (`r_utg`). Check the core-to-germline paths and the connections to distal telomeric sequence with ONT evidence. The output recovers only 0.2% and 15.2% of the corresponding curated terminal GRS loci, respectively.
+- **II 5′.** Retain the oriented rDNA scaffold and its nine unknown-length AGP gaps. The run chooses the distal cap heuristically and marks the end `resolved=True`. Report support for the two flanks and the uncertainty of the array joins explicitly. The AGP places 397,594 bp before the core component, including the telomere-side component and gap placeholders. The cassette length fields report 8,311,179 bp because they include the core.
+- **III 5′.** The satellite chain has two unknown-length gaps and zero spanning reads in the ledger. Its placement remains provisional.
+- **Contamination.** The emitted scaffold AGP includes 157 Tiara-bacterial unitigs totaling 31,754,011 bp. Review how these records reach the scaffold output.
 
-1. `gfapdefinisher.graph`: lossless loader for `S`/`L`/`A` with tests (small synthetic GFA fixtures plus the DF5120 files).
-2. `gfapdefinisher.annotations`: loaders for the Tiara, tidk, barrnap and compleasm tables, projected onto nodes.
-3. A report listing, for every unitig end, its telomere/rDNA/fork evidence. No walking yet.
+Using minimap2 `-x asm5` and merging query intervals at MAPQ ≥ 20, the six chromosome sequences cover 731,792 of 828,758 curated GRS bases (88.3%) across 13 loci. The same calculation gives 545,904 bases (65.9%) on the checkpoint assembly. The earlier toolkit's 97.15% used an undocumented calculation.
 
-Then: fork classifier from composition + depth + topology, then walker, then bridging, then emit.
+## 7. Benchmark order and Hi-C evaluation
+
+Finish the DF5120 investigation first. Use high-coverage JU75 as the next case. Its close relationship to CEW1 and the expectation of end-only DNA elimination give a hypothesis to test when auditing chromosome ends and checking for internal GRS.
+
+The [DF5120 graph refinement audit](DF5120_GRAPH_REFINEMENT.md) compares the existing chromosome FASTAs against both hifiasm unitig graphs. The [DF5120 terminal evidence audit](DF5120_TERMINAL_EVIDENCE.md) traces the historical curation across all 12 ends and explains which placements the staged checkpoint and regression test miss.
+
+Keep graph-guided refinement of existing Hi-C-linked chromosome assemblies open as a design option. Start the comparison from the reviewed chromosome scaffolds and use the graph and read evidence to identify specific candidate corrections. In PS2068, account for retained allelic variants and preserve prior allele choices unless the evidence supports changing them. Compare the corrections and their support with the graph-first workflow before choosing a direction.

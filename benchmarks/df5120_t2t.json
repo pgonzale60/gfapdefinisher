@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "gap_bp": 200,
+  "bridge_anchor_bp": 12,
+  "cap_match_bp": 2000,
+  "line_width": 60,
+  "expected_sha256": "f6b95df1eebde82009db7026308a4447e5103c3ba0a60dcced8c65d711c7482d",
+  "chromosomes": [
+    {
+      "name": "I",
+      "cap_5p": {"source": "primary", "record": "utg000039l", "strand": "-"},
+      "cap_3p": {"source": "primary", "record": "utg000101l", "strand": "+"},
+      "gap_count": 0,
+      "parts": [
+        {"source": "primary", "record": "utg000039l", "strand": "-"},
+        {"source": "primary", "record": "utg000001l", "start": 15643, "overlap_bp": 15643},
+        {"source": "primary", "record": "utg000101l", "start": 14857, "overlap_bp": 14857}
+      ]
+    },
+    {
+      "name": "II",
+      "cap_5p": {"source": "primary", "record": "utg000205l", "strand": "-"},
+      "cap_3p": {"source": "primary", "record": "utg000053l", "strand": "-"},
+      "gap_count": 9,
+      "note": "Retain the oriented rDNA copies and the uncertain internal joins from finish.",
+      "parts": [{"source": "finish", "record": "SUPER_2", "strand": "-"}]
+    },
+    {
+      "name": "III",
+      "cap_5p": {"source": "primary", "record": "utg000150l", "strand": "+"},
+      "cap_3p": {"source": "primary", "record": "utg000115l", "strand": "+"},
+      "gap_count": 1,
+      "parts": [
+        {"source": "primary", "record": "utg000150l"},
+        {"gap": "satellite_port", "note": "Distal cap assigned by repeat-family and port evidence. The intervening sequence remains uncertain."},
+        {"source": "primary", "record": "utg000103l", "strand": "-"},
+        {"source": "primary", "record": "utg000002l", "start": 16688, "overlap_bp": 16688},
+        {"source": "primary", "record": "utg000115l", "start": 4706, "overlap_bp": 4706}
+      ]
+    },
+    {
+      "name": "IV",
+      "cap_5p": {"source": "primary", "record": "utg000217l", "strand": "+"},
+      "cap_3p": {"source": "primary", "record": "utg000056l", "strand": "+"},
+      "gap_count": 0,
+      "note": "Keep the ONT-supported 5′ end from finish. Cut before the somatic 3′ tract and follow the ONT read to the distal cap.",
+      "parts": [
+        {"source": "finish", "record": "SUPER_3", "end": 8356948},
+        {"source": "ont", "record": "e87d54ff-c85d-4639-96a0-595eb018f886", "strand": "-", "start": 8517, "end": 11235},
+        {"source": "primary", "record": "utg000056l", "start": 12053}
+      ]
+    },
+    {
+      "name": "V",
+      "cap_5p": {"source": "primary", "record": "utg000139l", "strand": "-"},
+      "cap_3p": {"source": "primary", "record": "utg000126l", "strand": "-"},
+      "gap_count": 0,
+      "note": "Trim the somatic 3′ cap from the primary core, extend through the raw GFA germline unitig and follow one ONT read to the distal cap.",
+      "parts": [
+        {"source": "primary", "record": "utg000139l", "strand": "-"},
+        {"source": "primary", "record": "utg000004l", "strand": "-", "start": 3852, "end": 6948740, "overlap_bp": 3852},
+        {"source": "raw", "record": "utg000309l", "start": 10216, "end": 39500, "overlap_bp": 10216},
+        {"source": "ont", "record": "ac008920-a981-414e-bc11-3a2dcb6ea4c8", "strand": "-", "start": 33628, "end": 34507},
+        {"source": "primary", "record": "utg000126l", "strand": "-", "start": 31}
+      ]
+    },
+    {
+      "name": "X",
+      "cap_5p": {"source": "primary", "record": "utg000096l", "strand": "-"},
+      "cap_3p": {"source": "primary", "record": "utg000189l", "strand": "-"},
+      "gap_count": 0,
+      "note": "Use the longer GFA walk through both internal GRS loci.",
+      "parts": [{"source": "finish", "record": "SUPER_1", "strand": "-"}]
+    }
+  ]
+}
