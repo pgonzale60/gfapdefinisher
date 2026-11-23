@@ -1,0 +1,111 @@
+family	archived_molecules	best_locus	version	confidence	strict_unique_HiFi	short_or_strict_anchors	compatible_molecules	median_projected_draft_coordinate	known_frozen_PDE_coordinate	rDNA_inward	rDNA_reverse	runner_up	competing_molecules	notes
+C000001	101	IV internal 2,621,653 (5p facing)	somatic_internal	high	101	101	101	2724450	2621653	0	0	.	0	.
+C000002	85	IV internal 2,668,000 (3p facing)	internal_untyped	low	82	82	85	2667734	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000003	128	III 3p	somatic	high	127	127	128	9536927.0	9498667	0	0	.	0	.
+C000004	121	II internal 7,392,425 (5p facing)	somatic_internal	high	119	119	121	7411109	7392425	0	0	.	0	.
+C000005	102	I 5p proximal branch	proximal_cap	high	102	102	102	25392.0	.	0	0	.	0	The longer I path extends past this high-depth capped branch
+C000006	107	IV internal 6,701,994 (3p facing)	somatic_internal	high	107	107	107	6804873	6701994	0	0	.	0	.
+C000007	100	X internal 9,264,668 (5p facing)	somatic_internal	high	88	88	100	9280240.0	9264668	0	0	X internal 9,350,000 (3p facing) internal_untyped	79	.
+C000008	104	X internal 6,341,931 (5p facing)	somatic_internal	high	102	102	104	6354642.0	6341931	0	0	.	0	.
+C000009	102	I 3p	somatic	high	101	101	102	9781938.0	9747642	0	0	IV internal 8,212,000 (3p facing) internal_untyped	0	.
+C000010	114	III internal 5,644,108 (5p facing)	somatic_internal	high	114	114	114	5682376.0	5644108	0	0	II internal 2,614,000 (5p facing) internal_untyped	20	.
+C000011	86	X internal 7,669,426 (3p facing)	somatic_internal	high	85	85	86	7682128.0	7669426	0	0	.	0	.
+C000012	107	I internal 3,019,286 (5p facing)	somatic_internal	high	105	105	107	3053590	3019286	0	0	.	0	.
+C000013	135	X 5p	somatic	high	134	134	135	15786	3077	0	0	.	0	.
+C000014	105	V 5p	somatic	high	103	103	105	96342	89532	0	0	.	0	.
+C000015	105	IV 5p	somatic	high	105	105	105	8356	5066	0	0	III 5p somatic	6	.
+C000016	94	II internal 7,323,672 (3p facing)	somatic_internal	high	93	93	94	7340780.0	7323672	0	0	.	0	.
+C000017	126	X internal 7,688,000 (5p facing)	internal_untyped	low	125	126	126	7688471.0	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000018	107	X internal 1,325,004 (3p facing)	somatic_internal	high	107	107	107	1337704	1325004	0	0	.	0	.
+C000019	91	II 3p	somatic	high	91	91	91	10255590	10222752	0	0	.	0	.
+C000020	96	IV internal 6,804,000 (5p facing)	internal_untyped	low	96	96	96	6804892.0	.	0	0	IV internal 6,830,000 (3p facing) internal_untyped	0	No catalogued PDE cut at this projected position
+C000021	100	III 5p	somatic	high	100	100	100	43603.0	5334	0	0	IV 5p somatic	4	.
+C000022	95	V internal 4,685,569 (5p facing)	somatic_internal	high	95	95	95	4692376	4685569	0	0	.	0	.
+C000023	110	X internal 6,339,632 (3p facing)	somatic_internal	high	109	109	110	6352322.0	6339632	0	0	.	0	.
+C000024	110	V internal 4,685,180 (3p facing)	somatic_internal	high	109	109	110	4691978.0	4685180	0	0	.	0	.
+C000025	94	III internal 5,682,000 (3p facing)	internal_untyped	low	92	92	94	5682360.0	.	0	0	III internal 5,676,000 (5p facing) internal_untyped	0	No catalogued PDE cut at this projected position
+C000026	116	I internal 2,982,873 (3p facing)	somatic_internal	high	115	115	116	3011698.0	2982873	0	0	.	0	.
+C000027	96	IV 3p proximal tract	proximal_cap	high	96	96	96	9780158.0	.	0	0	V internal 2,340,000 (5p facing) internal_untyped	1	Consistent with a somatic tract. A farther germline cap is still open
+C000028	104	II 5p	somatic	high	104	104	104	37516.0	20401	0	0	III 5p unresolved_subterminal	20	.
+C000029	1	X 5p	somatic	moderate	1	1	1	15786	3077	0	0	.	0	.
+C000030	114	V 3p	somatic	high	114	114	114	10865926.0	10859128	0	0	.	0	.
+C000031	88	X internal 1,338,000 (5p facing)	internal_untyped	low	88	88	88	1337716.0	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000032	113	X internal 9,264,410 (3p facing)	somatic_internal	high	113	113	113	9279971	9264410	0	0	.	0	.
+C000033	1	V internal 2,116,000 (5p facing)	internal_untyped	low	1	1	1	2116442	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000034	72	X 3p	somatic	high	71	71	72	12160639.0	12145073	0	0	.	0	.
+C000035	1	III internal 2,820,000 (3p facing)	internal_untyped	low	1	1	1	2819471	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000036	1	X internal 126,000 (3p facing)	internal_untyped	low	1	1	1	126139	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000037	1	X 5p	germline_candidate	low	0	0	1	3098	.	0	0	X 3p unresolved_subterminal	1	Competing placement within alignment tolerance
+C000038	2	III internal 44,000 (3p facing)	internal_untyped	low	2	2	2	43592.5	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000039	1	X internal 6,352,000 (3p facing)	internal_untyped	low	1	1	1	6351832	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000040	7	II 3p	germline_candidate	high	4	4	7	10287104	.	0	0	III 3p germline_candidate	7	.
+C000041	1	X 5p	germline	moderate	1	1	1	835	.	0	0	X 3p unresolved_subterminal	1	.
+C000042	1	II rDNA array	rDNA_array_candidate	low	0	0	1	9097991	.	1	0	II internal 9,106,000 (5p facing) internal_untyped	1	Competing placement within alignment tolerance; No catalogued PDE cut at this projected position; Repeat-family placement. The annotated array lies internally in the frozen II scaffold; Top whole-reference alignment: II internal 9,098,000 (5p facing)
+C000043	5	III 3p	germline	high	5	5	5	9588177	.	0	0	II 5p germline_candidate	3	.
+C000044	3	V 5p	unresolved_subterminal	moderate	1	1	3	10758	.	0	0	II 5p unresolved_subterminal	3	.
+C000045	1	X internal 6,341,931 (5p facing)	somatic_internal	moderate	1	1	1	6354642	6341931	0	0	.	0	.
+C000046	1	II internal 6,058,000 (3p facing)	internal_untyped	low	1	1	1	6058598	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000047	3	V 5p	germline	high	3	3	3	375	.	0	0	II 3p germline_candidate	2	.
+C000048	1	V internal 4,685,180 (3p facing)	somatic_internal	low	0	0	1	4691979	4685180	0	0	.	0	.
+C000049	1	V 3p	unresolved_subterminal	moderate	1	1	1	10920436	.	0	0	II 3p germline_candidate	1	.
+C000050	1	V internal 10,912,000 (5p facing)	internal_untyped	low	1	1	1	10911282	.	0	0	II internal 10,264,000 (5p facing) internal_untyped	1	No catalogued PDE cut at this projected position
+C000051	2	II 3p	germline_candidate	moderate	2	2	2	10288300.0	.	0	0	X 3p germline_candidate	2	.
+C000052	1	II internal 7,440,000 (5p facing)	internal_untyped	low	1	1	1	7440998	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000053	1	V 5p	unresolved_subterminal	moderate	1	1	1	47507	.	0	0	.	0	.
+C000054	1	X internal 7,669,426 (3p facing)	somatic_internal	moderate	1	1	1	7682134	7669426	0	0	.	0	.
+C000055	1	II 3p	germline_candidate	moderate	1	1	1	10297270	.	0	0	III 3p unresolved_subterminal	1	.
+C000056	1	II internal 7,404,000 (3p facing)	internal_untyped	low	1	1	1	7404514	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000057	1	I 5p	germline_candidate	moderate	1	1	1	25392	.	0	0	.	0	.
+C000058	1	IV internal 4,520,000 (3p facing)	internal_untyped	low	1	1	1	4520426	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000059	1	V 3p	germline	low	0	0	1	10938331	.	0	0	X 5p unresolved_subterminal	0	.
+C000060	1	II internal 1,834,000 (3p facing)	internal_untyped	low	1	1	1	1833308	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000061	2	X 3p	germline	moderate	2	2	2	12184653.0	.	0	0	II 5p somatic	2	.
+C000062	1	III internal 5,682,000 (3p facing)	internal_untyped	low	1	1	1	5682360	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000063	1	IV internal 6,804,000 (5p facing)	internal_untyped	low	1	1	1	6804892	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000064	1	X internal 9,848,000 (5p facing)	internal_untyped	low	1	1	1	9847037	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000065	1	V 3p	unresolved_subterminal	moderate	1	1	1	10911271	.	0	0	.	0	.
+C000066	1	IV internal 6,792,000 (3p facing)	internal_untyped	low	1	1	1	6792847	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000067	1	I internal 1,070,000 (5p facing)	internal_untyped	low	1	1	1	1070130	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000068	1	III internal 4,468,000 (3p facing)	internal_untyped	low	1	1	1	4468619	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000069	1	III internal 2,990,000 (5p facing)	internal_untyped	low	1	1	1	2989827	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000070	1	II 5p	germline	low	0	0	1	1516	.	0	0	III 3p germline_candidate	1	Competing placement within alignment tolerance
+C000071	1	IV internal 3,060,000 (5p facing)	internal_untyped	low	1	1	1	3060553	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000072	1	III 3p	somatic	moderate	1	1	1	9536927	9498667	0	0	.	0	.
+C000073	1	III 3p	germline	moderate	1	1	1	9588522	.	0	0	II 5p germline_candidate	1	.
+C000074	1	X internal 9,112,000 (5p facing)	internal_untyped	low	1	1	1	9111619	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000075	1	I internal 6,000,000 (3p facing)	internal_untyped	low	1	1	1	6000451	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000076	1	X internal 6,362,000 (5p facing)	internal_untyped	low	1	1	1	6361362	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000077	1	V internal 10,866,000 (5p facing)	internal_untyped	low	1	1	1	10865941	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000078	1	X internal 2,196,000 (5p facing)	internal_untyped	low	1	1	1	2195848	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000079	1	I internal 3,012,000 (5p facing)	internal_untyped	low	1	1	1	3011714	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000080	1	II rDNA array	rDNA_array_candidate	low	0	0	1	9093398	.	1	0	II internal 9,108,000 (5p facing) internal_untyped	1	Competing placement within alignment tolerance; No catalogued PDE cut at this projected position; Repeat-family placement. The annotated array lies internally in the frozen II scaffold; Top whole-reference alignment: II internal 9,094,000 (5p facing)
+C000081	1	X 5p	germline	moderate	1	1	1	821	.	0	0	X 3p unresolved_subterminal	1	.
+C000082	1	III internal 8,534,000 (5p facing)	internal_untyped	low	1	1	1	8534329	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000083	1	IV internal 6,701,994 (3p facing)	somatic_internal	low	0	0	1	6804878	6701994	0	0	.	0	.
+C000084	1	I internal 5,450,000 (3p facing)	internal_untyped	low	1	1	1	5450630	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000085	1	IV internal 6,806,000 (5p facing)	internal_untyped	low	1	1	1	6806848	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000086	1	X internal 12,162,000 (5p facing)	internal_untyped	low	1	1	1	12162166	.	0	0	X internal 16,000 (3p facing) internal_untyped	1	No catalogued PDE cut at this projected position
+C000087	1	IV internal 7,546,000 (3p facing)	internal_untyped	low	1	1	1	7545422	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000088	1	V internal 7,220,000 (3p facing)	internal_untyped	low	1	1	1	7220738	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000089	1	IV internal 2,668,000 (3p facing)	internal_untyped	low	0	0	1	2667746	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000090	1	X internal 1,370,000 (5p facing)	internal_untyped	low	1	1	1	1369006	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000091	1	II rDNA array	rDNA_array_candidate	low	0	0	1	9115016	.	1	0	II internal 9,100,000 (5p facing) internal_untyped	1	Competing placement within alignment tolerance; No catalogued PDE cut at this projected position; Repeat-family placement. The annotated array lies internally in the frozen II scaffold; Top whole-reference alignment: II internal 9,116,000 (5p facing)
+C000092	1	V internal 522,000 (3p facing)	internal_untyped	low	1	1	1	522586	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000093	1	IV internal 6,806,000 (5p facing)	internal_untyped	low	1	1	1	6805675	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000094	1	V internal 96,000 (3p facing)	internal_untyped	low	1	1	1	96327	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000095	1	III internal 9,548,000 (5p facing)	internal_untyped	low	1	1	1	9548549	.	0	0	I internal 9,786,000 (5p facing) internal_untyped	1	No catalogued PDE cut at this projected position
+C000096	1	X internal 7,669,426 (3p facing)	somatic_internal	moderate	1	1	1	7682020	7669426	0	0	.	0	.
+C000097	1	IV internal 4,540,000 (3p facing)	internal_untyped	low	1	1	1	4539997	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000098	1	IV 5p inward cut	excision_facing	moderate	1	1	1	8359	.	0	0	II internal 3,472,000 (5p facing) internal_untyped	1	No catalogued PDE cut at this projected position; Opposite end of the C000099 source molecule. Its full alignment reaches the known IV 5p cut
+C000099	1	IV 5p	provisional_distal	moderate	1	1	1	859	.	0	0	II internal 3,480,000 (3p facing) internal_untyped	1	Outward end of the source molecule. Full inward sequence aligns in the draft at MAPQ 60
+C000100	1	IV internal 2,698,000 (3p facing)	internal_untyped	low	1	1	1	2697713	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000101	1	X internal 1,338,000 (5p facing)	internal_untyped	low	1	1	1	1338267	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000102	1	II internal 7,323,672 (3p facing)	somatic_internal	moderate	1	1	1	7340779	7323672	0	0	.	0	.
+C000103	1	I 3p	somatic	moderate	1	1	1	9781939	9747642	0	0	.	0	.
+C000104	1	II internal 5,332,000 (5p facing)	internal_untyped	low	1	1	1	5332704	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000105	1	II rDNA array	rDNA_array_candidate	low	0	0	1	9113123	.	1	0	II internal 9,098,000 (5p facing) internal_untyped	1	Competing placement within alignment tolerance; No catalogued PDE cut at this projected position; Repeat-family placement. The annotated array lies internally in the frozen II scaffold; Top whole-reference alignment: II internal 9,114,000 (5p facing)
+C000106	1	I internal 9,800,000 (5p facing)	internal_untyped	low	0	0	1	9799940	.	0	0	II internal 24,000 (3p facing) internal_untyped	1	Competing placement within alignment tolerance; No catalogued PDE cut at this projected position
+C000107	1	II rDNA array	rDNA_array_candidate	low	0	0	1	9118087	.	0	1	II internal 9,110,000 (3p facing) internal_untyped	1	Competing placement within alignment tolerance; No catalogued PDE cut at this projected position; Repeat-family placement. The annotated array lies internally in the frozen II scaffold; Top whole-reference alignment: II internal 9,118,000 (3p facing)
+C000108	1	II 5p	somatic	moderate	1	1	1	37516	20401	0	0	.	0	.
+C000109	1	IV internal 6,806,000 (5p facing)	internal_untyped	low	1	1	1	6805012	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000110	1	III internal 5,768,000 (5p facing)	internal_untyped	low	1	1	1	5767132	.	0	0	.	0	No catalogued PDE cut at this projected position

@@ -12,6 +12,7 @@ from typing import Any
 from gfapdefinisher.annotations import aggregate_node_annotations
 from gfapdefinisher.cigar import parse_dovetail_overlap_len
 from gfapdefinisher.classifier import _lookup_evidence, compute_core_coverage
+from gfapdefinisher.curation import curate
 from gfapdefinisher.emitter import (
     DEFAULT_AGP_POLICY,
     DEFAULT_MIN_SUPER_LENGTH,
@@ -194,6 +195,16 @@ def create_parser() -> argparse.ArgumentParser:
         dest="summary",
         help="Optional path to emit break-site summary TSV (default: <out_dir>/summary.tsv)",
     )
+
+    curate_parser = subparsers.add_parser("curate", help="Reproduce a reviewed chromosome assembly from a recipe")
+    curate_parser.add_argument("--recipe", required=True, type=Path, help="JSON curation recipe")
+    curate_parser.add_argument("--reference", type=Path, help="Existing assembly FASTA used by the recipe")
+    curate_parser.add_argument("--scaffolds", type=Path, help="FASTA emitted by finish")
+    curate_parser.add_argument("--gfa", required=True, type=Path, help="Primary GFA")
+    curate_parser.add_argument("--raw-gfa", type=Path, help="Raw GFA")
+    curate_parser.add_argument("--hifi-reads", type=Path, help="HiFi reads used for curated bridges")
+    curate_parser.add_argument("--ont-reads", type=Path, help="ONT reads used for curated bridges")
+    curate_parser.add_argument("--out", required=True, type=Path, help="Output FASTA")
 
     return parser
 
@@ -1769,6 +1780,26 @@ def main(args: list[str] | None = None) -> int:
 
     if parsed.command == "finish":
         run_finish(parsed)
+        return 0
+
+    if parsed.command == "curate":
+        try:
+            digest = curate(
+                parsed.recipe,
+                {
+                    "primary": parsed.gfa,
+                    "raw": parsed.raw_gfa,
+                    "reference": parsed.reference,
+                    "finish": parsed.scaffolds,
+                    "hifi": parsed.hifi_reads,
+                    "ont": parsed.ont_reads,
+                },
+                parsed.out,
+            )
+        except (KeyError, TypeError, ValueError, OSError) as error:
+            print(f"Curation failed: {error}", file=sys.stderr)
+            return 1
+        print(f"{digest}  {parsed.out}")
         return 0
 
     return 0
