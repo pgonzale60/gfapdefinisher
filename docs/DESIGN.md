@@ -97,6 +97,26 @@ On the DF5120 baseline at `796d9f1`, `finish` used the `p_utg` graph, Tiara, Bar
 
 Using minimap2 `-x asm5` and merging query intervals at MAPQ ≥ 20, the six chromosome sequences cover 731,792 of 828,758 curated GRS bases (88.3%) across 13 loci. The same calculation gives 545,904 bases (65.9%) on the checkpoint assembly. The earlier toolkit's 97.15% used an undocumented calculation.
 
+### End uncertainty catalog
+
+A satellite longer than the reads, with no variants to phase its copies, cannot be assembled. `finish --nominate-super` therefore also writes `end_catalog.tsv` (one row per chromosome end) and `ambiguity_groups.tsv`. They record what the data establish at each end and which endings remain possible beyond that point.
+
+- **Certain part and horizon.** The walk starts at the object's longest unitig and moves outward while each join is a graph overlap, read-supplied sequence, or an `ont-spanning` gap. The horizon is the last certain port. Its reason is `satellite` (next join is a `satellite-kmer` gap), `rdna` (`rna_tangle` gap), `core_telomere` (telomere on a core-depth unitig: the somatic end, with any germline extension absent from the graph), `no_telomere`, `no_graph_edge`, or `gap`.
+- **Candidate endings.** These are orphan telomeric caps linked to the horizon, with the evidence for each link. The evidence types are `graph` (reachable outward), `reads:n` (spanning reads under the `finish` boundary rules), `read-anchor:n`, `satellite-kmer` (the tip k-mer that `finish` uses) and `rdna` (rDNA horizon and rDNA-bearing cap). `read-anchor:n` counts reads that leave the horizon at its boundary and align to the cap at MAPQ ≥ `ont.min_catalog_link_mapq`, possibly inside it. A cap that another end reaches through certain joins is a resolved occurrence and links no end.
+- **Groups.** Ends are grouped when they share a candidate cap or an unresolved unitig, which is the graph-collapse criterion. Ends with merely similar repeat families are not grouped. A group with two or more ends lists the fusion interpretations that sequence alone permits, for exclusion with Hi-C. Caps linked to no end appear as groups without ends.
+- **Categories.** `resolved` means certain joins reach a non-core telomeric cap. `bounded` means the candidates belong to this end only, `shared` means another end shares them, and `open` means there is no candidate. `finish_choice` records the cap that `finish` placed beyond the horizon. An answer is certain when it holds for every candidate, and otherwise it depends on that choice.
+
+DF5120 with ONT has eight `resolved` ends. Each of the other four is `bounded`, and no two ends share an ending.
+
+| End (published) | Output end | Horizon | Candidate endings |
+| --- | --- | --- | --- |
+| II 3′ | `SUPER_2:5p` | `utg000207l-`, rDNA | `utg000053l-` (finish choice), `utg000098l+`, `utg000213l+`, all rDNA-bearing |
+| III 5′ | `SUPER_5:5p` | `utg000103l+`, 132 bp satellite | `utg000150l-` (satellite k-mer; finish choice). Anchored reads extend up to 19.7 kb past the horizon without reaching it. |
+| IV 3′ | `SUPER_3:3p` | `utg000009l+`, core telomere | `utg000056l+` (2 read anchors; curated cap), `utg000197l+` (5 spanning reads, 2 anchors), `utg000160l+` (1 spanning read). The three caps share repeat k-mers. |
+| V 3′ | `SUPER_6:5p` | `utg000004l-`, core telomere | `utg000126l-` (4 spanning reads; curated cap), `utg000153l+` (15 read anchors; the somatic stub used by an older flank set) |
+
+`utg000056l` and `utg000126l` lie beyond telomeres on core unitigs, so `finish` does not place them. The catalog recovers both curated caps as candidates. Groups in PS1017 show the limit of the graph criterion. Without ONT input, most PS1017 ends stop without a telomere, and their outward graph regions merge through large tangles. One group links five ends through 53 unitigs.
+
 ## 7. Benchmark order and Hi-C evaluation
 
 Finish the DF5120 investigation first. Use high-coverage JU75 as the next case. Its close relationship to CEW1 and the expectation of end-only DNA elimination give a hypothesis to test when auditing chromosome ends and checking for internal GRS.

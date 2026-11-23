@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from gfapdefinisher.annotations import aggregate_node_annotations
+from gfapdefinisher.catalog import build_end_catalog, emit_end_catalog
 from gfapdefinisher.cigar import parse_dovetail_overlap_len
 from gfapdefinisher.classifier import _lookup_evidence, compute_core_coverage
 from gfapdefinisher.curation import curate
@@ -52,6 +53,7 @@ from gfapdefinisher.resolver import (
     OntBridgingEngine,
     SatelliteGapResolution,
     _parse_port_spec,
+    parse_paf_hits,
     reverse_complement,
 )
 
@@ -153,7 +155,10 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         dest="nominate_super",
-        help="Nominate large sequences with break site evidence as SUPER chromosomes",
+        help=(
+            "Nominate large sequences with break site evidence as SUPER chromosomes and write the "
+            "chromosome-end uncertainty catalog (end_catalog.tsv, ambiguity_groups.tsv)"
+        ),
     )
     finish_parser.add_argument(
         "--min-super-length",
@@ -1751,6 +1756,17 @@ def run_finish(args: argparse.Namespace) -> None:
     )
     emit_summary_tsv(summary_data, summary_target)
     print(format_summary_table(summary_data))
+
+    if nominate_super:
+        catalog_entries, catalog_groups = build_end_catalog(
+            graph=graph,
+            ledger_map=ledger_map,
+            agp_records=agp_records,
+            orphan_caps=orphan_caps,
+            core_coverage=core_coverage,
+            paf_hits=list(parse_paf_hits(args.ont_paf)) if args.ont_paf is not None else None,
+        )
+        emit_end_catalog(catalog_entries, catalog_groups, args.out_dir)
 
     excluded_target: Path
     if args.excluded_fasta is not None and not isinstance(args.excluded_fasta, bool):
