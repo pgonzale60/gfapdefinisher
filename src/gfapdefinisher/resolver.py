@@ -52,6 +52,31 @@ def _parse_port_spec(port: str | SegmentPort) -> tuple[str, Strand]:
     return s, Strand.FORWARD
 
 
+SATELLITE_KMER_BP = 15
+SATELLITE_MIN_TIP_REPEATS = 5
+
+
+def tip_satellite_kmer(oriented_seq: str, window: int, policy: Policy = DEFAULT_POLICY) -> tuple[str, int] | None:
+    """Return the dominant non-telomeric k-mer in the outward tip of an oriented sequence.
+
+    The tip is the last ``window`` bases. Returns ``(kmer, count)`` when the most
+    frequent k-mer recurs at least ``SATELLITE_MIN_TIP_REPEATS`` times and is not a
+    canonical telomeric repeat; otherwise ``None``.
+    """
+    if len(oriented_seq) < window:
+        return None
+    tip = oriented_seq[-window:]
+    kmers = Counter(tip[i : i + SATELLITE_KMER_BP] for i in range(len(tip) - SATELLITE_KMER_BP + 1))
+    if not kmers:
+        return None
+    top_kmer, top_cnt = kmers.most_common(1)[0]
+    if top_cnt < SATELLITE_MIN_TIP_REPEATS:
+        return None
+    if policy.telomere.motif_forward.value in top_kmer or policy.telomere.motif_reverse.value in top_kmer:
+        return None
+    return top_kmer, top_cnt
+
+
 def _port_boundary_slack(hit: PafHit, is_left: bool, strand: Strand) -> int:
     """Compute unaligned distance between alignment and segment port boundary.
 
@@ -1004,12 +1029,9 @@ class OntBridgingEngine:
                         resolved_end_keys.add((er.segment_id, er.side))
 
         window = self.policy.ont.min_anchor_bp.value * 2
-        k = (2 + 2 + 1) * (2 + 1)
-        min_repeats = 2 + 2 + 1
+        min_repeats = SATELLITE_MIN_TIP_REPEATS
         floor = self.policy.ont.min_spanning_reads.value
         unknown_gap = getattr(self.policy, "agp", AgpPolicy()).unknown_gap_bp.value
-        canonical_fwd = self.policy.telomere.motif_forward.value
-        canonical_rev = self.policy.telomere.motif_reverse.value
         has_pde_forks = any(bool(e.somatic_port) for e in end_states)
 
         for er in list(end_states):
@@ -1035,18 +1057,10 @@ class OntBridgingEngine:
             anchor_seq = (
                 anchor_seg.sequence if anchor_strand == Strand.FORWARD else reverse_complement(anchor_seg.sequence)
             )
-            if len(anchor_seq) < window:
+            tip = tip_satellite_kmer(anchor_seq, window, self.policy)
+            if tip is None:
                 continue
-
-            tip_seq = anchor_seq[-window:]
-            kmers = Counter(tip_seq[i : i + k] for i in range(len(tip_seq) - k + 1))
-            if not kmers:
-                continue
-            top_kmer, top_cnt = kmers.most_common(1)[0]
-            if top_cnt < min_repeats:
-                continue
-            if canonical_fwd in top_kmer or canonical_rev in top_kmer:
-                continue
+            top_kmer = tip[0]
 
             rc_top = reverse_complement(top_kmer)
 

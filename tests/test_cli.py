@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import pytest
@@ -966,6 +967,44 @@ def test_benchmark_df5120_finish_scaffolds_and_telomeres(tmp_path: Path):
     # Verify no non-contaminant 45S rDNA unitigs float in scaffolds.fasta
     for rdna_u in ["utg000098l", "utg000053l", "utg000020l", "utg000082l"]:
         assert rdna_u not in fasta
+
+
+@pytest.mark.bio
+@pytest.mark.benchmark
+def test_benchmark_df5120_end_catalog(tmp_path: Path):
+    """DF5120 ends with unresolved joins or core-unitig telomeres carry a horizon and their endings."""
+    data = Path("data/benchmark/DF5120")
+    inputs = {
+        "--gfa": data / "asm.p_utg.gfa.gz",
+        "--tiara": data / "tiara_unitigs.txt",
+        "--barrnap": data / "barrnap_rdna.gff",
+        "--ont-paf": data / "ont_to_utgs.paf",
+    }
+    if not all(p.exists() for p in inputs.values()):
+        pytest.skip(f"DF5120 benchmark inputs missing in {data}")
+    args = ["finish", "--nominate-super", "--out-dir", str(tmp_path)]
+    for flag, path in inputs.items():
+        args += [flag, str(path)]
+    assert main(args) == 0
+
+    with (tmp_path / "end_catalog.tsv").open() as fh:
+        rows = {r["end_id"]: r for r in csv.DictReader(fh, delimiter="\t")}
+    assert len(rows) == 12
+    horizons = {k: (r["horizon_port"], r["horizon_reason"]) for k, r in rows.items() if r["category"] != "resolved"}
+    assert horizons == {
+        "SUPER_2:5p": ("utg000207l-", "rdna"),
+        "SUPER_3:3p": ("utg000009l+", "core_telomere"),
+        "SUPER_5:5p": ("utg000103l+", "satellite"),
+        "SUPER_6:5p": ("utg000004l-", "core_telomere"),
+    }
+    endings = {k: {c.split("[")[0] for c in rows[k]["candidate_endings"].split(";")} for k in horizons}
+    assert endings["SUPER_5:5p"] == {"utg000150l-"}
+    assert rows["SUPER_5:5p"]["tip_repeat_period_bp"] == "132"
+    assert {"utg000053l-", "utg000098l+"} <= endings["SUPER_2:5p"]
+    # Curated distal caps: IV 3' utg000056l, V 3' utg000126l
+    assert "utg000056l+" in endings["SUPER_3:3p"]
+    assert "utg000126l-" in endings["SUPER_6:5p"]
+    assert all(r["category"] == "bounded" for k, r in rows.items() if k in horizons)
 
 
 def test_excluded_fasta_emission_and_conservation_law(tmp_path: Path):

@@ -107,6 +107,12 @@ class OntBridgingPolicy:
         provenance="Mathematical definition of quartile distribution statistics",
         provisional=False,
     )
+    min_catalog_link_mapq: PolicyValue[int] = PolicyValue(
+        value=20,
+        justification="Minimum mapping quality of a read's alignment to a candidate cap, when the read also leaves a chromosome-end horizon at its boundary, for the end catalog to list the cap as a possible ending (read-anchor evidence). The cap alignment may start inside the cap, so mapping uniqueness replaces the boundary check; MAPQ 20 (about 1% misplacement) is the uniqueness floor used in the benchmark terminal-evidence audits.",
+        provenance="Benchmark terminal-evidence audits in docs/; issue #80",
+        provisional=True,
+    )
 
 
 @dataclass(frozen=True)
