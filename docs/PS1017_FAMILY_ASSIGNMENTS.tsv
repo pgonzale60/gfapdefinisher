@@ -1,0 +1,57 @@
+family	archived_molecules	best_locus	version	confidence	strict_unique_HiFi	short_or_strict_anchors	compatible_molecules	median_projected_draft_coordinate	known_frozen_PDE_coordinate	rDNA_inward	rDNA_reverse	runner_up	competing_molecules	notes
+C000001	8	X internal 32,000 (3p facing)	internal_untyped	low	0	0	8	31844.0	.	0	0	X internal 34,000 (3p facing) internal_untyped	8	Competing placement within alignment tolerance; No catalogued PDE cut at this projected position
+C000002	46	II internal 6,413,003 (3p facing)	somatic_internal	high	46	46	46	6412994.0	6413003	0	0	.	0	.
+C000003	39	X 5p	somatic	high	38	38	39	45680	44874	0	0	.	0	.
+C000004	41	III internal 4,662,006 (5p facing)	somatic_internal	high	40	40	41	4680460	4662006	0	0	III internal 4,708,000 (3p facing) internal_untyped	0	.
+C000005	18	II 5p	somatic	high	18	18	18	66945.0	66941	0	0	.	0	.
+C000006	53	I internal 4,118,065 (3p facing)	somatic_internal	high	53	53	53	4132300	4118065	0	0	.	0	.
+C000007	26	X internal 3,801,809 (3p facing)	somatic_internal	high	25	25	26	3802595.0	3801809	0	0	.	0	.
+C000008	48	X 3p	somatic	high	48	48	48	12575448.0	12574655	0	0	.	0	.
+C000009	8	IV 3p	rDNA_shared_candidate	moderate	5	5	8	12467508.0	.	8	0	IV 3p unresolved_subterminal	8	Shared rDNA placement; individual repeat copy or tissue origin uncertain
+C000010	39	III internal 4,635,266 (3p facing)	somatic_internal	high	38	38	39	4649397	4635266	0	0	.	0	.
+C000011	45	IV internal 5,184,372 (5p facing)	somatic_internal	high	44	44	45	5185831	5184372	0	0	.	0	.
+C000012	17	X internal 3,823,169 (3p facing)	somatic_internal	high	17	17	17	3823960	3823169	0	0	.	0	.
+C000013	31	V internal 6,451,707 (3p facing)	somatic_internal	high	31	31	31	6664895	6451707	0	0	.	0	.
+C000014	23	X internal 6,684,100 (5p facing)	somatic_internal	high	23	23	23	6684906	6684100	0	0	.	0	.
+C000015	24	X internal 6,684,000 (3p facing)	internal_untyped	low	24	24	24	6684882.0	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000016	24	I 3p	somatic	high	24	24	24	11156003.0	11141771	0	0	.	0	.
+C000017	22	X internal 3,889,444 (5p facing)	somatic_internal	high	22	22	22	3890252.0	3889444	0	0	.	0	.
+C000018	35	IV internal 5,186,000 (3p facing)	internal_untyped	low	35	35	35	5185814	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000019	51	IV 3p	rDNA_both_positions_observed	high	11	11	51	12468704	12459187	51	0	IV 3p germline_candidate	51	One member supplies the outward cap and 38 frozen-reference read placements match the inward cut
+C000020	19	III 3p	somatic	high	19	19	19	10776746	10758307	0	0	.	0	.
+C000021	33	IV 5p	somatic	high	32	32	33	235350	233889	0	0	.	0	.
+C000022	16	X internal 3,852,349 (5p facing)	somatic_internal	high	16	16	16	3853156.0	3852349	0	0	.	0	.
+C000023	40	II internal 6,427,034 (5p facing)	somatic_internal	high	40	40	40	6427039.0	6427034	0	0	.	0	.
+C000024	48	I internal 4,136,866 (5p facing)	somatic_internal	high	48	48	48	4151113.0	4136866	0	0	.	0	.
+C000025	13	I 5p	germline	high	11	13	13	7854	.	0	0	III_unloc_1 unlocalized	13	.
+C000026	38	V internal 6,471,565 (5p facing)	somatic_internal	high	38	38	38	6684766.0	6471565	0	0	.	0	.
+C000027	1	V internal 5,066,000 (3p facing)	internal_untyped	low	1	1	1	5066742	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000028	7	I 3p	germline_alternative	low	0	0	6	11618563.0	.	0	0	III_unloc_1 unlocalized	0	Primary contig path and read splices support a longer alternative to the selected C000043 path
+C000029	1	IV internal 9,786,000 (5p facing)	internal_untyped	low	1	1	1	9785334	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000030	38	II 3p	somatic	high	38	38	38	10473502.0	10473506	0	0	.	0	.
+C000031	25	V 3p	somatic	high	25	25	25	11404446	11191264	0	0	.	0	.
+C000032	32	I 5p	somatic	high	32	32	32	255131.0	240736	0	0	.	0	.
+C000033	11	V 5p	somatic	high	11	11	11	374857	161661	0	0	.	0	.
+C000034	14	II_unloc_4	unlocalized	low	0	0	8	4562.0	.	0	0	II_unloc_1 unlocalized	6	Competing placement within alignment tolerance
+C000035	34	III 5p	somatic	high	33	33	34	105547.0	91403	0	0	IV internal 9,122,000 (5p facing) internal_untyped	16	.
+C000036	13	V internal 5,066,000 (3p facing)	internal_untyped	low	12	12	13	5065205	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000037	12	II 3p	germline	high	7	7	12	10667491.0	.	0	0	II 3p somatic	6	.
+C000038	9	V_unloc_1	unlocalized	moderate	2	2	9	115911	.	0	0	.	0	.
+C000039	8	V 5p	germline	high	0	0	7	6646	.	0	0	V 5p unresolved_subterminal	7	.
+C000040	1	III 3p	unresolved_subterminal	low	0	0	1	11011716	.	0	0	.	0	.
+C000041	1	II internal 7,224,000 (5p facing)	internal_untyped	low	0	0	1	7223046	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000042	8	IV 5p	germline	high	4	5	8	286.0	.	0	0	IV 5p unresolved_subterminal	8	.
+C000043	4	I 3p	germline	high	3	3	4	11618199.0	.	0	0	III_unloc_1 unlocalized	4	.
+C000044	3	III internal 196,000 (3p facing)	internal_untyped	low	3	3	3	196153	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000045	4	II internal 7,222,000 (5p facing)	internal_untyped	low	3	3	4	7221165.0	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000046	1	IV 5p	unresolved_subterminal	moderate	1	1	1	238123	.	0	0	.	0	.
+C000047	5	III 3p	germline	high	5	5	5	11013138	.	0	0	I 5p unresolved_subterminal	5	.
+C000048	2	X internal 12,456,000 (5p facing)	internal_untyped	low	2	2	2	12456688.0	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000049	1	II internal 7,222,000 (5p facing)	internal_untyped	low	1	1	1	7221407	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000050	1	I 3p	somatic	low	0	0	1	11156003	11141771	0	0	.	0	.
+C000051	1	X 5p	germline_candidate	moderate	1	1	1	44347	.	0	0	V 5p germline_candidate	1	.
+C000052	1	IV 3p	rDNA_shared_candidate	low	0	0	1	12460634	12459187	1	0	IV 3p germline	1	Competing placement within alignment tolerance; Shared rDNA placement; individual repeat copy or tissue origin uncertain
+C000053	1	IV 3p	rDNA_shared_candidate	low	1	1	1	12465612	.	1	0	X internal 1,034,000 (3p facing) internal_untyped	0	Shared rDNA placement; individual repeat copy or tissue origin uncertain
+C000054	1	V internal 5,066,000 (3p facing)	internal_untyped	low	1	1	1	5065414	.	0	0	.	0	No catalogued PDE cut at this projected position
+C000055	1	X 3p	unresolved_subterminal	moderate	1	1	1	12576837	.	0	0	III 3p germline_candidate	1	.
+C000056	1	V internal 6,471,565 (5p facing)	somatic_internal	moderate	1	1	1	6684987	6471565	0	0	V internal 6,686,000 (3p facing) internal_untyped	0	.

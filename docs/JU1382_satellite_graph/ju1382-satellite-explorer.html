@@ -1,0 +1,851 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JU1382 chromosome ends</title>
+<style>
+:root{color-scheme:light;--ink:#192137;--dim:#526078;--paper:#f4f5fa;--white:#fff;--line:#d8dfea;--hom:#8065b1;--arr:#237a77;--read:#b45c35;--accent:#3e397f}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 system-ui,-apple-system,sans-serif}button,select,input{font:inherit}button,select{color:inherit}a{color:#334990}a:focus-visible,button:focus-visible,select:focus-visible,svg [tabindex]:focus-visible{outline:2px solid #5650aa;outline-offset:4px}
+main{max-width:1290px;margin:auto;padding:2.4rem 2.5rem 3rem}header{display:flex;align-items:end;justify-content:space-between;gap:1.2rem;flex-wrap:wrap;margin-bottom:1.45rem}
+h1,h2,h3,p{margin-top:0}h1{font-size:clamp(2rem,5vw,3.1rem);line-height:1.05;letter-spacing:-.05em;margin-bottom:.45rem}header p{margin:0;color:var(--dim)}h2{font-size:1.28rem;line-height:1.2;margin-bottom:.65rem}h3{font-size:1rem;margin:.95rem 0 .35rem}
+.stat{color:var(--dim);border-left:2px solid #bbb6d7;padding-left:.8rem}.stat b{color:var(--ink)}.layout{display:grid;gap:1.25rem;grid-template-columns:minmax(0,1.44fr) minmax(320px,1fr);align-items:start}.card{border:1px solid var(--line);border-radius:14px;background:var(--white);padding:1rem 1.15rem;overflow:hidden}
+.controls{display:flex;align-items:center;gap:.8rem;flex-wrap:wrap}.controls select{min-width:12rem;padding:.43rem .5rem;border:1px solid var(--line);background:var(--white);border-radius:6px}.controls label{white-space:nowrap}.controls input{accent-color:var(--accent);vertical-align:middle}.controls button{border:1px solid var(--line);background:var(--paper);border-radius:6px;padding:.44rem .7rem}.canvas{overflow:auto}.canvas svg{min-width:480px;width:100%;display:block}
+.node{cursor:pointer}.node rect{fill:#f9f9fd;stroke:#aab6ce;stroke-width:1.3}.node text{font-size:14px;font-weight:650;fill:#192137;pointer-events:none}.node.assigned rect{fill:#e9f6ef;stroke:#56856b}.node.provisional rect{fill:#fff1d8;stroke:#a27724}.node.group rect{fill:#e9f7f6;stroke:#438e8b}.node.alternative rect{stroke-dasharray:5 3}.node.selected rect{stroke:#231a61;stroke-width:2.8}.node.dim{opacity:.44}
+.edge{fill:none;stroke-width:2;pointer-events:none;opacity:.72}.edge.homology{stroke:var(--hom)}.edge.array{stroke:var(--arr)}.edge.read{stroke:var(--read);stroke-dasharray:6 4}.edge.dim{opacity:.16}.edge.selected{stroke-width:3.6;opacity:1}.hit{fill:none;stroke:transparent;stroke-width:13;cursor:pointer}
+.legend{display:flex;flex-wrap:wrap;gap:.3rem 1rem;color:var(--dim);margin:.55rem 0 0}.legend i{display:inline-block;width:17px;vertical-align:middle;margin-right:.3rem;border-top:2px solid}.legend .homology{color:var(--hom)}.legend .array{color:var(--arr)}.legend .read{color:var(--read);border-top-style:dashed}.intro{color:var(--dim)}.facts{display:flex;gap:.55rem;flex-wrap:wrap;margin:.65rem 0}.facts span{padding:.2rem .45rem;background:#f0f1f8;border-radius:5px}.list{display:grid;gap:.3rem}.list button{display:block;text-align:left;padding:.38rem .5rem;background:#fbfbff;border:1px solid var(--line);border-radius:5px;width:100%;cursor:pointer}.mono{font:12px/1.55 ui-monospace,monospace;overflow-wrap:anywhere}.track{position:relative;height:19px;background:#eff1f8;border:1px solid var(--line);border-radius:4px;margin-top:.4rem}.track i{position:absolute;top:1px;bottom:1px;min-width:2px;background:var(--arr);border-radius:2px}.track .cap{background:#437354}.scale{display:flex;justify-content:space-between;font-size:.74rem;color:var(--dim)}
+table{border-collapse:collapse;width:100%;font-size:.87rem}th,td{text-align:left;padding:.3rem;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:650}footer{margin-top:1.3rem;color:var(--dim);font-size:.9rem}footer p{margin:.25rem 0}.wrap{overflow-wrap:anywhere}
+@media(max-width:865px){main{padding:1.4rem 1rem 2rem}.layout{grid-template-columns:1fr}.card{padding:.8rem}.canvas svg{min-width:470px}.controls{gap:.65rem}}
+</style>
+</head>
+<body>
+<main>
+<header><div><h1>JU1382 chromosome ends</h1><p>Tandem arrays, shared terminal sequence and telomere evidence</p></div><div class="stat" id="stats"></div></header>
+<div class="layout">
+<section class="card" aria-label="Chromosome-end graph">
+<div class="controls"><select id="site" aria-label="Inspect a chromosome end"></select><button type="button" id="clear">Reset</button></div>
+<div class="controls" style="margin-top:.7rem">
+<label><input id="homology" type="checkbox" checked> Shared sequence</label>
+<label><input id="array" type="checkbox" checked> Tandem arrays</label>
+<label><input id="read" type="checkbox"> Read comparisons</label>
+</div>
+<div class="canvas"><svg id="network" viewBox="0 0 640 565" role="group" aria-label="JU1382 end and repeat connections"></svg></div>
+<div class="legend"><span><i class="homology"></i>Shared aligned block</span><span><i class="array"></i>Tandem array</span><span><i class="read"></i>Competing read placements</span></div>
+</section>
+<section class="card" id="detail" aria-live="polite" aria-label="Selected evidence"></section>
+</div>
+<footer><p id="method"></p><p><a href="ju1382-satellite-network.graphml" download>GraphML</a> · <a href="ju1382-satellite-data.json" download>Evidence data</a> · <a href="../JU1382_GRAPH_REFINEMENT.md">Assembly audit</a></p></footer>
+</main>
+<script type="application/json" id="data">{
+  "species": "Oscheius sp. JU1382",
+  "scope_bp": 36000,
+  "marker_k": 15,
+  "nodes": [
+    {
+      "id": "I_5p",
+      "label": "I 5\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "extended_open",
+      "assigned": false,
+      "telomere_repeats": 3,
+      "offset": 8409,
+      "delta": 25717,
+      "read": null,
+      "family": null,
+      "note": "Three HiFi molecules cross into the longer contig and two ONT reads anchored to I span the full 25.7 kb path. The near 849 bp graph cap has high depth and 102 C000005 molecules. Long apparent caps with strongest anchors elsewhere were rejected.",
+      "arrays": []
+    },
+    {
+      "id": "I_3p",
+      "label": "I 3\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "extended_open",
+      "assigned": false,
+      "telomere_repeats": 0,
+      "offset": 0,
+      "delta": 27663,
+      "read": null,
+      "family": null,
+      "note": "The contig adds 27,663 bp. Three original ONT alignments span from I into the distal graph sequence. No confirmed distal telomeric tract.",
+      "arrays": []
+    },
+    {
+      "id": "II_5p",
+      "label": "II 5\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "germline_supported",
+      "assigned": true,
+      "telomere_repeats": 209,
+      "offset": 0,
+      "delta": 17112,
+      "read": "daaf6427-e17a-4738-9a98-2df7662081a2",
+      "family": null,
+      "note": "Primary graph followed by an observed ONT allele with a 119 bp exact overlap. Several read molecules anchor in II; longer apparent caps include shared-repeat and wrong-arm matches.",
+      "arrays": []
+    },
+    {
+      "id": "II_3p",
+      "label": "II 3\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "extended_open",
+      "assigned": false,
+      "telomere_repeats": 199,
+      "offset": 5612,
+      "delta": 33365,
+      "read": null,
+      "family": null,
+      "note": "Multiple ONT reads independently anchored to II support about 33 kb of the contig; the last 7.3 kb of the graph candidate lacks this support. No confirmed distal telomeric tract.",
+      "arrays": [
+        "A01"
+      ]
+    },
+    {
+      "id": "III_5p",
+      "label": "III 5\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "germline_supported",
+      "assigned": true,
+      "telomere_repeats": 104,
+      "offset": 0,
+      "delta": 38263,
+      "read": "57270130-d238-4aa3-8ebb-cb0812676259",
+      "family": null,
+      "note": "The three graph exports give the same main path. Two ONT reads continue past it to terminal tracts. The selected source has a 49 bp exact graph-to-read splice.",
+      "arrays": []
+    },
+    {
+      "id": "III_3p",
+      "label": "III 3\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "germline_supported",
+      "assigned": true,
+      "telomere_repeats": 42,
+      "offset": 3,
+      "delta": 20075,
+      "read": "60cef9e3-5f81-4b46-ae09-cede6132b5f9",
+      "family": null,
+      "note": "A three-node low-depth path in both graph exports. Three ONT molecules align from III through the graph joins to its distal edge; one of them is a fold-back. Two continuous reads support the full route.",
+      "arrays": []
+    },
+    {
+      "id": "IV_5p",
+      "label": "IV 5\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "provisional_distal_cap",
+      "assigned": true,
+      "telomere_repeats": 138,
+      "offset": 0,
+      "delta": 3284,
+      "read": "m64016_201224_175337/151847226/ccs",
+      "family": "C000099",
+      "note": "The outward end of one double-telomeric HiFi molecule supplies +3,284 bp. Its IV anchor reaches the recorded inward cut at 5,066 bp. The longer apparent ONT cap group instead maps to V. The cap is provisional because there is one source molecule and competing repeat alignments.",
+      "arrays": [
+        "A02"
+      ]
+    },
+    {
+      "id": "IV_3p",
+      "label": "IV 3\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "open_proximal_cap",
+      "assigned": false,
+      "telomere_repeats": 85,
+      "offset": 494,
+      "delta": 0,
+      "read": null,
+      "family": "C000027",
+      "note": "The 6 bp repeat is an internal telomeric tract. Both graphs support a shorter capped branch. One HiFi read reaches the current tip 494 bp beyond the tract. Two ONT molecules independently join the tract to rDNA and end within the array. Germline cap assignment remains open.",
+      "arrays": [
+        "A03"
+      ]
+    },
+    {
+      "id": "V_5p",
+      "label": "V 5\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "germline_supported",
+      "assigned": true,
+      "telomere_repeats": 60,
+      "offset": 3,
+      "delta": 3618,
+      "read": "m64016_201224_175337/110168719/ccs",
+      "family": "C000047",
+      "note": "Identical primary and raw graph segment with a distal tract and a unique exact reference splice. Two C000047 HiFi and multiple anchored ONT molecules support the distal junction.",
+      "arrays": [
+        "A04"
+      ]
+    },
+    {
+      "id": "V_3p",
+      "label": "V 3\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "germline_supported",
+      "assigned": true,
+      "telomere_repeats": 57,
+      "offset": 0,
+      "delta": 16376,
+      "read": "9167bda3-9d80-4b73-976c-7aa4dfb2a2a4",
+      "family": null,
+      "note": "An ONT molecule with 27 kb of V-facing alignment reaches a terminal tract. The selected splice preserves the graph through a 52 bp exact anchor. The distal repeat also matches II 5\u2032 and alternative apparent cap reads anchor primarily there.",
+      "arrays": []
+    },
+    {
+      "id": "X_5p",
+      "label": "X 5\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "germline_supported",
+      "assigned": true,
+      "telomere_repeats": 133,
+      "offset": 7,
+      "delta": 12706,
+      "read": "a8760f5d-f703-49a4-9a4f-5c64db900dd6",
+      "family": null,
+      "note": "Identical cap sequence in both unitig graphs. Two original ONT molecules with the strongest long anchor on X 5\u2032 reach this junction.",
+      "arrays": [
+        "A05"
+      ]
+    },
+    {
+      "id": "X_3p",
+      "label": "X 3\u2032",
+      "kind": "end",
+      "length": 36000,
+      "status": "germline_supported",
+      "assigned": true,
+      "telomere_repeats": 135,
+      "offset": 1,
+      "delta": 8309,
+      "read": "3c4b72ec-ff12-4b3a-b907-f88b5dc40688",
+      "family": null,
+      "note": "Identical 8.3 kb cap paths in both unitig graphs. HiFi and ONT match the graph junction; one ONT has a strong terminal X anchor and a farther split inward. Some longer ONT alleles show shared X-end repeats. Retained the graph representative.",
+      "arrays": []
+    },
+    {
+      "id": "I5_short",
+      "label": "I 5\u2032 short cap",
+      "kind": "graph route",
+      "length": 11849,
+      "status": "alternative",
+      "assigned": false,
+      "telomere_repeats": 87,
+      "offset": 2,
+      "delta": 0,
+      "read": null,
+      "family": "C000005",
+      "note": "High-depth p_utg/r_utg cap near the frozen tip. Continuations from I extend beyond its position.",
+      "arrays": []
+    },
+    {
+      "id": "II3_far",
+      "label": "II 3\u2032 farther contig",
+      "kind": "graph route",
+      "length": 36000,
+      "status": "alternative",
+      "assigned": false,
+      "telomere_repeats": 0,
+      "offset": 0,
+      "delta": 0,
+      "read": null,
+      "family": null,
+      "note": "The last 7.3 kb of this contig path remain unsupported by whole-end molecules from II.",
+      "arrays": [
+        "A06"
+      ]
+    }
+  ],
+  "arrays": [
+    {
+      "id": "A01",
+      "site": "II_3p",
+      "start": 5579,
+      "end": 6851,
+      "span": 1272,
+      "period": 6,
+      "lag_identity": 1.0,
+      "group": "S01"
+    },
+    {
+      "id": "A02",
+      "site": "IV_5p",
+      "start": 1006,
+      "end": 1509,
+      "span": 503,
+      "period": 114,
+      "lag_identity": 0.682,
+      "group": "S04"
+    },
+    {
+      "id": "A03",
+      "site": "IV_3p",
+      "start": 454,
+      "end": 1024,
+      "span": 570,
+      "period": 6,
+      "lag_identity": 0.684,
+      "group": "S03"
+    },
+    {
+      "id": "A04",
+      "site": "V_5p",
+      "start": 447,
+      "end": 738,
+      "span": 291,
+      "period": 6,
+      "lag_identity": 0.709,
+      "group": "S01"
+    },
+    {
+      "id": "A05",
+      "site": "X_5p",
+      "start": 15919,
+      "end": 16732,
+      "span": 813,
+      "period": 38,
+      "lag_identity": 0.697,
+      "group": "S02"
+    },
+    {
+      "id": "A06",
+      "site": "II3_far",
+      "start": 12863,
+      "end": 14135,
+      "span": 1272,
+      "period": 6,
+      "lag_identity": 0.929,
+      "group": "S01"
+    }
+  ],
+  "repeats": [
+    {
+      "id": "S01",
+      "label": "6 bp",
+      "sites": [
+        "II3_far",
+        "II_3p",
+        "V_5p"
+      ],
+      "arrays": [
+        "A01",
+        "A04",
+        "A06"
+      ],
+      "cap_count": 1
+    },
+    {
+      "id": "S02",
+      "label": "38 bp",
+      "sites": [
+        "X_5p"
+      ],
+      "arrays": [
+        "A05"
+      ],
+      "cap_count": 1
+    },
+    {
+      "id": "S03",
+      "label": "6 bp",
+      "sites": [
+        "IV_3p"
+      ],
+      "arrays": [
+        "A03"
+      ],
+      "cap_count": 0
+    },
+    {
+      "id": "S04",
+      "label": "114 bp",
+      "sites": [
+        "IV_5p"
+      ],
+      "arrays": [
+        "A02"
+      ],
+      "cap_count": 1
+    }
+  ],
+  "marker_links": [
+    {
+      "source": "A04",
+      "target": "A01",
+      "shared": 37,
+      "containment": 0.487
+    },
+    {
+      "source": "A06",
+      "target": "A01",
+      "shared": 76,
+      "containment": 1.0
+    },
+    {
+      "source": "A06",
+      "target": "A04",
+      "shared": 37,
+      "containment": 0.487
+    }
+  ],
+  "read_comparisons": [
+    {
+      "source": "II_5p",
+      "target": "V_3p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "reads": [
+        "daaf6427-e17a-4738-9a98-2df7662081a2",
+        "9167bda3-9d80-4b73-976c-7aa4dfb2a2a4"
+      ],
+      "note": "Each read supports the arm with the strongest inward alignment. Their distal homology does not establish a connection between arms."
+    },
+    {
+      "source": "X_3p",
+      "target": "X_5p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "reads": [
+        "a8760f5d-f703-49a4-9a4f-5c64db900dd6",
+        "65531a55-544a-4fd2-8905-f603b34bb1f2",
+        "03bf0ace-49c6-48c4-a7c1-9a4eac34b248"
+      ],
+      "note": "These reads show shared terminal sequence. Whole-read placements distinguish the X 5\u2032 junction from X 3\u2032."
+    },
+    {
+      "source": "I_3p",
+      "target": "III_3p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "reads": [
+        "6d1ba12a-748d-48f0-9cac-b63876a3dc54",
+        "f36f7274-85a6-43ea-9a46-761701aaf892"
+      ],
+      "note": "The I anchors are continuous through the I graph path. Segments in that path are homologous to the III end."
+    },
+    {
+      "source": "I_5p",
+      "target": "III_3p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "reads": [
+        "4536aba0-6fb1-4b61-ac68-c21aa526e5ed",
+        "f51f299f-f617-4eb5-910f-cd8fd6418405"
+      ],
+      "note": "Both molecules have a long I anchor and repeat matches at III 3\u2032 in reverse orientation."
+    },
+    {
+      "source": "III_3p",
+      "target": "II_3p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "reads": [
+        "ceeb5e9c-3de6-44c8-bec6-68d002744784",
+        "1d5ccd10-095b-4e39-9f5c-ee71fe21de0d"
+      ],
+      "note": "Long II anchors align through the extension, while repeat segments also map to III. Read segments link across repeats on the II path."
+    },
+    {
+      "source": "IV_5p",
+      "target": "V_5p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "reads": [
+        "bbd55af3-d34f-46f3-99ea-07fce67d4c5c",
+        "52a4d909-174a-4e2d-a51b-c43adbe22bb6"
+      ],
+      "note": "These apparent IV extension reads map for about 49 kb to V and were rejected for IV."
+    }
+  ],
+  "homology": [
+    {
+      "source": "I_3p",
+      "target": "I_5p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "I_3p",
+          "target": "I_5p",
+          "start": 5893,
+          "end": 27074,
+          "target_start": 0,
+          "target_end": 26189,
+          "orientation": "+",
+          "matches": 20690,
+          "identity": 0.7824,
+          "mapq": 0
+        },
+        {
+          "source": "I_3p",
+          "target": "I_5p",
+          "start": 0,
+          "end": 14100,
+          "target_start": 12155,
+          "target_end": 26187,
+          "orientation": "+",
+          "matches": 13468,
+          "identity": 0.9372,
+          "mapq": 0
+        }
+      ],
+      "a_total": 2
+    },
+    {
+      "source": "II_5p",
+      "target": "I_3p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "II_5p",
+          "target": "I_3p",
+          "start": 10008,
+          "end": 24044,
+          "target_start": 0,
+          "target_end": 14100,
+          "orientation": "+",
+          "matches": 13960,
+          "identity": 0.9888,
+          "mapq": 0
+        }
+      ],
+      "a_total": 1
+    },
+    {
+      "source": "II_5p",
+      "target": "I_5p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "II_5p",
+          "target": "I_5p",
+          "start": 9804,
+          "end": 24052,
+          "target_start": 11938,
+          "target_end": 26195,
+          "orientation": "+",
+          "matches": 13533,
+          "identity": 0.926,
+          "mapq": 0
+        }
+      ],
+      "a_total": 1
+    },
+    {
+      "source": "II_3p",
+      "target": "I_3p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "II_3p",
+          "target": "I_3p",
+          "start": 15837,
+          "end": 28730,
+          "target_start": 0,
+          "target_end": 12812,
+          "orientation": "+",
+          "matches": 12418,
+          "identity": 0.9498,
+          "mapq": 0
+        }
+      ],
+      "a_total": 1
+    },
+    {
+      "source": "II_3p",
+      "target": "II_5p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "II_3p",
+          "target": "II_5p",
+          "start": 14732,
+          "end": 28730,
+          "target_start": 8872,
+          "target_end": 22757,
+          "orientation": "+",
+          "matches": 13352,
+          "identity": 0.937,
+          "mapq": 0
+        }
+      ],
+      "a_total": 1
+    },
+    {
+      "source": "III_3p",
+      "target": "II_5p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "III_3p",
+          "target": "II_5p",
+          "start": 3104,
+          "end": 25951,
+          "target_start": 1688,
+          "target_end": 24046,
+          "orientation": "+",
+          "matches": 21395,
+          "identity": 0.9191,
+          "mapq": 0
+        }
+      ],
+      "a_total": 1
+    },
+    {
+      "source": "III_3p",
+      "target": "I_5p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "III_3p",
+          "target": "I_5p",
+          "start": 11417,
+          "end": 26643,
+          "target_start": 11936,
+          "target_end": 26628,
+          "orientation": "+",
+          "matches": 14164,
+          "identity": 0.9166,
+          "mapq": 0
+        }
+      ],
+      "a_total": 1
+    },
+    {
+      "source": "III_3p",
+      "target": "I_3p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "III_3p",
+          "target": "I_3p",
+          "start": 11622,
+          "end": 25998,
+          "target_start": 0,
+          "target_end": 14152,
+          "orientation": "+",
+          "matches": 13743,
+          "identity": 0.9458,
+          "mapq": 0
+        },
+        {
+          "source": "III_3p",
+          "target": "I_3p",
+          "start": 12614,
+          "end": 25196,
+          "target_start": 14162,
+          "target_end": 26678,
+          "orientation": "+",
+          "matches": 12082,
+          "identity": 0.9442,
+          "mapq": 0
+        }
+      ],
+      "a_total": 2
+    },
+    {
+      "source": "III_3p",
+      "target": "II_3p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "III_3p",
+          "target": "II_3p",
+          "start": 10491,
+          "end": 24519,
+          "target_start": 14732,
+          "target_end": 28737,
+          "orientation": "+",
+          "matches": 13544,
+          "identity": 0.9511,
+          "mapq": 0
+        }
+      ],
+      "a_total": 1
+    },
+    {
+      "source": "X_3p",
+      "target": "X_5p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "X_3p",
+          "target": "X_5p",
+          "start": 10834,
+          "end": 24394,
+          "target_start": 3511,
+          "target_end": 17095,
+          "orientation": "+",
+          "matches": 12898,
+          "identity": 0.9248,
+          "mapq": 0
+        }
+      ],
+      "a_total": 1
+    },
+    {
+      "source": "I_5p",
+      "target": "II_3p",
+      "spanning_two_distinct_chromosome_ends": 0,
+      "blocks": [
+        {
+          "source": "I_5p",
+          "target": "II_3p",
+          "start": 11938,
+          "end": 24916,
+          "target_start": 15631,
+          "target_end": 28730,
+          "orientation": "+",
+          "matches": 12604,
+          "identity": 0.9485,
+          "mapq": 60
+        },
+        {
+          "source": "I_5p",
+          "target": "II_3p",
+          "start": 2796,
+          "end": 8453,
+          "target_start": 0,
+          "target_end": 5653,
+          "orientation": "+",
+          "matches": 5652,
+          "identity": 0.9989,
+          "mapq": 60
+        },
+        {
+          "source": "I_5p",
+          "target": "II_3p",
+          "start": 8453,
+          "end": 11938,
+          "target_start": 8915,
+          "target_end": 12397,
+          "orientation": "+",
+          "matches": 3479,
+          "identity": 0.9983,
+          "mapq": 60
+        }
+      ],
+      "a_total": 3,
+      "note": "Pairwise alignment of the two 36 kb end windows. These are three blocks of the same alignment after splitting at indels of 500 bp or more."
+    }
+  ],
+  "method": "Local autocorrelation screen for tandem arrays. End distances are measured inward from the draft tip. Similarity edges require at least 14 shared canonical 15-mers and 23% containment in the smaller marker set, with similar or multiple periods."
+}
+</script>
+<script>
+const D=JSON.parse(document.getElementById("data").textContent);
+const nodes = new Map([...D.nodes,...D.repeats.map(r=>({...r,kind:"group",label:r.id+" · "+r.label}))].map(n=>[n.id,n]));
+const arrays=new Map(D.arrays.map(x=>[x.id,x]));
+const edges=[...D.homology.map((e,i)=>({...e,id:"h"+i,layer:"homology"})),...D.read_comparisons.map((e,i)=>({...e,id:"r"+i,layer:"read"})),...D.repeats.flatMap(g=>g.sites.map(s=>({source:s,target:g.id,id:g.id+"_"+s,layer:"array"})))];
+const svgNS="http://www.w3.org/2000/svg";
+const get=id=>document.getElementById(id);
+const label=id=>nodes.get(id).label;
+const esc=x=>String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+const fmt=x=>Number(x).toLocaleString();
+const statuses={germline_supported:"Supported germline cap",provisional_distal_cap:"Provisional distal cap",extended_open:"Extended, open",open_proximal_cap:"Open, proximal tract",alternative:"Separate graph candidate"};
+const styles={homology:"Shared aligned block",array:"Tandem array",read:"Competing read placements"};
+const stats={supported:D.nodes.filter(n=>n.status==="germline_supported").length,provisional:D.nodes.filter(n=>n.status==="provisional_distal_cap").length,open:D.nodes.filter(n=>n.kind==="end"&&!n.assigned).length};
+get("stats").innerHTML="<b>"+stats.supported+"</b> supported · <b>"+stats.provisional+"</b> provisional · <b>"+stats.open+"</b> open";
+const pos=new Map();
+for(const [i,n] of D.nodes.entries()){
+ const loc=i<12?(i%2?390:102):102+(i-12)*288;
+ const y=i<12?80+Math.floor(i/2)*74:525;
+ pos.set(n.id,{x:loc,y,w:i<12?75:155});
+}
+for(const [i,n] of D.repeats.entries()) pos.set(n.id,{x:560,y:112+i*(355/Math.max(D.repeats.length-1,1)),w:116});
+const select=get("site");
+select.append(new Option("Choose a chromosome end",""));
+for(const n of nodes.values())select.append(new Option(n.label,n.id));
+get("method").textContent="Distances are measured inward from the draft tip. Autocorrelation estimates tandem period and span. Same-period arrays are compared by canonical 15-mers. Long aligned blocks are shown separately.";
+let active="",activeEdge="";
+function s(tag,attrs,text){
+ const node=document.createElementNS(svgNS,tag);
+ for(const [k,v] of Object.entries(attrs))node.setAttribute(k,v);
+ if(text!==undefined)node.textContent=text;
+ return node;
+}
+function connect(e){
+ const a=pos.get(e.source),b=pos.get(e.target);
+ if(Math.abs(a.x-b.x)<30){
+   const off=e.layer==="read"?-75:92;
+   return "M"+a.x+","+a.y+" C"+(a.x+off)+","+a.y+" "+(b.x+off)+","+b.y+" "+b.x+","+b.y;
+ }
+ const sign=Math.sign(b.x-a.x), x=a.x+sign*a.w/2, y=b.x-sign*b.w/2, mid=(x+y)/2;
+ return "M"+x+","+a.y+" C"+mid+","+a.y+" "+mid+","+b.y+" "+y+","+b.y;
+}
+function draw(){
+ const svg=get("network");
+ svg.replaceChildren();
+ for(const [x,y,t] of [[102,32,"5′ ends"],[392,32,"3′ ends"],[558,32,"Tandem groups"]])
+  svg.append(s("text",{x,y,"text-anchor":"middle",fill:"#526078","font-size":"14"},t));
+ const visible=edges.filter(e=>get(e.layer).checked);
+ for(const e of visible){
+  const engaged=e.id===activeEdge||e.source===active||e.target===active;
+  const c=connect(e);
+  svg.append(s("path",{d:c,class:"edge "+e.layer+(engaged?" selected":active?" dim":"")}));
+  svg.append(s("path",{d:c,class:"hit",tabindex:"0",role:"button","aria-label":styles[e.layer]+" between "+label(e.source)+" and "+label(e.target),"data-edge":e.id}));
+ }
+ for(const n of nodes.values()){
+  const p=pos.get(n.id);
+  const kind=n.status==="provisional_distal_cap"?"provisional":n.assigned?"assigned":n.kind==="group"?"group":n.kind==="graph route"?"alternative":"";
+  const activeNeighbor=visible.some(e=>(e.source===n.id&&e.target===active)||(e.source===active&&e.target===n.id));
+  const dim=active&&active!==n.id&&!activeNeighbor?" dim":"";
+  const g=s("g",{class:"node "+kind+(active===n.id?" selected":"")+dim,role:"button",tabindex:"0","data-node":n.id,"aria-label":n.label});
+  g.append(s("rect",{x:p.x-p.w/2,y:p.y-18,width:p.w,height:36,rx:7}),s("text",{x:p.x,y:p.y+5,"text-anchor":"middle"},n.label));
+  svg.append(g);
+ }
+}
+const facts=xs=>'<div class="facts">'+xs.map(v=>"<span>"+esc(v)+"</span>").join("")+"</div>";
+const button=(attr,id,name)=>'<button type="button" data-'+attr+'="'+esc(id)+'">'+esc(name)+'</button>';
+const desc=a=>[label(a.site),fmt(a.period)+" bp",fmt(a.span)+" bp",fmt(a.start)+"–"+fmt(a.end)+" bp",Math.round(a.lag_identity*100)+"%"];
+function table(headers,rows){
+ return "<table><thead><tr>"+headers.map(x=>"<th>"+esc(x)+"</th>").join("")+"</tr></thead><tbody>"+rows.map(r=>"<tr>"+r.map(x=>"<td>"+esc(x)+"</td>").join("")+"</tr>").join("")+"</tbody></table>";
+}
+function show(){
+ const dd=get("detail"),n=nodes.get(active),e=edges.find(e=>e.id===activeEdge);
+ if(e){
+   let out="<h2>"+esc(label(e.source)+" ↔ "+label(e.target))+"</h2><p class='intro'>"+styles[e.layer]+"</p>";
+   if(e.layer==="read")out+="<p>"+esc(e.note)+"</p>"+facts([e.spanning_two_distinct_chromosome_ends+" verified between-arm bridges"])+"<div class='mono'>"+e.reads.map(esc).join("<br>")+"</div>";
+   if(e.layer==="homology")out+=table([label(e.source),label(e.target),"Orientation","Identity"],e.blocks.map(b=>[fmt(b.start)+"–"+fmt(b.end),fmt(b.target_start)+"–"+fmt(b.target_end),b.orientation==="+"?"Same":"Opposite",(100*b.identity).toFixed(1)+"%"]))+"<p class='intro'>Coordinates start at each outward tip.</p>"+(e.note?"<p class='intro'>"+esc(e.note)+"</p>":"")+""+facts(["0 verified between-arm bridges"]);
+   if(e.layer==="array")out+=table(["Site","Period","Span","From tip","Lag identity"],D.arrays.filter(a=>a.site===e.source&&a.group===e.target).map(desc));
+   dd.innerHTML=out+"<h3>Inspect</h3><div class='list'>"+[e.source,e.target].map(id=>button("node",id,label(id))).join("")+"</div>";
+   return;
+ }
+ if(!n){
+   dd.innerHTML="<h2>Explore the end network</h2><p class='intro'>Select an end or repeat group to inspect its arrays, cap evidence and competing read placements.</p><h3>Largest shared blocks</h3><div class='list'>"+
+     edges.filter(e=>e.layer==="homology").sort((a,b)=>b.blocks[0].matches-a.blocks[0].matches).slice(0,6).map(e=>button("edge",e.id,label(e.source)+" ↔ "+label(e.target)+" · "+fmt(e.blocks[0].matches)+" matching bases")).join("")+"</div>";
+   return;
+ }
+ const track=n.kind==="group"?[]:n.arrays.map(id=>arrays.get(id));
+ let out="<h2>"+esc(n.label)+"</h2>";
+ if(n.kind==="group"){
+  out+=facts([n.sites.length+" sites",n.cap_count+" assigned or provisional caps nearby"])+table(["Site","Period","Span","From tip","Lag identity"],n.arrays.map(id=>desc(arrays.get(id))));
+ }else{
+  out+=facts([statuses[n.status],n.delta?(n.delta>0?"+":"")+fmt(n.delta)+" bp":"Frozen end retained",n.telomere_repeats?fmt(n.telomere_repeats)+" exact telomeric copies":"No terminal tract"]);
+  out+="<p class='wrap'>"+esc(n.note)+"</p>";
+  if(n.read||n.family)out+="<div class='mono'>"+[n.family,n.read].filter(Boolean).map(esc).join("<br>")+"</div>";
+  const ticks=(n.assigned?["<i class='cap' style='left:0;width:"+Math.min(100,100*(n.telomere_repeats*6+n.offset)/n.length)+"%'></i>"]:[]).concat(track.map(a=>"<i style='left:"+100*a.start/n.length+"%;width:"+100*a.span/n.length+"%'></i>"));
+  out+="<h3>Surveyed end sequence</h3><div class='track' aria-hidden='true'>"+ticks.join("")+"</div><div class='scale'><span>Tip</span><span>"+fmt(n.length)+" bp inward</span></div>";
+  if(track.length)out+=table(["Site","Period","Span","From tip","Lag identity"],track.map(desc));
+  else out+="<p class='intro'>The tandem screen did not return an array in this window.</p>";
+ }
+ const related=edges.filter(e=>e.source===n.id||e.target===n.id);
+ if(related.length)out+="<h3>Connections</h3><div class='list'>"+related.map(e=>button("edge",e.id,styles[e.layer]+" · "+label(e.source===n.id?e.target:e.source))).join("")+"</div>";
+ dd.innerHTML=out;
+}
+function choose(n,e){active=n;activeEdge=e;select.value=n;draw();show()}
+function act(t){
+ const c=t.closest("[data-node],[data-edge]");
+ if(!c)return;
+ if(c.dataset.node)choose(c.dataset.node,"");else choose("",c.dataset.edge);
+}
+document.addEventListener("click",e=>act(e.target));
+get("network").addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();act(e.target)}});
+for(const v of Object.keys(styles))get(v).addEventListener("change",draw);
+select.addEventListener("change",()=>choose(select.value,""));
+get("clear").addEventListener("click",()=>choose("",""));
+choose("","");
+</script>
+</body>
+</html>

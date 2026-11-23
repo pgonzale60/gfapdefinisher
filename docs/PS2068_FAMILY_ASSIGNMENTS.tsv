@@ -1,0 +1,46 @@
+family	cluster_members	best_end	best_version	confidence	unique_HiFi_anchors	short_unique_anchors	compatible_members	rDNA_members	rDNA_inward_members	median_inward_bp	runner_up_end	runner_up_unique_HiFi	reason	curation_status
+C000001	110	I_5p	somatic_candidate	read_anchored	109	0	110	0	0	8785	.	0	multiple end-specific HiFi anchors	ranked
+C000002	108	II_5p	shared_rDNA	shared_rDNA_candidate	0	0	95	96	96	140479	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p	ranked
+C000003	148	IV_3p	somatic	read_anchored	147	0	148	0	0	15312	.	0	multiple end-specific HiFi anchors	ranked
+C000004	141	II_3p	somatic	read_anchored	141	0	141	0	0	9185	.	0	multiple end-specific HiFi anchors	ranked
+C000005	174	X_3p	somatic	read_anchored	173	0	174	0	0	28953	.	0	multiple end-specific HiFi anchors	ranked
+C000006	177	V_3p	germline	read_anchored	176	0	177	0	0	285.0	.	0	multiple end-specific HiFi anchors	ranked
+C000007	165	X_5p	somatic	read_anchored	163	0	165	0	0	7627	.	0	multiple end-specific HiFi anchors	ranked
+C000008	96	V_5p	somatic	read_anchored	96	0	96	0	0	9595.0	.	0	multiple end-specific HiFi anchors	ranked
+C000009	157	III_5p	somatic	read_anchored	157	0	157	0	0	2382	.	0	multiple end-specific HiFi anchors	ranked
+C000010	142	I_3p	somatic	read_anchored	142	0	142	0	0	2162.0	.	0	multiple end-specific HiFi anchors	ranked
+C000011	158	III_3p	somatic	read_anchored	158	0	158	0	0	183355.0	.	0	multiple end-specific HiFi anchors	ranked
+C000012	9	V_3p	germline_candidate	read_anchored	7	2	9	0	0	-621	.	0	multiple end-specific HiFi anchors	ranked
+C000013	166	IV_5p	somatic	read_anchored	165	0	166	0	0	10655	.	0	multiple end-specific HiFi anchors	ranked
+C000014	8	II_3p	germline	read_anchored	7	1	8	0	0	6885	.	0	multiple end-specific HiFi anchors	ranked
+C000015	10	IV_5p	germline	read_anchored	9	1	10	0	0	5908	.	0	multiple end-specific HiFi anchors	ranked
+C000016	1	II_5p	shared_rDNA	shared_rDNA_reverse_only	0	0	0	1	0	.	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p; array hits are in reverse orientation	ranked
+C000017	8	V_5p	germline	read_anchored	7	1	8	0	0	6786	.	0	multiple end-specific HiFi anchors	ranked
+C000018	1	II_5p	shared_rDNA	shared_rDNA_reverse_only	0	0	0	1	0	.	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p; array hits are in reverse orientation	ranked
+C000019	1	II_5p	shared_rDNA	shared_rDNA_candidate	0	0	1	1	1	13281	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p	ranked
+C000020	2	II_5p	shared_rDNA	shared_rDNA_candidate	0	0	2	2	2	143315.0	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p	ranked
+C000021	1	.	unresolved	unplaced	0	0	0	0	0	.	.	0	Only interior fallback IV:10020291-10032593(+)	ranked
+C000022	7	III_3p	germline_candidate	read_anchored	5	2	7	0	0	6456	X_3p	0	multiple end-specific HiFi anchors	ranked
+C000023	1	.	unresolved	unplaced	0	0	0	0	0	.	.	0	Only interior fallback IV:9996171-10013678(-)	ranked
+C000024	1	X_3p	somatic	single_read_anchor	1	0	1	0	0	28937	.	0	one end-specific HiFi anchor	ranked
+C000025	5	III_3p	germline	read_anchored	4	0	5	0	0	5821.0	IV_3p	0	multiple end-specific HiFi anchors	accepted
+C000026	1	IV_3p	unresolved_proximal_site	single_read_anchor	1	0	1	0	0	20806	.	0	one end-specific HiFi anchor	ranked
+C000027	1	II_5p	shared_rDNA	shared_rDNA_reverse_only	0	0	0	1	0	.	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p; array hits are in reverse orientation	ranked
+C000028	1	II_5p	shared_rDNA	shared_rDNA_reverse_only	0	0	0	1	0	.	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p; array hits are in reverse orientation	ranked
+C000029	1	X_5p	unresolved	opposite_orientation_match	0	0	0	0	0	.	.	0	Best local sequence match X:99597-112445(-) is opposite the expected inward direction	ranked
+C000030	3	X_3p	germline	read_anchored	3	0	3	0	0	7266	III_3p	0	multiple end-specific HiFi anchors	ranked
+C000031	1	II_5p	shared_rDNA	shared_rDNA_candidate	0	0	1	1	1	253574	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p	ranked
+C000032	4	IV_3p	germline	read_anchored	4	0	4	0	0	646.0	X_3p	0	multiple end-specific HiFi anchors	ranked
+C000033	1	II_5p	shared_rDNA	shared_rDNA_reverse_only	0	0	0	1	0	.	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p; array hits are in reverse orientation	ranked
+C000034	9	I_5p	germline	read_anchored	8	1	9	0	0	6913.0	.	0	multiple end-specific HiFi anchors	ranked
+C000035	1	X_3p	unresolved_proximal_site	single_read_anchor	1	0	1	0	0	58367	.	0	one end-specific HiFi anchor	ranked
+C000036	2	.	unresolved	unplaced	0	0	0	0	0	.	.	0	Only interior fallback IV:326335-337636(-)	ranked
+C000037	1	II_5p	shared_rDNA	shared_rDNA_candidate	0	0	1	1	1	28844	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p	ranked
+C000038	1	IV_5p	unresolved	opposite_orientation_match	0	0	0	0	0	.	.	0	Best local sequence match IV:5908-10640(-) is opposite the expected inward direction	ranked
+C000039	4	I_3p	germline	read_anchored	4	0	4	0	0	556.0	.	0	multiple end-specific HiFi anchors	ranked
+C000040	2	X_5p	germline	single_read_anchor	1	0	2	0	0	86	III_3p	0	one end-specific HiFi anchor	ranked
+C000041	1	II_5p	shared_rDNA	shared_rDNA_candidate	0	0	1	1	1	6141	.	0	rDNA-proximal terminal reads and monomer comparison support II 5p	ranked
+C000042	1	X_3p	somatic	ambiguous_ranked	0	0	1	0	0	28953	.	0	ranked by nonunique members and representative sequence matches	ranked
+C000043	1	III_3p	germline_candidate	single_read_anchor	1	0	1	0	0	22752	.	0	one end-specific HiFi anchor	ranked
+C000044	1	I_5p	unresolved	opposite_orientation_match	0	0	0	0	0	.	.	0	Best local sequence match I:6913-8766(-) is opposite the expected inward direction	ranked
+C000045	1	I_5p	unresolved_proximal_site	single_read_anchor	1	0	1	0	0	17834	.	0	one end-specific HiFi anchor	ranked
