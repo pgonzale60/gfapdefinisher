@@ -724,7 +724,12 @@ def build_scaffolds(
     all_agp: list[AgpRecord] = []
     placed_unitigs_all: set[str] = set()
 
-    sorted_segs = sorted(graph.segments.keys(), key=lambda s: (-graph.segments[s].length, s))
+    # Tiara contaminants never seed a scaffold; run_finish routes them to excluded.fasta.
+    sorted_segs = [
+        s
+        for s in sorted(graph.segments.keys(), key=lambda s: (-graph.segments[s].length, s))
+        if not _is_contam_unitig(ledger_map, s)
+    ]
     pass1_segs = [s for s in sorted_segs if s not in consumed and (_is_core(s) or s not in continuation_targets)]
     pass2_segs = [s for s in sorted_segs if s not in consumed and (not _is_core(s) and s in continuation_targets)]
 
@@ -1754,7 +1759,18 @@ def run_finish(args: argparse.Namespace) -> None:
         excluded_target = args.out_dir / "excluded.fasta"
 
     placed_uids = {str(r.component_id) for r in agp_records if getattr(r, "component_type", "") == "W"}
-    emit_excluded_fasta(graph, resolution_records, excluded_target, placed_unitigs=placed_uids)
+    contaminants = {
+        name: ann.tiara_classification.lower()
+        for name, ann in annotations.items()
+        if ann.is_contaminant() and ann.tiara_classification is not None
+    }
+    emit_excluded_fasta(
+        graph,
+        resolution_records,
+        excluded_target,
+        placed_unitigs=placed_uids,
+        contaminant_unitigs=contaminants,
+    )
 
     emit_tsv_ledger(ledger, args.out_dir / "ledger.tsv")
     emit_junctions_tsv(junction_records, args.out_dir / "junctions.tsv")

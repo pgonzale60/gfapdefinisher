@@ -708,11 +708,13 @@ def emit_excluded_fasta(
     output: Path | TextIO | str,
     line_width: int | None = None,
     placed_unitigs: Iterable[str] | None = None,
+    contaminant_unitigs: Mapping[str, str] | None = None,
 ) -> int:
-    """Emit all unitigs excluded from scaffolds via excluded_unitig_ids to FASTA format.
+    """Emit all unitigs excluded from scaffolds to FASTA format.
 
-    Headers include provenance tracking:
-    >{unitig_id} excluded_by={resolution_feature_ids} length={length}
+    A unitig is excluded when a resolution lists it in excluded_unitig_ids or when
+    Tiara classifies it as a contaminant. Headers include provenance tracking:
+    >{unitig_id} excluded_by={resolution_feature_ids or tiara:<class>} length={length}
 
     Args:
         graph: Populated assembly graph containing segment sequences.
@@ -721,6 +723,7 @@ def emit_excluded_fasta(
         line_width: Optional line wrap width (None for unwrapped).
         placed_unitigs: Optional iterable of unitig IDs that were placed in scaffolds.
             Any unitig placed in scaffolds is strictly excluded from excluded.fasta.
+        contaminant_unitigs: Optional mapping of unitig ID to Tiara contaminant class.
 
     Returns:
         Number of distinct excluded unitigs written.
@@ -732,6 +735,9 @@ def emit_excluded_fasta(
         for uid in getattr(rec, "excluded_unitig_ids", ()):
             if uid not in placed_set:
                 excluded_by[uid].append(rec_fid)
+    for uid, cls in (contaminant_unitigs or {}).items():
+        if uid not in placed_set:
+            excluded_by[uid].append(f"tiara:{cls}")
 
     sorted_uids = sorted(excluded_by.keys())
 
