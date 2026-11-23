@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pyfaidx import Fasta
 
+from gfapdefinisher.annotations import load_tiara
 from gfapdefinisher.cli import main
 from gfapdefinisher.emitter import SequenceProvenance, parse_agp, parse_summary_tsv
 from gfapdefinisher.graph import load_gfa
@@ -1035,12 +1036,14 @@ def test_excluded_fasta_emission_and_conservation_law(tmp_path: Path):
         # Parse AGP placed unitigs (W components matching GFA segment names)
         agp_lines = (out_dir / "scaffolds.agp").read_text().splitlines()
         placed_unitigs = set()
+        object_components: dict[str, list[str]] = {}
         for line in agp_lines:
             if not line or line.startswith("#"):
                 continue
             parts = line.split("\t")
             if len(parts) >= 6 and parts[4] == "W":
                 comp_id = parts[5]
+                object_components.setdefault(parts[0], []).append(comp_id)
                 if comp_id in all_gfa_unitigs:
                     placed_unitigs.add(comp_id)
 
@@ -1072,6 +1075,22 @@ def test_excluded_fasta_emission_and_conservation_law(tmp_path: Path):
             assert parts[2].startswith("length=")
             expected_len = graph.segments[uid].length
             assert int(parts[2][len("length=") :]) == expected_len
+
+        # Tiara contaminants never seed a scaffold of their own. Unless a resolution
+        # places them inside a chromosome path, excluded.fasta carries their class.
+        contaminants = {
+            uid
+            for uid, cls in load_tiara(p["tiara"]).items()
+            if cls.lower() in ("bacteria", "archaea", "prokarya", "contaminant")
+        }
+        if name == "DF5120":
+            assert len(contaminants) == 157
+            assert not contaminants & placed_unitigs
+        standalone = {comps[0] for comps in object_components.values() if len(comps) == 1}
+        assert not contaminants & standalone
+        excl_headers = {h[1:].split()[0]: h for h in header_lines}
+        for uid in contaminants - placed_unitigs:
+            assert "tiara:" in excl_headers[uid].split()[1]
 
         # Specific metadata checks for PS1017
         if name == "PS1017":
