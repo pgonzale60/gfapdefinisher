@@ -746,15 +746,24 @@ def build_scaffolds(
             continue
 
         comps: list[PathComponent] = []
+        overlap_targets: dict[str, SegmentPort] = {}
 
-        def _add_comp(c: PathComponent) -> bool:
+        def _add_comp(c: PathComponent, next_port: SegmentPort | None = None) -> bool:
             if not c.is_gap:
                 if c.segment_id in placed_unitigs_all:
                     return False
                 placed_unitigs_all.add(c.segment_id)
                 consumed.add(c.segment_id)
+                if next_port is not None:
+                    overlap_targets[c.segment_id] = next_port  # noqa: B023
             comps.append(c)  # noqa: B023
             return True
+
+        def _set_next_port(source: SegmentPort, target: SegmentPort) -> None:
+            if comps and not comps[-1].is_gap:  # noqa: B023
+                last = comps[-1]  # noqa: B023
+                if (last.segment_id, last.strand) == (source.name, source.strand.value):
+                    overlap_targets[last.segment_id] = target  # noqa: B023
 
         if seg_name in chain_by_seg:
             core_path = chain_by_seg[seg_name]
@@ -805,7 +814,6 @@ def build_scaffolds(
                 p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
                 nxt_port = twin_path[i + 1] if i < len(twin_path) - 2 else first_port
                 has_edge = any(e.to_port == nxt_port for e in graph.get_outgoing(port))
-                overlap = _find_overlap_len(graph, port, nxt_port) if has_edge else 0
                 prov = SequenceProvenance.RDNA_CHAINED
                 if i == 0 and not (r.capped_via_heuristic and r.distal_cap_port is not None):
                     prov = SequenceProvenance.HIFI_GERMLINE
@@ -814,9 +822,9 @@ def build_scaffolds(
                         segment_id=port.name,
                         strand=port.strand.to_symbol(),
                         sequence=p_seq,
-                        overlap_to_next_bp=overlap,
                         sequence_provenance=prov,
-                    )
+                    ),
+                    next_port=nxt_port,
                 ):
                     if not has_edge:
                         _add_comp(
@@ -1002,7 +1010,6 @@ def build_scaffolds(
             prefix_ports = [p.invert() for p in reversed(g_chain_5p)]
             for i, port in enumerate(prefix_ports):
                 nxt_port = prefix_ports[i + 1] if i < len(prefix_ports) - 1 else first_port
-                overlap = _find_overlap_len(graph, port, nxt_port)
                 p_seg = graph.segments[port.name]
                 p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
                 _add_comp(
@@ -1010,14 +1017,13 @@ def build_scaffolds(
                         segment_id=port.name,
                         strand=port.strand.to_symbol(),
                         sequence=p_seq,
-                        overlap_to_next_bp=overlap,
                         sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
-                    )
+                    ),
+                    next_port=nxt_port,
                 )
 
         # Core path
         for i, port in enumerate(core_path):
-            overlap = _find_overlap_len(graph, port, core_path[i + 1]) if i < len(core_path) - 1 else 0
             p_seg = graph.segments[port.name]
             p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
             prov = SequenceProvenance.HIFI_GERMLINE if port.name in bridge_seg_names else SequenceProvenance.HIFI_CORE
@@ -1026,9 +1032,9 @@ def build_scaffolds(
                     segment_id=port.name,
                     strand=port.strand.to_symbol(),
                     sequence=p_seq,
-                    overlap_to_next_bp=overlap,
                     sequence_provenance=prov,
-                )
+                ),
+                next_port=core_path[i + 1] if i < len(core_path) - 1 else None,
             )
 
         # 3p rDNA resolution
@@ -1036,9 +1042,7 @@ def build_scaffolds(
         if last_port.name in rdna_3p:
             r = rdna_3p[last_port.name]
             has_first_edge = any(e.to_port == r.path[1] for e in graph.get_outgoing(r.path[0]))
-            overlap = _find_overlap_len(graph, r.path[0], r.path[1]) if has_first_edge else 0
-            if comps:
-                comps[-1].overlap_to_next_bp = overlap
+            _set_next_port(r.path[0], r.path[1])
             if not has_first_edge:
                 _add_comp(
                     PathComponent(
@@ -1060,7 +1064,6 @@ def build_scaffolds(
                 p_seq = p_seg.sequence if port.strand == Strand.FORWARD else reverse_complement(p_seg.sequence or "")
                 nxt_port = r.path[i + 1] if i < len(r.path) - 1 else None
                 has_nxt_edge = any(e.to_port == nxt_port for e in graph.get_outgoing(port)) if nxt_port else False
-                nxt_ov = _find_overlap_len(graph, port, nxt_port) if has_nxt_edge else 0
                 prov = (
                     SequenceProvenance.HIFI_GERMLINE
                     if (i == len(r.path) - 1 and not (r.capped_via_heuristic and r.distal_cap_port is not None))
@@ -1071,9 +1074,9 @@ def build_scaffolds(
                         segment_id=port.name,
                         strand=port.strand.to_symbol(),
                         sequence=p_seq,
-                        overlap_to_next_bp=nxt_ov,
                         sequence_provenance=prov,
-                    )
+                    ),
+                    next_port=nxt_port,
                 ):
                     if nxt_port is not None and not has_nxt_edge:
                         _add_comp(
@@ -1159,10 +1162,8 @@ def build_scaffolds(
                     g_chain_3p = _trace_germline_chain(graph, ledger_map, gp_3p, max_hops, core_coverage=core_coverage)
 
             if g_chain_3p:
-                if comps:
-                    comps[-1].overlap_to_next_bp = _find_overlap_len(graph, last_port, g_chain_3p[0])
+                _set_next_port(last_port, g_chain_3p[0])
                 for i, gp in enumerate(g_chain_3p):
-                    nxt_ov = _find_overlap_len(graph, gp, g_chain_3p[i + 1]) if i < len(g_chain_3p) - 1 else 0
                     gp_seg = graph.segments[gp.name]
                     gp_seq = (
                         gp_seg.sequence if gp.strand == Strand.FORWARD else reverse_complement(gp_seg.sequence or "")
@@ -1172,9 +1173,9 @@ def build_scaffolds(
                             segment_id=gp.name,
                             strand=gp.strand.to_symbol(),
                             sequence=gp_seq,
-                            overlap_to_next_bp=nxt_ov,
                             sequence_provenance=SequenceProvenance.HIFI_GERMLINE,
-                        )
+                        ),
+                        next_port=g_chain_3p[i + 1] if i < len(g_chain_3p) - 1 else None,
                     )
 
         # 3p gap resolution
@@ -1201,9 +1202,7 @@ def build_scaffolds(
                         and cand_gres.resolution_record.side != "5p"
                     ):
                         gres = cand_gres
-                        e_ov = parse_dovetail_overlap_len(e.cigar) if e.cigar and e.cigar != "*" else e.overlap_len
-                        if comps:
-                            comps[-1].overlap_to_next_bp = e_ov
+                        _set_next_port(last_port, e.to_port)
                         grs_seg = graph.segments[target_seg]
                         grs_seq = (
                             grs_seg.sequence
@@ -1349,8 +1348,33 @@ def build_scaffolds(
         if not comps:
             continue
 
+        stitched_comps: list[PathComponent] = []
+        for left, right in zip(comps, comps[1:], strict=False):
+            stitched_comps.append(left)
+            target = overlap_targets.get(left.segment_id)
+            if target is None or left.is_gap or right.is_gap:
+                continue
+            # A reused unitig can be skipped during placement. Its overlap must
+            # never trim a different component that happens to follow it.
+            if target == SegmentPort(right.segment_id, right.strand):
+                overlap = _find_overlap_len(graph, SegmentPort(left.segment_id, left.strand), target)
+                if overlap <= len(left.sequence) and overlap < len(right.sequence):
+                    left.overlap_to_next_bp = overlap
+                    continue
+            stitched_comps.append(
+                PathComponent(
+                    is_gap=True,
+                    gap_length=DEFAULT_AGP_POLICY.unknown_gap_bp.value,
+                    gap_type="contig",
+                    gap_component_type="U",
+                    linkage="no",
+                    linkage_evidence="na",
+                )
+            )
+        stitched_comps.append(comps[-1])
+
         scaff_id = f"{prefix}{seg_name}" if prefix else seg_name
-        seq, agp_recs = assemble_scaffold_sequence(comps, scaffold_id=scaff_id)
+        seq, agp_recs = assemble_scaffold_sequence(stitched_comps, scaffold_id=scaff_id)
         scaffolds[scaff_id] = seq
         all_agp.extend(agp_recs)
 

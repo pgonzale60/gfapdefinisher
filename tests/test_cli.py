@@ -10,7 +10,7 @@ from pyfaidx import Fasta
 
 from gfapdefinisher.annotations import load_tiara
 from gfapdefinisher.cli import main
-from gfapdefinisher.emitter import SequenceProvenance, parse_agp, parse_summary_tsv
+from gfapdefinisher.emitter import DEFAULT_AGP_POLICY, SequenceProvenance, parse_agp, parse_summary_tsv
 from gfapdefinisher.graph import load_gfa
 from gfapdefinisher.policy import DEFAULT_POLICY
 from gfapdefinisher.resolutions import (
@@ -695,6 +695,57 @@ def test_build_scaffolds_stitches_intercalary_grs_bridges():
         SequenceProvenance.HIFI_CORE,
     ]
     assert agp_list[-1].object_end == 116590
+
+
+@pytest.mark.parametrize("overlap", [23581, 100])
+def test_build_scaffolds_keeps_overlap_on_its_intended_unitig(overlap: int):
+    from gfapdefinisher.cli import build_scaffolds
+    from gfapdefinisher.graph import BidirectedGraph, SegmentPort
+    from gfapdefinisher.rdna import RdnaResolution
+    from gfapdefinisher.resolutions import EndStateRecord, ResolutionRecord
+
+    graph = BidirectedGraph()
+    graph.add_segment("first_stem", 50000, sequence="A" * 50000)
+    graph.add_segment("second_stem", 40000, sequence="C" * 40000)
+    graph.add_segment("shared", 30000, sequence="G" * 30000)
+    graph.add_segment("short_cap", 10789, sequence="T" * 10789)
+    graph.add_edge("first_stem+", "shared+", cigar="50M")
+    graph.add_edge("second_stem+", "shared+", cigar=f"{overlap}M")
+    graph.add_edge("shared+", "short_cap+", cigar="80M")
+
+    rdna_resolutions = []
+    for stem, names in (("first_stem", ["shared"]), ("second_stem", ["shared", "short_cap"])):
+        feature_id = f"rdna:{stem}:3p"
+        rdna_resolutions.append(
+            RdnaResolution(
+                chrom=stem,
+                side="3p",
+                state=EndState.END_SHARED_EXEMPT,
+                end_state_record=EndStateRecord(
+                    feature_id=feature_id, chrom=stem, side="3p", state=EndState.END_SHARED_EXEMPT
+                ),
+                resolution_record=ResolutionRecord(
+                    feature_id=feature_id,
+                    chrom=stem,
+                    side="3p",
+                    resolution_type=ResolutionType.RDNA_CASSETTE,
+                ),
+                path=[SegmentPort(name, "+") for name in [stem, *names]],
+            )
+        )
+
+    scaffolds, agp = build_scaffolds(graph, {}, [], rdna_resolutions=rdna_resolutions)
+
+    gap_length = DEFAULT_AGP_POLICY.unknown_gap_bp.value
+    assert scaffolds == {
+        "first_stem": "A" * 50000 + "G" * (30000 - 50),
+        "second_stem": "C" * 40000 + "N" * gap_length + "T" * 10789,
+    }
+    stem, gap, cap = [row for row in agp if row.object_id == "second_stem"]
+    assert gap.to_tsv_row()[3:] == ["2", "U", str(gap_length), "contig", "no", "na"]
+    assert gap.object_beg == stem.object_end + 1
+    assert cap.object_beg == gap.object_end + 1
+    assert (cap.component_id, cap.component_beg, cap.component_end) == ("short_cap", 1, 10789)
 
 
 def test_build_scaffolds_stitches_5p_ont_satellite_gap():
