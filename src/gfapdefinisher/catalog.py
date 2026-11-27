@@ -18,10 +18,13 @@ For every chromosome end, separate what the graph and reads establish from what
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 from collections import Counter, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from io import DEFAULT_BUFFER_SIZE
 from pathlib import Path
 from typing import Any
 
@@ -67,9 +70,167 @@ class CandidateEnding:
 
     port: str
     evidence: tuple[str, ...]
+    family_ids: tuple[str, ...] = ()
+    molecule_ids: tuple[str, ...] = ()
 
     def format(self) -> str:
         return f"{self.port}[{','.join(self.evidence)}]"
+
+
+@dataclass(frozen=True, slots=True)
+class EndEvidenceMember:
+    """Observed read end belonging to a phased telomere family."""
+
+    end_id: str
+    molecule_id: str
+    read_end: str
+    tract_start: int
+    tract_end: int
+
+
+@dataclass(frozen=True, slots=True)
+class HaplotypePattern:
+    """Local aggregate haplotype pattern within a phased telomere family."""
+
+    pattern_id: str
+    read_count: int
+    alleles: str
+
+
+@dataclass(frozen=True, slots=True)
+class EndEvidenceFamily:
+    """Phased telomere family record keyed by cluster_id."""
+
+    cluster_id: str
+    members: tuple[EndEvidenceMember, ...]
+    haplotype_patterns: tuple[HaplotypePattern, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ConsensusPlacement:
+    """Oriented placement of a family consensus on a primary or raw graph unitig."""
+
+    cluster_id: str
+    source: str
+    record: str
+    strand: str
+    start: int
+    end: int
+    target_bp: int
+    consensus_start: int
+    consensus_end: int
+    matches: int
+    alignment_bp: int
+    mapq: int
+    family_molecules: int
+    patterns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PhasedEndEvidence:
+    """Validated version-1 phased telomere end-evidence payload."""
+
+    version: int
+    coordinate_system: str
+    graph_sha256: Mapping[str, str]
+    families: tuple[EndEvidenceFamily, ...]
+    consensus_placements: tuple[ConsensusPlacement, ...]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(DEFAULT_BUFFER_SIZE), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_end_evidence(path: Path, primary_gfa: Path | None = None) -> PhasedEndEvidence:
+    """Load and validate a version-1 phased end-evidence JSON file."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, Mapping):
+        raise ValueError("End-evidence JSON must be an object")
+    version = data.get("version")
+    if isinstance(version, bool) or version != 1:
+        raise ValueError(f"Unsupported end-evidence version: {version!r}")
+    coord_sys = data.get("coordinate_system")
+    if coord_sys != "zero-based half-open on forward sequences":
+        raise ValueError(f"Unsupported end-evidence coordinate_system: {coord_sys!r}")
+    graph_sha256 = data.get("graph_sha256")
+    if not isinstance(graph_sha256, Mapping) or not isinstance(graph_sha256.get("primary"), str):
+        raise ValueError("End-evidence JSON must include graph_sha256.primary")
+    if primary_gfa is not None:
+        actual_sha = _sha256(primary_gfa)
+        if graph_sha256["primary"] != actual_sha:
+            raise ValueError(
+                f"Primary GFA SHA-256 mismatch: end-evidence expects {graph_sha256['primary']}, "
+                f"but {primary_gfa} has {actual_sha}"
+            )
+
+    families: list[EndEvidenceFamily] = []
+    for fam in data.get("families", []):
+        members = tuple(
+            EndEvidenceMember(
+                end_id=str(m["end_id"]),
+                molecule_id=str(m["molecule_id"]),
+                read_end=str(m["read_end"]),
+                tract_start=int(m["tract_start"]),
+                tract_end=int(m["tract_end"]),
+            )
+            for m in fam.get("members", [])
+        )
+        patterns = tuple(
+            HaplotypePattern(
+                pattern_id=str(p["pattern_id"]),
+                read_count=int(p["read_count"]),
+                alleles=str(p["alleles"]),
+            )
+            for p in fam.get("haplotype_patterns", [])
+        )
+        families.append(
+            EndEvidenceFamily(
+                cluster_id=str(fam["cluster_id"]),
+                members=members,
+                haplotype_patterns=patterns,
+            )
+        )
+
+    placements: list[ConsensusPlacement] = []
+    for pl in data.get("consensus_placements", []):
+        source = str(pl["source"])
+        if source not in ("primary", "raw"):
+            raise ValueError(f"Invalid consensus_placement source: {source!r}")
+        strand = str(pl["strand"])
+        if strand not in ("+", "-"):
+            raise ValueError(f"Invalid consensus_placement strand: {strand!r}")
+        raw_patterns = pl.get("patterns", "")
+        pat_tuple = tuple(p.strip() for p in str(raw_patterns).split(",") if p.strip())
+        placements.append(
+            ConsensusPlacement(
+                cluster_id=str(pl["cluster_id"]),
+                source=source,
+                record=str(pl["record"]),
+                strand=strand,
+                start=int(pl["start"]),
+                end=int(pl["end"]),
+                target_bp=int(pl["target_bp"]),
+                consensus_start=int(pl["consensus_start"]),
+                consensus_end=int(pl["consensus_end"]),
+                matches=int(pl["matches"]),
+                alignment_bp=int(pl["alignment_bp"]),
+                mapq=int(pl["mapq"]),
+                family_molecules=int(pl["family_molecules"]),
+                patterns=pat_tuple,
+            )
+        )
+
+    return PhasedEndEvidence(
+        version=version,
+        coordinate_system=coord_sys,
+        graph_sha256=dict(graph_sha256),
+        families=tuple(families),
+        consensus_placements=tuple(placements),
+    )
 
 
 @dataclass(slots=True)
@@ -171,6 +332,7 @@ def build_end_catalog(
     core_coverage: float,
     paf_hits: Sequence[PafHit] | None = None,
     policy: Policy = DEFAULT_POLICY,
+    end_evidence: PhasedEndEvidence | None = None,
 ) -> tuple[list[EndCatalogEntry], list[AmbiguityGroup]]:
     """Assess every end of the nominated chromosome objects.
 
@@ -221,10 +383,27 @@ def build_end_catalog(
         hits_by_read.setdefault(hit.qname, []).append(hit)
     engine = OntBridgingEngine(graph, ledger_map, policy)
 
+    families_by_id: dict[str, EndEvidenceFamily] = {}
+    placements_by_record: dict[str, list[ConsensusPlacement]] = {}
+    records_by_cluster: dict[str, set[str]] = {}
+    clusters_by_molecule: dict[str, set[str]] = {}
+    if end_evidence is not None:
+        families_by_id = {f.cluster_id: f for f in end_evidence.families}
+        for fam in end_evidence.families:
+            for member in fam.members:
+                clusters_by_molecule.setdefault(member.molecule_id, set()).add(fam.cluster_id)
+        for pl in end_evidence.consensus_placements:
+            if pl.source != "primary":
+                continue
+            placements_by_record.setdefault(pl.record, []).append(pl)
+            records_by_cluster.setdefault(pl.cluster_id, set()).add(pl.record)
+
     for entry in entries:
         if entry.horizon_reason is None:
             continue
         evidence: dict[str, list[str]] = {}
+        candidate_families: dict[str, set[str]] = {}
+        candidate_mols: dict[str, set[str]] = {}
         block: set[str] = set(entry.block_unitigs)
 
         # Graph: everything reachable outward without re-entering a certain path or the core.
@@ -241,12 +420,14 @@ def build_end_catalog(
                 if has_telomere(sym):
                     evidence.setdefault(sym, []).append("graph")
 
+        anchored: list[tuple[PafHit, int, int]] = []
         if hits_by_target:
             for name, tel in sorted(pool.items()):
                 subset = hits_by_target.get(entry.horizon_port[:-1], []) + hits_by_target.get(name, [])
-                n = len(engine.collect_spanning_reads(subset, entry.horizon_port, tel))
-                if n:
-                    evidence.setdefault(tel, []).append(f"reads:{n}")
+                spanning = engine.collect_spanning_reads(subset, entry.horizon_port, tel)
+                if spanning:
+                    evidence.setdefault(tel, []).append(f"reads:{len(spanning)}")
+                    candidate_mols.setdefault(tel, set()).update(sr.qname for sr in spanning)
             anchored = _horizon_reads(entry, hits_by_target, policy)
             anchor_reads: dict[str, set[str]] = {}
             for hit, outward_from, outward_sign in anchored:
@@ -257,6 +438,7 @@ def build_end_catalog(
                         anchor_reads.setdefault(pool[other.tname], set()).add(hit.qname)
             for tel, reads in sorted(anchor_reads.items()):
                 evidence.setdefault(tel, []).append(f"read-anchor:{len(reads)}")
+                candidate_mols.setdefault(tel, set()).update(reads)
 
         oriented = _oriented_sequence(graph, entry.horizon_port)
         tip = tip_satellite_kmer(oriented, window, policy)
@@ -282,7 +464,39 @@ def build_end_catalog(
                 if has_rdna(name):
                     evidence.setdefault(tel, []).append("rdna")
 
-        entry.candidates = [CandidateEnding(p, tuple(ev)) for p, ev in sorted(evidence.items())]
+        if end_evidence is not None:
+            entry_clusters: set[str] = set()
+            for port_sym in entry.certain_ports:
+                for pl in placements_by_record.get(port_sym[:-1], ()):
+                    entry_clusters.add(pl.cluster_id)
+            for hit, _, _ in anchored:
+                entry_clusters.update(clusters_by_molecule.get(hit.qname, ()))
+
+            for cid in sorted(entry_clusters):
+                for name, tel in sorted(pool.items()):
+                    if name in records_by_cluster.get(cid, ()):
+                        evidence.setdefault(tel, [])
+
+            for tel in list(evidence):
+                for pl in placements_by_record.get(tel[:-1], ()):
+                    cid = pl.cluster_id
+                    ev_tag = f"family:{cid}"
+                    if ev_tag not in evidence[tel]:
+                        evidence[tel].append(ev_tag)
+                    candidate_families.setdefault(tel, set()).add(cid)
+                    fam = families_by_id.get(cid)
+                    if fam is not None:
+                        candidate_mols.setdefault(tel, set()).update(m.molecule_id for m in fam.members)
+
+        entry.candidates = [
+            CandidateEnding(
+                p,
+                tuple(ev),
+                family_ids=tuple(sorted(candidate_families.get(p, ()))),
+                molecule_ids=tuple(sorted(candidate_mols.get(p, ()))),
+            )
+            for p, ev in sorted(evidence.items())
+        ]
         entry.block_unitigs = tuple(sorted(block - {c.port[:-1] for c in entry.candidates}))
 
     groups = _group(entries, pool)
@@ -445,6 +659,8 @@ END_CATALOG_COLUMNS = (
     "tip_repeat_period_bp",
     "reads_at_horizon",
     "max_read_overhang_bp",
+    "candidate_families",
+    "candidate_molecules",
 )
 
 GROUP_COLUMNS = ("group_id", "n_ends", "ends", "candidate_endings", "shared_unitigs", "fusion_interpretations")
@@ -484,6 +700,12 @@ def emit_end_catalog(entries: Sequence[EndCatalogEntry], groups: Sequence[Ambigu
                     _cell(e.tip_repeat_period_bp),
                     _cell(e.reads_at_horizon),
                     _cell(e.max_read_overhang_bp),
+                    ";".join(",".join(c.family_ids) for c in e.candidates)
+                    if any(c.family_ids for c in e.candidates)
+                    else "",
+                    ";".join(",".join(c.molecule_ids) for c in e.candidates)
+                    if any(c.molecule_ids for c in e.candidates)
+                    else "",
                 ]
             )
     with (out_dir / "ambiguity_groups.tsv").open("w", newline="") as fh:
@@ -505,9 +727,15 @@ def emit_end_catalog(entries: Sequence[EndCatalogEntry], groups: Sequence[Ambigu
 __all__ = [
     "AmbiguityGroup",
     "CandidateEnding",
+    "ConsensusPlacement",
     "EndCatalogEntry",
     "EndCategory",
+    "EndEvidenceFamily",
+    "EndEvidenceMember",
+    "HaplotypePattern",
     "HorizonReason",
+    "PhasedEndEvidence",
     "build_end_catalog",
     "emit_end_catalog",
+    "load_end_evidence",
 ]

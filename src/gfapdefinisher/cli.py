@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from gfapdefinisher.annotations import aggregate_node_annotations
-from gfapdefinisher.catalog import build_end_catalog, emit_end_catalog
+from gfapdefinisher.catalog import build_end_catalog, emit_end_catalog, load_end_evidence
 from gfapdefinisher.cigar import parse_dovetail_overlap_len
 from gfapdefinisher.classifier import _lookup_evidence, compute_core_coverage
 from gfapdefinisher.curation import curate
@@ -199,6 +199,13 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         dest="summary",
         help="Optional path to emit break-site summary TSV (default: <out_dir>/summary.tsv)",
+    )
+    finish_parser.add_argument(
+        "--end-evidence",
+        type=Path,
+        default=None,
+        dest="end_evidence",
+        help="Optional path to phased telomere end-evidence JSON",
     )
 
     curate_parser = subparsers.add_parser("curate", help="Reproduce a reviewed chromosome assembly from a recipe")
@@ -1573,6 +1580,11 @@ def run_report(args: argparse.Namespace) -> None:
 
 def run_finish(args: argparse.Namespace) -> None:
     """Execute the finish subcommand."""
+    end_evidence = (
+        load_end_evidence(args.end_evidence, primary_gfa=args.gfa)
+        if getattr(args, "end_evidence", None) is not None
+        else None
+    )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     graph = load_gfa(args.gfa, load_sequences=True)
     annotations = aggregate_node_annotations(
@@ -1789,6 +1801,7 @@ def run_finish(args: argparse.Namespace) -> None:
             orphan_caps=orphan_caps,
             core_coverage=core_coverage,
             paf_hits=list(parse_paf_hits(args.ont_paf)) if args.ont_paf is not None else None,
+            end_evidence=end_evidence,
         )
         emit_end_catalog(catalog_entries, catalog_groups, args.out_dir)
 
